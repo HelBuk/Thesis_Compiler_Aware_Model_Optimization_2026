@@ -1,0 +1,330 @@
+\documentclass[12pt,a4paper]{report}
+
+% ======= Packages =======
+\usepackage[norwegian, english]{babel}
+\usepackage{indentfirst}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{setspace}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage[hidelinks]{hyperref}
+\usepackage{tocloft}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{fancyhdr}
+\usepackage{amsmath}
+\usepackage{subcaption}
+\usepackage{url}
+\usepackage{tabularx}
+\usepackage{amsfonts}
+\usepackage{nameref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{csquotes}
+\usepackage{amssymb}
+\lstdefinelanguage{json}{
+  morestring=[b]",
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  stringstyle=\color{blue!60!black},
+}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  showstringspaces=false,
+  numbers=left,
+  numberstyle=\tiny,
+}
+
+\lstdefinelanguage{bash}{
+  keywords={yolo,export},
+  sensitive=true,
+  alsoletter={-},
+  morecomment=[l]{\#},
+  morestring=[b]"
+}
+\lstset{
+  language=bash,
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  showstringspaces=false,
+  columns=fullflexible,
+  numbersep=6pt,
+  frame=single
+}
+
+
+\newcommand{\TP}{\mathrm{TP}}
+\newcommand{\FP}{\mathrm{FP}}
+\newcommand{\FN}{\mathrm{FN}}
+\newcommand{\IoU}{\mathrm{IoU}}
+\newcommand{\AP}{\mathrm{AP}}
+\newcommand{\mAP}{\mathrm{mAP}}
+\newcommand{\Precision}{\mathrm{P}}
+\newcommand{\Recall}{\mathrm{R}}
+
+% ======= Basic Formatting =======
+\onehalfspacing
+\setlength{\parskip}{6pt}
+%\setlength{\parindent}{0pt}
+\setlength{\parindent}{2em}
+
+% TOC spacing a bit tighter
+\setlength{\cftbeforechapskip}{6pt}
+\setlength{\cftbeforesecskip}{2pt}
+
+% Chapter title style (compact and clean)
+\titleformat{\chapter}[block]{\Huge\bfseries}{\thechapter}{1em}{}
+\titlespacing*{\chapter}{0pt}{-6pt}{12pt}
+
+% Header/Footer
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\leftmark}
+\rfoot{\thepage}
+
+% ======= Title Page Variables (edit these) =======
+\newcommand{\ThesisTitleEng}{Compiler-Aware Model Optimization for Edge AI Accelerators}
+\newcommand{\ThesisTitleNor}{Kompilatorbevisst modelloptimalisering for Edge AI-akseleratorer}
+\newcommand{\AuthorName}{Bukueva Elena}
+\newcommand{\SupervisorName}{Professor Geir Mathisen, Dept. of Eng. Cybernetics}
+
+\newcommand{\FacultyName}{Faculty of Information Technology and Electrical Engineering}
+\newcommand{\DepartmentName}{Department of Engineering Cybernetics}
+\newcommand{\InstitutionName}{Norwegian University of Science and Technology (NTNU)}
+\newcommand{\LocationDate}{Trondheim, \today}
+\newcommand{\ThesisType}{Master's Thesis}
+\newcommand{\ReportSubtitle}{}
+\newcommand{\CourseCode}{TTK4900 Master's Thesis}
+\newcommand{\ThesisDescription}{
+}
+\newcommand{\TaskOne}{Bla}
+\newcommand{\TaskTwo}{Bla}
+\newcommand{\StartDate}{15. January, 2026}
+\newcommand{\DueDate}{08. June, 2026}
+\newcommand{\ThesisLocation}{Department of Engineering Cybernetics}
+
+% ======= Document =======
+\begin{document}
+
+
+\hypersetup{pageanchor=false} % avoid duplicate page anchors in front matter
+
+% ======= Front Page (mirrors “NTNU’s standard front page” placeholder) =======
+\begin{titlepage}
+    \thispagestyle{empty}
+
+    \noindent
+    \begin{minipage}[t]{0.7\textwidth}
+        \vspace{0pt} % top-align this minipage
+        NTNU\\
+        Norwegian University of Science and Technology (NTNU)\\
+        Faculty of Information Technology and Electrical Engineering\\
+        Department of Engineering Cybernetics
+    \end{minipage}%
+    \hfill
+    \begin{minipage}[t]{0.2\textwidth}
+        \vspace{0pt} % top-align this minipage
+        \raggedleft
+        \includegraphics[width=1.8cm]{pics/NTNU_hovedlogo_farger_hoyde.png}
+    \end{minipage}
+
+    \vspace{1cm}
+
+    \begin{center}
+        {\LARGE \textbf{Master's Thesis}\par}
+    \end{center}
+
+    \noindent
+    \begin{tabular}{@{}p{4.5cm}p{12cm}@{}}
+        \textbf{Candidate:}              & \textbf{\AuthorName} \\[0.2cm]
+        \textbf{Course:}                & \textbf{\CourseCode} \\[0.4cm]
+        \textbf{Title (English):}   & \textbf{\ThesisTitleEng} \\[0.2cm]
+        \textbf{Title (Norwegian):} & \textbf{\ThesisTitleNor} \\[0.6cm]
+        \textbf{Thesis description:}     & \ThesisDescription \\[0.9cm]
+        \textbf{The tasks will be:}      &
+          \begin{minipage}[t]{10cm}
+            \begin{enumerate}
+              \item \TaskOne
+              \item \TaskTwo \\[0.5cm]
+            \end{enumerate}
+          \end{minipage} \\
+        \textbf{Start date:}             & \StartDate \\[0.2cm]
+        \textbf{Due date:}               & \DueDate \\[0.2cm]
+        \textbf{Thesis performed at:}    & \ThesisLocation \\[0.2cm]
+        \textbf{Supervisor:}             & \SupervisorName \\
+    \end{tabular}
+
+    \vfill
+%
+%    \begin{center}
+%        \includegraphics[width=0.25\textwidth]{ntnu_bredde_eng.png}\\[0.5cm]
+%    \end{center}
+\end{titlepage}
+\cleardoublepage
+
+
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+
+\begin{otherlanguage}{norwegian}
+\chapter*{Sammendrag}
+\addcontentsline{toc}{chapter}{Sammendrag}
+
+\end{otherlanguage}
+
+\cleardoublepage
+% ======= Table of Contents =======
+\begin{otherlanguage}{english}
+    \tableofcontents
+    \cleardoublepage
+\end{otherlanguage}
+
+% ======= Abbreviations (Brukte forkortelser) =======
+\chapter*{Abbreviations}
+\addcontentsline{toc}{chapter}{Abbreviations}
+\begin{longtable}{@{}p{3cm}p{10cm}@{}}
+
+\end{longtable}
+\cleardoublepage
+\cleardoublepage
+\hypersetup{pageanchor=true}
+
+% ======= 1 Introduction (Innledning) =======
+\chapter{Introduction}
+
+
+
+\section{Motivation}
+
+
+\section{Limitations}
+
+
+\section{Contributions}
+
+    Within these limitations, the main contributions of this thesis are:
+
+    \begin{itemize}
+        \item \textbf{:}
+
+        \item \textbf{:}
+
+        \item \textbf{:}
+
+        \item \textbf{:}
+        \item \textbf{:}
+    \end{itemize}
+
+\section{Thesis Structure}
+The remainder of this report is organised as follows:
+\begin{itemize}
+    \item \textbf{Chapter 2}
+    \item \textbf{Chapter 3}
+    \item \textbf{Chapter 4}
+    \item \textbf{Chapter 5}
+    \item \textbf{Chapter 6}
+    \item \textbf{Chapter 7}
+    \item \textbf{Chapter 8}
+    \item \textbf{Chapter 9}
+    \item \textbf{Chapter 10}
+    \item \textbf{Appendix A}
+    \item \textbf{Appendix B}
+
+\end{itemize}
+
+% ======= 2 Literature Study (Litteraturstudie) =======
+\chapter{Literature Study}
+\noindent
+\section{Introduction to Object Detection with Deep Learning Models}
+
+Artificial Intelligence (AI) is a broad term covering a set of algorithms and operations on
+matrices and vectors that enable computers to perform a big variety of tasks in language
+understanding and translation, object recognition, robotic performance etc.
+We will consider only models performing object detection tasks, mostly having CNN
+\cite{krizhevsky2012imagenet}
+and Transformer \cite{vaswani2017attention} architectures.
+\noindent
+\section{Introduction to Deep Learning Model Optimization }
+
+\section{Hailo Compiler}
+
+% ======= Theory =======
+\chapter{Theory}
+\label{chap:literature}
+
+\chapter{Methodology}
+\noindent
+
+
+% ======= 4 Proposed Solution / Design (Vårt forslag til løsning / design) =======
+\chapter{Proposed Solution / Design}
+\noindent
+
+\section{Dataset and Annotation }
+
+% ======= 6 Testing / Results (Vår uttesting / Resultater) =======
+\chapter{Testing and Results}
+\noindent
+% Short intro
+\section{Experimental Setup}
+
+    \subsection{Performance overview}
+    \subsection{Prediction Examples}
+    \subsection{Hailo impact}
+
+% Tables, figures; explain what the numbers mean.
+
+% ======= 7 Discussion (Diskusjon) =======
+\chapter{Discussion}
+% How to interpret results? Do they match expectations/specifications (from Functional Specification)?
+% Causes of deviations? What could be done differently? What should be added?
+% This leads into Future Work.
+    \section{Discussion Points}
+
+        \subsection{Quantization and accelerator deployment}
+        \subsection{Unexplored hardware configurations and deployment possibilities}
+
+
+% ======= 8 Conclusion (Konklusjon) =======
+\chapter{Conclusion}
+
+
+% ======= 9 Future Work (Videre arbeid) =======
+\chapter{Future Work}
+
+
+\chapter{Description of Use of Artificial Intelligence}
+
+    In working on this specialization project, I have used
+    artificial intelligence (AI) tools in the following limited
+    ways. I used ChatGPT (OpenAI) to assist with idea development,
+    clarifying concepts, and improving the structure and language of the text (for example,
+    by suggesting alternative formulations, checking grammar, and helping to simplify explanations).
+    AI was also used to get help with technical formatting issues in \LaTeX{} and to debug small
+    code examples by explaining error messages and proposing corrections.
+
+    All scientific content, including the problem formulation, choice of methods, implementation,
+    experiments, analysis, and conclusions, has been developed, reviewed, and academically assessed
+    by me. AI tools were not used to generate entire sections of the report, to perform literature
+    searches independently, or to answer the assignment in its entirety. I have not uploaded
+    sensitive or confidential information to the AI tools. I am solely responsible for the
+    academic content of this assignment.
+
+% ======= References (Referanseliste) =======
+
+\bibliographystyle{ieeetr}  % or plain, unsrt, abbrv, IEEEtran, etc.
+\bibliography{refs}
+
+\cleardoublepage
+
+% ======= Appendices (Vedlegg A/B) =======
+\appendix
+
+\chapter{Demonstration (Appendix A)}
+
+\end{document}
