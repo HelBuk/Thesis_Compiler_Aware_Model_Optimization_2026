@@ -251,7 +251,430 @@ and Transformer \cite{vaswani2017attention} architectures.
 \noindent
 \section{Introduction to Deep Learning Model Optimization }
 
+\section{Yolo8 Model Architecture}
+
+Ultralytics YOLOv8 model follows the classic Backbone -> Neck -> Head layout
+with some improvements from other YOLO architectures.
+
+The key role of the Backbone is feature extraction. It converts the image into
+hierarchical feature maps (from low to high level).
+
+Its key components are:
+\begin{itemize}
+    \item Conv + BN + SiLU
+    \item C2f blocks (main innovation)
+    \item SPPF
+\end{itemize}
+
+The core idea of the C2f (Cross-Stage Partial with full feature fusion)
+
+
+A bottleneck is a small stack of layers that:
+\begin{enumerate}
+    \item Compresses channels(make tensor narrower)
+    \item Does some work (spatial mixing)
+\item Expands channels back
+\end{enumerate}
+It helps to drop redundant features, while preserving important.
+
+SPPF = Spatial Pyramid Pooling – Fast
+
+It’s a context aggregation block used in YOLO (v5 → v8)
+
+\section{Performance Challenges in Machine Learning Deployment}
+
+Metrics:
+    \begin{itemize}
+        \item \textbf{Latency}: The time needed to process one inference request (etc. picture, text query);
+        \item \textbf{Throughput}: The number of inference requests processed per unit of time
+            (e.g., inferences per second).
+        \item \textbf{Power Consumption}: The energy required to perform inference
+        \item \textbf{Memory Requirements}: The amount of RAM and storage required for the model weights and
+            intermediate activations
+    \end{itemize}
+
+With the growing interest in on-device deployment, a clear gap has emerged between the training and inference
+stages of machine learning models. While large models are typically trained in data centers using powerful GPUs,
+inference is performed across a wide variety of deployment environments. Depending on the application, inference
+may be subject to strict constraints on memory, latency, and power consumption, and must run on heterogeneous
+hardware platforms such as CPUs, GPUs, TPUs, NPUs, or FPGAs. Each of these hardware architectures differs in
+structure, instruction sets, memory hierarchies, and supported data types. As a result, model performance depends
+heavily on how well it is adapted to the target hardware. \\
+
+Machine learning models are usually developed in high-level Python frameworks such as TensorFlow or PyTorch.
+These frameworks often use dynamic execution (for example, PyTorch’s eager mode), where:
+
+\begin{itemize}
+    \item Operations are executed immediately, line by line
+    \item Control flow (loops, conditionals) is resolved at runtime
+    \item Tensors, layers, and operations are created and destroyed on the fly
+\end{itemize}
+
+That same flexibility comes at a cost:
+
+\begin{itemize}
+    \item Python interpreter overhead
+    Every operation goes through the Python interpreter, which is relatively slow.
+    \item Interpreter locks (e.g., the GIL)
+    Python’s Global Interpreter Lock can limit parallel execution.
+    \item Object management
+    Tensors and operators are Python objects that need to be created, tracked, and destroyed.
+    \item Framework dispatch logic
+    Each operation requires the framework to decide which kernel to run, on which device,
+    and how to manage memory.
+\end{itemize}
+Individually, these costs are small — but in deep neural networks with thousands of operations, they add up. \\
+
+In deployment, models are usually not run inside Python at all. \\
+
+Instead, they are executed by:
+\begin{itemize}
+    \item C++-based runtimes
+    \item Hardware-specific inference engines
+    \item Precompiled binaries on accelerators (GPU, NPU, TPU, FPGA)
+\end{itemize}
+
+These runtimes:
+\begin{itemize}
+    \item Execute pre-compiled computation graphs
+    \item Call highly optimized kernels directly
+    \item Avoid Python entirely during inference
+\end{itemize}
+As a result, they remove most of the overhead associated with Python and dynamic execution. \\
+
+Simply moving a model out of Python does not automatically guarantee speedups. \\
+
+To fully benefit, the model must be:
+
+\begin{itemize}
+    \item Compiled into a static or semi-static graph
+    \item Optimized (operator fusion, memory planning, quantization, layout changes)
+    \item Adapted to the target hardware’s instruction set and memory hierarchy
+\end{itemize}
+Without this careful compilation step, the deployed runtime may still execute inefficient kernels or suboptimal
+data flows. \\
+
+Libraries like cuDNN and oneDNN are heavily optimized for throughput-oriented workloads, which historically means
+large batch sizes.
+Large batches increase data reuse (e.g., weights reused across many samples), which improves cache efficiency
+and amortizes memory access costs.
+With many parallel threads and large workloads, GPUs/CPUs can overlap memory accesses with computation,
+effectively hiding memory latency.
+Many optimized kernels (e.g., GEMM-based convolutions) assume enough work to justify complex tiling,
+blocking, and scheduling strategies.
+These libraries were primarily developed to support large-scale training in data centers, where batch sizes
+of hundreds or thousands are common.
+So the default optimization targets of these libraries align better with large batches than with
+batch-1 inference, which is preferable for Real-time setups
+
+Frameworks like PyTorch (in eager mode) execute operation by operation, where each op is dispatched independently;
+intermediate tensors are materialized in memory; the framework has limited visibility beyond the current operator.
+Compilers, in contrast, operate on a whole computation graph.
+All operators and data dependencies are visible; control flow and tensor lifetimes can be analyzed globally.
+Compilers merge multiple operations into a single kernel to reduce memory traffic and overhead. \\
+
+With a full graph, compilers can:
+
+\begin{itemize}
+    \item Remove redundant operations
+    \item Fold constants
+    \item Reorder associative/commutative ops
+    \item Eliminate dead branches or unused tensors
+\end{itemize}
+
+Furthermore, different hardware prefers different layouts, GPUs often prefer NCHW, Some accelerators prefer NHWC or
+blocked layouts, so compilers can choose a single optimal layout, insert minimal layout conversions,
+avoid unnecessary transposes.
+
+
+\section{DNNs Complier Workflow}
+
+An ML model compiler takes a \textit{high-level model} (PyTorch / TensorFlow / ONNX)
+and turns it into efficient executable code for a \textit{specific target}
+(CPU, GPU, NPU, FPGA, ASIC like Hailo-8). \\
+
+Stages:
+    \begin{itemize}
+        \item Stage 1: Frontend (Model ingestion)
+            \begin{itemize}
+                \item Input: PyTorch, TensorFlow, JAX \\
+                \item Exported formats: ONNX, TorchScript, StableHLO \\
+                \item Goal:
+                    \begin{itemize}
+                        \item Convert framework-specific graphs into a compiler IR
+                        \item Normalize control flow, ops, shapes
+                    \end{itemize}
+                \item Key tasks:
+                    \begin{itemize}
+                        \item Canonicalize ops (e.g. many conv variants → one canonical conv)
+                    \end{itemize}
+            \end{itemize}
+        \item Stage 2: High-level graph optimizations (framework-agnostic)
+        \item Stage 3: Lowering to tensor programs (IR → loops)
+        \item Stage 4: Hardware-specific optimization \& scheduling
+        \item Stage 5: Code generation (backend)
+        \item Stage 6: Runtime \& execution
+    \end{itemize}
+
+
+    A typical ML execution flow involves translating a model defined in a high-level framework
+    (like TensorFlow, PyTorch, or JAX) into a format suitable for high-performance execution on target hardware.
+    This translation process is orchestrated by the ML compiler and runtime stack (see Fig. ~\ref{fig:example})
+
+    \begin{figure}[t]
+        \centering
+        \includegraphics[width=0.8\linewidth]{pics/tmp_compiler_structure.png}
+        \caption{Flow of an ML model from definition through compilation and runtime execution on hardware.}
+        \label{fig:compflow}
+    \end{figure}
+
+    The Compiler's primary responsibility is to convert high-level representation of a DNN model
+    to an optimized lower-level executable by the target hardware.
+
+    Main stages:
+    \begin{itemize}
+        \item Conversion to an intermediate representation (IR);
+        \item Graph level optimization: operation fusion and simplification, memory planning;
+        \item Tensor/Loop-Level IR: tiling, vectorization, memory optimization;
+        \item Code generation: intruction selection, register allocation, target-specific code emission;
+    \end{itemize}
+
+    ML runtime manages the dynamic aspects of model execution such as execution orchestration
+    (loading compiled model artifact and managing its execution), memory management
+    (allocation of memory for intermediate tensors), interfacing with hardware devices, task dispatching,
+    and library integration.
+
+    Popular compilers and runtime stacks:
+        \begin{itemize}
+            \item TensorFlow/XLA (Accelerated Linear Algebra): compiles Tensorflow graphs via HLO IR;
+            \item PyTorch 2.x (TorchDynamo, AOTAutograd, Inductor): captures Python  bytecode
+                into FX graph representation;
+            \item Apache TVM: stack for optimizing models for CPU, GPU, microcontrollers, FPGAs and ASICS.
+            \item MLIR-based Stacks (e.g., IREE, TensorFlow MLIR)
+            \item ONNX Runtime
+        \end{itemize}
+
+\section{Performance Bottlenecks in ML Inference}
+
+A workload is compute-bound if increasing the raw processing power
+(e.g., higher clock speed, more compute units) directly leads to a proportional decrease
+in execution time, assuming memory and latency are not limiting factors.
+
+Inference for complex neural networks requires millions of multiply-accumulate (MAC) operations.
+If hardware is not fully utilized and code not map vectors/tensors effectively, the processing
+bottlenecks are created.
+
+Many ML operations are memory-bound.
+This means the execution time is dominated by the time spent
+transferring data between memory levels (e.g., DRAM to caches, cache levels, host-to-device
+memory) rather than the computation itself.
+
+    \begin{figure}[t]
+        \centering
+        \includegraphics[width=0.8\linewidth]{pics/tmp_roofline_model.png}
+        \caption{A Roofline model illustrating performance limits based on compute capability
+            (horizontal line) and memory bandwidth (sloped line) versus the arithmetic intensity
+            of operations (dots). Operations below the "roof" are limited by either memory
+            bandwidth or compute peak.}
+        \label{fig:roofline}
+    \end{figure}
+
+Latency bounded operations: single-batch inference, overhear for dispatching operations,
+pipeline stalls.
+
+These strategies reduce dispatch overhead for frequently executed execution paths:
+
+\begin{itemize}
+    \item \textbf{Ahead-of-Time (AOT):} Compile the entire model before execution,
+    as in traditional C/C++ workflows and many edge deployment scenarios.
+    \item \textbf{Just-In-Time (JIT):} Compile code or computation graphs at runtime,
+    typically upon first execution, leveraging runtime information such as tensor
+    shapes, data types, and target hardware.
+\end{itemize}
+
+
+
 \section{Hailo Compiler}
+
+
+\section{Methods for Pruning Deep Neural Network}
+
+    In a survey ~\cite{vadera2022methods} authors categorized over 150 studies of pruning
+    neural networks.
+    They chose 8 categories:
+        \begin{itemize}
+            \item \textbf{Sensitivity analysis methods (loss / gradient–aware pruning)}. These methods are
+                valuable as they prune what matters the most for the task and normally provide the
+                highest accuracy-compression trade-off (50-90\% accuracy with 1-2\% accuracy drop).\\
+                Important works in this category:
+                \begin{itemize}
+                    \item Taylor Pruning ~\cite{molchanov2016pruning};
+                    \item SNIP (Single-shot Network Pruning) ~\cite{lee2018snip};
+                    \item GraSP (Gradient Signal Preservation) ~\cite{wang2020picking};
+                    \item Movement Pruning ~\cite{gordon2018morphnet}
+                \end{itemize}
+            Although sensitivity-based pruning methods often achieve high unstructured sparsity
+            (50–90\%), such sparsity is difficult to exploit on general-purpose hardware due to
+            irregular memory access and limited compiler support, resulting in limited real-world
+            speedups. Consequently, structured pruning methods remain more practical for deployment
+            across diverse hardware platforms.
+            \item \textbf{Knowledge distillation methods (teacher–student compression)}.
+                Knowledge Distillation (KD) is a model compression paradigm in which a large, high-capacity
+                model (Teacher) transfers knowledge to a smaller, more efficient model (Student).
+                Instead of training the student solely on hard labels, KD trains it to match the teacher’s
+                output behavior, typically using soft targets (probability distributions or logits).
+                KD differs fundamentally from standard understanding of pruning: pruning removes parameters or
+                structures, but KD transfers behavior. By doing this KD is normally does both: improves
+                the accuracy by few percent compared to the baseline and reduces the number of parameters
+                 up to 120 times.
+                Important works:
+                    \begin{itemize}
+                        \item Knowledge Distillation ~\cite{hinton2015distilling};
+                        \item DCP ~\cite{zhuang2018discrimination};
+                        \item AutoCompress ~\cite{liu2020autocompress};
+                    \end{itemize}
+                Knowledge distillation is a powerful model compression paradigm that transfers predictive
+                behavior from a large teacher model to a compact student model using soft supervision.
+                While classical distillation operates at the output level, recent works extend this idea
+                to intermediate representations and pruning-aware settings. Methods such as
+                discrimination-aware channel pruning integrate auxiliary losses to preserve
+                discriminative power during structured pruning, achieving strong accuracy retention.
+                However, distillation-based approaches are inherently task-dependent, require access
+                to labeled data and a strong teacher, and introduce additional training complexity,
+                limiting their applicability in representation-centric or hardware-agnostic compression scenarios.
+            \item \textbf{Similarity and clustering methods}
+                Similarity and clustering–based pruning methods aim to remove redundant filters or channels rather
+                than filters that are individually “unimportant”. The core assumption is that modern CNNs are
+                over-parameterized and contain filters whose functionality can be approximated or replaced by others
+                with minimal impact on accuracy. Instead of ranking filters solely by magnitude or sensitivity,
+                these methods explicitly model correlation, similarity, or representational overlap among filters.
+                Representative methods include:
+                \begin{itemize}
+                    \item FilterSketch by Lin et al. ~\cite{lin2021filter},
+                    \item Geometric Median Pruning by He et al. ~\cite{he2019filter},
+                    \item ThiNet by Lu et al. ~\cite{luo2017thinet}
+                \end{itemize}
+            \item \textbf{Low rank methods} are mostly theoretically grounded methods, effective in
+                convolution-heavy models; Best methods:
+                Show moderate speedups and faster accuracy degradation at
+                high compression
+            \item \textbf{Magnitude based pruning methods} are considered simple and cheap to implement
+                models, however, they have limited compression and higher accuracy drops, compared to
+                more complex structures; Best examples are L1 filter pruning (Li et al., 2017)
+                ~\cite{li2016pruning}, APoZ (Activation sparsity) ~\cite{hu2016network}.
+
+            \item \textbf{Architectural design methods (NAS, RL search)}.
+                examples: AMC, AutoSlim, Once-for-All (OFA)
+            \item \textbf{Hybrid methods}
+            \item \textbf{Quantization methods}: are not exactly pruning methods.
+                They are usually combined with pruning.
+                Mostly based on a transformation of weights from floating point to integer.
+                Important works: Quantization-Aware Training (QAT) ~\cite{jacob2018quantization},
+                Binary / Ternary Networks (XNOR, TWN) ~\cite{rastegari2016xnor}
+        \end{itemize}
+
+
+    \subsection{Magnitude based pruning}
+
+    Magnitude based Pruning Methods are methods based on removing weights, reducing amount of inbound
+    and outbound filters and nodes based on a measure of magnitude of the effect these filters
+    have on the network.
+    Pruning iteration is repeated until the accuracy is starting to drop.
+    First works in this field were adopting the idea of removing the weight lower than
+    a particular threshold. \\
+
+    Han et al. \cite{han2015learning} carried out several experiments on LeNet-300-100 and Lenet-5,
+    both trained on MNIST dataset, and showed that weight could be reduced by this method by a
+    factor of 12 without significant drops in accuracy.
+    Experiments based on AlexNet and VGG16 trained on ImageNet show the factor of 9 and 12 respectively.
+    Han et al. note that $L_1$ regularization, a technique used in machine learning to prevent overfitting by
+    adding a penalty term to the cost function, is better immediately after pruning, but that $L_2$ norm
+    is better, when the weights of the pruned model are fine-tuned.
+    Experiments also suggest that earlier layers are the most sensitive to pruning and that iterative
+    pruning is better that one-shot pruning (cutting the proportion of weights in one cycle).
+    Another observation from their work is that re-initialization of the weights is not enough
+    to construct and accurate model.
+    It is always better to fine-tune the weights of the pruned model.\\
+
+    Later work by Guo et al. \cite{guo2016dynamic} notes that magnitude pruning can lead to premature removal
+    of weight that can become important given removal of other weights.
+    They propose a method called Dynamic Network Surgery to keep track of pruned weights and restore them
+    if they turn to be important.
+    For AlexNet on ImageNet they reach a factor of 17 without compromising accuracy. \\
+
+    The other method proposed by the Frankle and Carbin (2018) is the lottery ticket
+    hypothesis proposed by ~\cite{frankle2018lottery} and further continued by Frankle et al. (2019) in
+    ~\cite{frankle2019stabilizing}.
+    It formulates a statement, that a trained network contains a subnetwork, which can be trained to be at
+    least as accurate as the original network using no more than the number of epochs used for training the
+    original network.
+    This subnetwork is a so-called winning lottery ticket.
+    Authors test two pruning methods.
+    The first is a magnitude pruning (p\% of the weights), after which the remaining weights are reset to
+    their initial values and are retrained.
+    The second method is using an alternative pruning to iteratively prune $p^{\frac{1}{n}}$ of the weights
+    in $n$ cycles.
+    They experimented on VGG and ResNet and on some bigger models suggested that setting of the weights
+    to those obtained from later iteration of training can be beneficial when high levels
+    of pruning are used (more than 30\%). \\
+
+    Another question arises is if these subnetworks are transferable to other tasks.
+    Hubens et al. (2020) \cite{hubens2020experimental} show that when a network is trained on a larger data set,
+    such as ImageNet, and transferred and fine-tuned for a different task, pruning can result in a smaller
+    network than if it was trained from scratch on the new task.\\
+
+    Despite the experiments proving that some unstructured pruning methods allow a significant drop
+    of weights, not all hardware can process sparse weight matrices and support speed up inference.
+    Pruning of higher granularity structures (filters and channels) or so-called structured pruning
+    helps to avoid this problem, as many existing toolkits support it.
+    Survey ~\cite{vadera2022methods} suggests three main directions of structured pruning research:
+
+    \begin{itemize}
+        \item \textbf{Data dependent channel pruning methods}. A useful channel should respond differently to
+            different inputs. A channel that barely changes for any input is potentially useless. \\
+            Polyak \& Wolf (2015) ~\cite{polyak2015channel} propose two methods - inbound pruning (to reduce the amount of input
+            channels) and \enquote{Reduce and Reuse} pruning (to cut output channels). \\
+            The assessment of input channels is performed by applying the network to a sample of images
+            and measuring the variance in a feature map.
+            These measures are ranked and those below a threshold are pruned. \\
+            The \enquote{Reduce and Reuse} method targets a reduction in the number of output channels
+            produced by a convolutional layer. The underlying assumption is that output
+            channels exhibiting low variation are less informative and can therefore be removed with
+            minimal impact on performance. A key challenge of pruning output channels is that each
+            removed channel is expected as an input by subsequent layers. To address this issue, the
+            Reduce and Reuse method approximates the removed channels as linear combinations of the
+            remaining ones. This approximation is obtained by solving a least-squares optimization
+            problem that minimizes the reconstruction error between the original and approximated
+            outputs. The resulting transformation is implemented as an additional $1 \times 1$
+            convolutional layer, allowing the network to preserve representational capacity
+            while reducing the number of channels.\\
+            The results from their experiments show that the variance based method is
+            more effective than use of random pruning.
+        \item \textbf{Data independent pruning methods}. Relay on the assumption that properties of the
+            filters and output channels, as the proportion of zeros, influence the structure's
+            importance.\\
+            Hu et al. (2016) ~\cite{hu2016network} propose APoZ-based network trimming, a pruning
+            strategy that does not rely on data-driven measures such as feature map variance or
+            entropy. Instead, their method is based on the observation that a large number of zero
+            activations in an output feature map indicates redundancy. Specifically, they introduce
+            the Average Percentage of Zeros (APoZ) as a metric to quantify the weakness of a filter,
+            with higher APoZ values suggesting lower importance. After each pruning step, the network
+            is fine-tuned, and the authors report that fine-tuning yields better results than
+            retraining the network from scratch. When evaluating the proposed method on VGG-16,
+            the authors achieved a compression rate of 2.59 after six pruning iterations,
+            while  2-3\% higher Top-1/Top-5 accuracy than the original VGG-16 model.
+        \item \textbf{Optimization based channel approximation pruning methods} propose to remove
+            some channels and then re-optimize the remaining ones instead of deciding which channels
+            are important, so that the layer behaves the same. \\
+            One representative approach is FilterSketch, proposed by Lin et al. (2021) in ~\cite{lin2021filter}.
+            Experimental results demonstrate that FilterSketch consistently outperforms
+            first-order magnitude-based pruning methods, FilterSketch removes around 41.5\% of
+            the FLOPs and parameters while keeping the top-1 accuracy at 93.19\%. Compared to
+            93.26\% by the pre-trained model, the accuracy drop is negligible on CIFAR-10.
+    \end{itemize}
+
+
+
 
 % ======= Theory =======
 \chapter{Theory}
@@ -264,6 +687,230 @@ and Transformer \cite{vaswani2017attention} architectures.
 % ======= 4 Proposed Solution / Design (Vårt forslag til løsning / design) =======
 \chapter{Proposed Solution / Design}
 \noindent
+
+\section{Roofline model}
+
+The Roofline model is a visual performance model that relates a program’s achievable performance to the hardware’s
+peak compute capability and memory bandwidth. It plots performance (e.g., GFLOP/s) versus arithmetic intensity
+(FLOPs per byte of memory traffic). The model defines two limits: a sloped memory roof determined by peak memory
+bandwidth, and a flat compute roof determined by peak floating-point throughput. Any kernel’s performance is
+bounded by the minimum of these two ceilings. If a point lies on the sloped region, it is memory-bound;
+if it lies on the flat region, it is compute-bound. The Roofline model is widely used to analyze whether a
+workload  is limited by memory movement or computation and to guide optimization efforts.
+
+Optimization strategy of a neural network model is dependent on whether our device limits us in the speed
+of reading/writing to/from memory or the computational speed overall.
+
+\begin{itemize}
+    \item \textbf{If the workload is Memory-Bound:}\\
+        This means performance is limited by memory bandwidth, not by compute units.
+        The arithmetic intensity (FLOPs/byte) is low, so the kernel spends most of
+        its time moving data.
+        The goal is then to either increase arithmetic intensity, or reduce memory traffic.\\
+        \textbf{Optimization strategies:}
+        \begin{itemize}
+            \item Improve data locality: reuse data in cashes (tiling/blocking);
+            Keep tensors in shared memory (GPU);
+            \item Fuse operations to avoid writing intermediate tensors to memory
+            (Conv $\rightarrow$ BatchNorm $\rightarrow$ Silu) $\rightarrow$ (Fused Conv-BN-Activation)
+            \item Reduce Precision (FP32 $\rightarrow$ FP16 $\rightarrow$ INT8 $\rightarrow$ INT4)
+            \item Reduce tensor size: pruning, structured sparsity, channel reduction, smaller input resolution
+            \item Improve memory layout: avoid unnecessary copies, channel-last format (NHWC)
+        \end{itemize}
+    \item \textbf{If the workload is Compute-Bound:}\\
+        This means arithmetic units are saturated. Arithmetic intensity is high enough that bandwidth is no
+        longer limiting. The goal is then to increase compute efficiency. This case is harder, as it requires
+        the work with scheduling, parallelization, kernel optimization and algorithmic improvements. \\
+\end{itemize}
+
+Official Yolov8 parameters are:
+
+\begin{table}[ht]
+\centering
+\caption{Comparison of YOLO models (trained on COCO) at 640×640 resolution. \cite{ultralytics_yolov8_performance}}
+\label{tab:yolov8_models}
+\begin{tabular}{lcccc}
+\toprule
+Model &
+CPU ONNX (ms) & A100 TensorRT (ms) & Params (M) & FLOPs (B) \\
+\midrule
+v8n & 80.4  & 0.99 & 3.2  & 8.7   \\
+v8s & 128.4 & 1.20 & 11.2 & 28.6  \\
+v8m & 234.7 & 1.83 & 25.9 & 78.9  \\
+v8l & 375.2 & 2.39 & 43.7 & 165.2 \\
+v8x & 479.1 & 3.53 & 68.2 & 257.8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+Macbook Pro M3 has declared 150GB/s memory bandwidth ~\cite{apple_memspecs}. Raspberry Pi 5 has up to 17 GB/s of
+memory bandwidth ~\cite{raspberrypi_processors}, NVIDIA's latest software update enhances Jetson Orin Nano's
+AI performance from 40 to 67 AI TOPs and \textit{memory bandwidth from 68 to 102 GB/s}
+~\cite{nvidia_jetson_orin_datasheet}.
+
+Raspberry Pi 5 processor ~\cite{raspberrypi_processors} is a broadcom BCM2712 2.4GHz quad-core 64-bit Arm Cortex-A76
+CPU, with Cryptographic Extension, 512KB per-core L2 caches, and a 2MB shared
+L3 cache
+
+Calculating the statistics of roofline model can be tricky. First, there is a question, how different are
+the documented by manufacturer statistics from the observed ones. Second, how a particular model would be run
+on this hardware, how effective is the use of cache already, would all intermediate vectors be stored
+in the memory or there are some hidden optimizations (fused layers).
+
+\begin{itemize}
+    \item \textbf{Peak computational performance (in GFLOP/s)} is obtained by benchmarking a compute-bound kernel that saturates
+    the floating-point execution units. In practice, this can be achieved using large dense matrix multiplications
+    of size $m \times k$ and $k \times n$, for which the floating-point operation count is given by:
+
+        \begin{equation}
+            \mathrm{FLOPs} = 2 * m * k * n.
+        \end{equation}
+
+    The sustained peak performance is then computed as
+        \begin{equation}
+        P_{\mathrm{peak}} = \frac{\mathrm{FLOPs}}{t_{\mathrm{compute}}},
+        \end{equation}
+    where $t_{\mathrm{compute}}$ denotes the measured execution time.
+    \item \textbf{Peak memory bandwidth (in GB/s)} is determined using a streaming memory
+    benchmark. A large device-to-device copy or STREAM-like triad kernel is executed
+    over a sufficiently large buffer to avoid cache effects. The sustained memory
+    bandwidth is computed as
+    \begin{equation}
+    B_{\mathrm{peak}} = \frac{\mathrm{Bytes\ transferred}}{t_{\mathrm{memory}}}.
+    \end{equation}
+    \item \textbf{Arithmetic intensity (AI)} is defined as the ratio between the number of floating-point
+    operations and the volume of data transferred to and from main memory:
+    \begin{equation}
+    \mathrm{AI} = \frac{\mathrm{FLOPs}}{\mathrm{Bytes}}.
+    \end{equation}
+    Since exact DRAM traffic is generally unavailable without hardware performance counters, a lower-bound
+    estimate of memory traffic is commonly used. For convolutional or linear layers, this lower bound
+    consists of the input tensor, weight parameters, and output tensor:
+    \begin{equation}
+    \mathrm{Bytes}_{\mathrm{LB}} =
+    \mathrm{Bytes}_{\mathrm{input}} +
+    \mathrm{Bytes}_{\mathrm{weights}} +
+    \mathrm{Bytes}_{\mathrm{output}}.
+    \end{equation}
+    This estimate ignores cache reuse and intermediate buffering, thereby providing an upper bound on
+    arithmetic intensity.
+    \item \textbf{The achieved performance of a workload} is computed as
+    \begin{equation}
+    P_{\mathrm{achieved}} = \frac{\mathrm{FLOPs}}{t_{\mathrm{execution}}}.
+    \end{equation}
+    The Roofline bound is then defined as
+    \begin{equation}
+    P_{\mathrm{roof}}(\mathrm{AI}) =
+    \min \left( P_{\mathrm{peak}}, \; B_{\mathrm{peak}} \times \mathrm{AI} \right).
+    \end{equation}
+
+    If $P_{\mathrm{achieved}}$ approaches $B_{\mathrm{peak}} \times \mathrm{AI}$, the workload
+    is memory-bound. Conversely, if it approaches $P_{\mathrm{peak}}$, the workload is compute-bound.
+    This methodology enables systematic classification of performance bottlenecks and guides
+    optimization strategies such as improving data locality, increasing arithmetic intensity, or enhancing
+    computational parallelism.
+\end{itemize}
+
+    Table~\ref{tab:roofline_pi5_layers} summarizes representative per-layer performance
+    characteristics of YOLOv8n executed on the Raspberry Pi 5 CPU. The measured sustained
+    memory bandwidth was 9.14\,GB/s and peak compute throughput was 69.86\,GFLOP/s. The roofline
+    knee occurs at approximately 8.1 FLOPs/byte, separating memory-bound from compute-bound regimes.
+
+    Layers with low arithmetic intensity (AI $\approx$ 7–8) achieve limited performance
+    (3–6\,GFLOP/s), indicating memory-bound behavior. In contrast, deeper convolutional layers
+    with high arithmetic intensity (AI $>$ 70 FLOPs/byte) achieve 40–60\,GFLOP/s, approaching
+    70–85\% of measured peak compute throughput, demonstrating compute-bound execution.
+
+    The detection head's distribution focal loss (DFL) convolution exhibits extremely low
+    arithmetic intensity (0.47 FLOPs/byte) and achieves only 0.4\,GFLOP/s, confirming strong
+    memory limitation.
+
+    Table \ref{tab:roofline_pi5_layers} shows per-layer and overall
+    performance statistics of YOLOv8n on raspberry Pi 5 (CPU, FP32). Although several convolutional layers
+    individually approach peak compute throughput, the full
+    model achieves only 12.36\,GFLOP/s due to additional non-convolutional operations,
+    synchronization overhead, framework dispatch costs, and inter-layer memory traffic. Overall,
+    YOLOv8n inference on Raspberry Pi 5 is predominantly compute-bound for high-intensity
+    convolutional blocks, while early feature extraction and lightweight layers remain memory-bound.
+
+
+    \begin{table}[ht]
+    \centering
+    \caption{Per-layer performance statistics of YOLOv8n on Raspberry Pi 5 (CPU, FP32).}
+    \label{tab:roofline_pi5_layers}
+
+    \begin{tabularx}{\textwidth}{l c c c X}
+    \toprule
+    Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
+    \midrule
+    0.conv              & 23.79 & 7.71   & 3.7  & Memory-bound \\
+    2.cv1.conv          & 8.88  & 7.99   & 5.9  & Memory-bound \\
+    4.m.0.cv2.conv      & 2.82  & 70.42  & 41.8 & Compute-bound \\
+    6.m.1.cv2.conv      & 2.06  & 122.03 & 57.3 & Compute-bound \\
+    18.m.0.cv2.conv     & 1.95  & 122.03 & 60.5 & Compute-bound \\
+    22.cv3.0.1.conv     & 13.86 & 170.41 & 53.2 & Compute-bound \\
+    22.dfl.conv         & 2.42  & 0.47   & 0.4  & Strongly memory-bound \\
+    \midrule
+    Full Model          & 358.35 & 157.76 & 12.36 & Mixed / Overhead-dominated \\
+    \bottomrule
+    \end{tabularx}
+
+    \end{table}
+
+    \begin{figure}[!h]
+        \centering
+        \includegraphics[width=0.8\linewidth]{pics/yolov8n_roofline_cpu_raspberrypi5.png}
+        \caption{Roofline model of YOLOv8n on Raspberry Pi 5 (CPU, FP32).}
+        \label{fig:roofline_pi5}
+    \end{figure}
+
+    \begin{figure}[!h]
+        \centering
+        \includegraphics[width=0.8\linewidth]{pics/yolov8n_roofline_cpu_macbook.png}
+        \caption{Roofline model of YOLOv8n on Macbook Pro M3 (CPU, FP32).}
+        \label{fig:roofline_mac_cpu}
+    \end{figure}
+
+    \begin{figure}[!h]
+        \centering
+        \includegraphics[width=0.8\linewidth]{pics/yolov8n_roofline_mps_macbook.png}
+        \caption{Roofline model of YOLOv8n on Macbook Pro M3 (MPS, FP32).}
+        \label{fig:roofline_mac_mps}
+    \end{figure}
+
+
+    The roofline analysis shows that YOLOv8n on the Raspberry Pi 5 operates predominantly in the compute-bound
+    regime for high–arithmetic-intensity convolutional layers, while a few early and lightweight layers remain
+    memory-bound. Although several individual convolutional blocks approach the measured peak compute throughput
+    ($\approx$70 GFLOP/s), the full model achieves only 12.36 GFLOP/s, corresponding to roughly 17\% of peak performance.
+
+    This gap indicates that overall inference performance is not limited by raw memory bandwidth but rather by
+    computational inefficiencies and system-level overhead, including kernel launch costs, framework dispatch,
+    synchronization, non-convolutional operations, and inter-layer memory traffic. The roofline therefore does
+    not represent an achievable target, but an upper theoretical bound.
+
+    From a research perspective, the results suggest that further optimization should focus on improving computational
+    efficiency through kernel fusion, graph compilation, operator reduction, and quantization, rather than purely
+    reducing memory traffic.
+
+    Raspberry Pi 5 cache hierarchy is:
+
+    \begin{itemize}
+        \item     L1d: 256 KiB (4 instances) = 64 KB per core
+        \item     L1i: 256 KiB (4 instances) = 64 KB per core
+        \item     L2: 2 MiB (4 instances) = 512 KB L2 per core $\rightarrow$ small
+        \item     L3: 2 MiB (1 instance) $\rightarrow$ shared last-level cache
+        \item DRAM bandwidth $\approx$ 9 GB/s (measured)
+    \end{itemize}
+
+    So layers larger than ~2 MB activation footprint will spill to DRAM.
+
+    So, early YOLO layers (e.g., 320×320 feature maps) cannot fit in cache.
+    Later layers (40×40, 20×20) may fit in L3 → more compute-bound behavior.
+
+
+
 
 \section{Dataset and Annotation }
 
@@ -326,5 +973,111 @@ and Transformer \cite{vaswani2017attention} architectures.
 \appendix
 
 \chapter{Demonstration (Appendix A)}
+
+\begin{longtable}{p{0.44\textwidth} r r r p{0.18\textwidth}}
+\caption{Per-layer performance statistics of YOLOv8n on Raspberry Pi 5 (CPU, FP32). Regime is derived from the roofline knee $\mathrm{AI}_{\mathrm{knee}}\approx 7.64$ FLOPs/byte (using measured BW=9.14\,GB/s and peak=69.86\,GFLOP/s): Memory-bound if AI$<6.88$, Knee/transition if $6.88\le$AI$\le 8.40$, Compute-bound if AI$>8.40$.}
+\label{tab:roofline_pi5_layers_all}\\
+
+\toprule
+Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
+\midrule
+\endfirsthead
+
+\toprule
+Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
+\midrule
+\endhead
+
+\midrule
+\multicolumn{5}{r}{\small Continued on next page} \\
+\endfoot
+
+\bottomrule
+\endlastfoot
+
+model.0.conv                         & 23.79 & 7.713   & 3.7  & Knee / transition \\
+model.1.conv                         & 17.59 & 23.955  & 13.4 & Compute-bound \\
+model.2.cv1.conv                     & 8.88  & 7.995   & 5.9  & Knee / transition \\
+model.2.m.0.cv1.conv                 & 5.17  & 35.899  & 22.8 & Compute-bound \\
+model.2.m.0.cv2.conv                 & 5.53  & 35.899  & 21.3 & Compute-bound \\
+model.2.cv2.conv                     & 21.02 & 9.593   & 3.7  & Compute-bound \\
+model.3.conv                         & 11.98 & 47.291  & 19.7 & Compute-bound \\
+model.4.cv1.conv                     & 7.08  & 15.920  & 7.4  & Compute-bound \\
+model.4.m.0.cv1.conv                 & 3.45  & 70.416  & 34.1 & Compute-bound \\
+model.4.m.0.cv2.conv                 & 2.82  & 70.416  & 41.8 & Compute-bound \\
+model.4.m.1.cv1.conv                 & 3.28  & 70.416  & 36.0 & Compute-bound \\
+model.4.m.1.cv2.conv                 & 3.43  & 70.416  & 34.4 & Compute-bound \\
+model.4.cv2.conv                     & 6.62  & 21.192  & 15.8 & Compute-bound \\
+model.5.conv                         & 7.30  & 85.714  & 32.3 & Compute-bound \\
+model.6.cv1.conv                     & 3.24  & 30.769  & 16.2 & Compute-bound \\
+model.6.m.0.cv1.conv                 & 3.18  & 122.034 & 37.1 & Compute-bound \\
+model.6.m.0.cv2.conv                 & 3.13  & 122.034 & 37.7 & Compute-bound \\
+model.6.m.1.cv1.conv                 & 2.40  & 122.034 & 49.2 & Compute-bound \\
+model.6.m.1.cv2.conv                 & 2.06  & 122.034 & 57.3 & Compute-bound \\
+model.6.cv2.conv                     & 4.91  & 40.506  & 21.4 & Compute-bound \\
+model.7.conv                         & 5.96  & 97.959  & 39.6 & Compute-bound \\
+model.8.cv1.conv                     & 1.98  & 48.485  & 26.5 & Compute-bound \\
+model.8.m.0.cv1.conv                 & 2.92  & 118.033 & 40.4 & Compute-bound \\
+model.8.m.0.cv2.conv                 & 2.27  & 118.033 & 52.0 & Compute-bound \\
+model.8.cv2.conv                     & 2.46  & 55.491  & 31.9 & Compute-bound \\
+model.9.cv1.conv                     & 1.36  & 35.165  & 19.2 & Compute-bound \\
+model.9.cv2.conv                     & 3.42  & 59.813  & 30.7 & Compute-bound \\
+model.12.cv1.conv                    & 5.18  & 45.283  & 30.4 & Compute-bound \\
+model.12.m.0.cv1.conv                & 2.22  & 122.034 & 53.1 & Compute-bound \\
+model.12.m.0.cv2.conv                & 2.01  & 122.034 & 58.6 & Compute-bound \\
+model.12.cv2.conv                    & 3.56  & 36.641  & 22.1 & Compute-bound \\
+model.15.cv1.conv                    & 6.91  & 23.821  & 22.8 & Compute-bound \\
+model.15.m.0.cv1.conv                & 2.90  & 70.416  & 40.6 & Compute-bound \\
+model.15.m.0.cv2.conv                & 2.76  & 70.416  & 42.8 & Compute-bound \\
+model.15.cv2.conv                    & 5.09  & 19.085  & 15.4 & Compute-bound \\
+model.16.conv                        & 3.02  & 53.731  & 39.1 & Compute-bound \\
+model.18.cv1.conv                    & 2.96  & 36.641  & 26.5 & Compute-bound \\
+model.18.m.0.cv1.conv                & 2.19  & 122.034 & 53.9 & Compute-bound \\
+model.18.m.0.cv2.conv                & 1.95  & 122.034 & 60.5 & Compute-bound \\
+model.18.cv2.conv                    & 2.70  & 36.641  & 29.1 & Compute-bound \\
+model.19.conv                        & 2.89  & 73.096  & 40.8 & Compute-bound \\
+model.21.cv1.conv                    & 2.03  & 55.491  & 38.8 & Compute-bound \\
+model.21.m.0.cv1.conv                & 2.35  & 118.033 & 50.2 & Compute-bound \\
+model.21.m.0.cv2.conv                & 2.32  & 118.033 & 50.7 & Compute-bound \\
+model.21.cv2.conv                    & 1.87  & 55.491  & 42.0 & Compute-bound \\
+model.22.cv2.0.0.conv                & 8.48  & 137.799 & 55.7 & Compute-bound \\
+model.22.cv2.0.1.conv                & 8.35  & 137.799 & 56.5 & Compute-bound \\
+model.22.cv2.0.2                     & 3.71  & 15.919  & 14.1 & Compute-bound \\
+model.22.cv2.1.0.conv                & 4.30  & 154.839 & 54.9 & Compute-bound \\
+model.22.cv2.1.1.conv                & 2.14  & 122.034 & 55.2 & Compute-bound \\
+model.22.cv2.1.2                     & 1.08  & 15.681  & 12.1 & Compute-bound \\
+model.22.cv2.2.0.conv                & 2.78  & 107.063 & 42.4 & Compute-bound \\
+model.22.cv2.2.1.conv                & 1.28  & 83.721  & 23.1 & Compute-bound \\
+model.22.cv2.2.2                     & 0.83  & 14.798  & 4.0  & Compute-bound \\
+model.22.cv3.0.0.conv                & 11.92 & 152.381 & 49.5 & Compute-bound \\
+model.22.cv3.0.1.conv                & 13.86 & 170.414 & 53.2 & Compute-bound \\
+model.22.cv3.0.2                     & 5.15  & 19.874  & 15.9 & Compute-bound \\
+model.22.cv3.1.0.conv                & 5.81  & 173.494 & 50.8 & Compute-bound \\
+model.22.cv3.1.1.conv                & 3.65  & 146.939 & 50.4 & Compute-bound \\
+model.22.cv3.1.2                     & 1.27  & 19.506  & 16.2 & Compute-bound \\
+model.22.cv3.2.0.conv                & 3.24  & 115.663 & 45.5 & Compute-bound \\
+model.22.cv3.2.1.conv                & 1.60  & 94.737  & 28.7 & Compute-bound \\
+model.22.cv3.2.2                     & 0.76  & 18.161  & 6.7  & Compute-bound \\
+model.22.dfl.conv                    & 2.42  & 0.471   & 0.4  & Strongly memory-bound \\
+\midrule
+Full Model (THOP)                     & 358.35 & 157.765 & 12.36 & Mixed / Overhead-dominated \\
+
+\end{longtable}
+
+\chapter{Demonstration (Appendix B)}
+
+    YOLOv8n summary: 129 layers, 3,157,200 parameters, 0 gradients, 8.9 GFLOPs.
+
+
+
+
+    \begin{figure}[h]
+        \centering
+        \includegraphics[width=0.8\linewidth]{pics/YOLOv8_structure.pdf}
+        \caption{YOLOv8 structure \cite{yolov8_architecture_rangeking}}
+        \label{fig:yolo_architecture}
+    \end{figure}
+
+
 
 \end{document}
