@@ -73,5 +73,6 @@ def main():
     print(f"Ultralytics ({args.device}) p50: {np.percentile(times,50):.3f} ms")
     print(f"Ultralytics ({args.device}) p90: {np.percentile(times,90):.3f} ms")
 
+
 if __name__ == "__main__":
     main()

@@ -7,6 +7,7 @@ import onnx
 import tvm
 from tvm import relax
 from tvm.relax.frontend.onnx import from_onnx
+import IPython
 
 def letterbox(img, new_shape):
     w, h = img.size
@@ -45,37 +46,48 @@ def main():
     ap.add_argument("--img", required=True)
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--target", choices=["llvm", "metal"], default="llvm")
-    ap.add_argument("--mcpu", default=None, help="LLVM -mcpu value (e.g., apple-m2)")
     ap.add_argument("--exec-mode", choices=["bytecode", "compiled"], default="bytecode")
-    ap.add_argument("--threads", type=int, default=None, help="TVM_NUM_THREADS / OMP_NUM_THREADS")
-    ap.add_argument(
-        "--relax-pipeline",
-        choices=["zero", "default", "default_build"],
-        default="default_build",
-        help="Relax pipeline to use (default_build is VM-friendly)",
-    )
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--runs", type=int, default=100)
+    ap.add_argument("--save-lib", default=None, help="Path to save compiled TVM VM library (.so/.dylib)")
+    ap.add_argument("--load-lib", default=None, help="Path to previously compiled TVM VM library")
+    ap.add_argument("--compile-only", action="store_true", help="Compile (or load-check) and exit")
     args = ap.parse_args()
 
-    if args.threads is not None:
-        os.environ["TVM_NUM_THREADS"] = str(args.threads)
-        os.environ["OMP_NUM_THREADS"] = str(args.threads)
+    # if args.threads is not None:
+    #     os.environ["TVM_NUM_THREADS"] = str(args.threads)
+    #     os.environ["OMP_NUM_THREADS"] = str(args.threads)
 
+    dev = tvm.cpu() if args.target == "llvm" else tvm.metal()
     x = preprocess(args.img, args.imgsz)
 
-    onnx_model = onnx.load(args.onnx)
-    input_name = get_input_name(onnx_model)
-
-    mod = from_onnx(onnx_model, shape_dict={input_name: list(x.shape)}, dtype_dict="float32") #IR Module
-    mod = relax.get_pipeline("default_build")(mod)
-    if args.target == "llvm" and args.mcpu:
-        target = tvm.target.Target({"kind": "llvm", "mcpu": args.mcpu})
+    if args.load_lib:
+        t_load0 = time.perf_counter()
+        loaded = tvm.runtime.load_module(args.load_lib)
+        vm = relax.VirtualMachine(loaded, dev)
+        t_load1 = time.perf_counter()
+        print(f"Loaded VM library in {(t_load1 - t_load0):.3f} s from: {args.load_lib}")
     else:
-        target = args.target
-    ex = tvm.compile(mod, target=target)
-    dev = tvm.cpu() if args.target == "llvm" else tvm.metal()
-    vm = relax.VirtualMachine(ex, dev)
+        t_compile0 = time.perf_counter()
+        onnx_model = onnx.load(args.onnx)
+        input_name = get_input_name(onnx_model)
+        mod = from_onnx(onnx_model, shape_dict={input_name: list(x.shape)}, dtype_dict="float32")
+        mod = relax.get_pipeline("default_build")(mod)
+        print(IPython.display.Code(mod.script(), language="python"))
+        ex = tvm.compile(mod, target=args.target)
+        vm = relax.VirtualMachine(ex, dev)
+        t_compile1 = time.perf_counter()
+        print(f"Compile time: {(t_compile1 - t_compile0):.3f} s")
+
+        if args.save_lib:
+            ex.export_library(args.save_lib)
+            print(f"Saved VM library to: {args.save_lib}")
+
+    if args.compile_only:
+        print("Compile-only mode complete; skipping inference benchmark.")
+        return
+
+
 
     x_nd = tvm.runtime.tensor(x, device=dev)
 
