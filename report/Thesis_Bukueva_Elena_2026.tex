@@ -23,6 +23,7 @@
 \usepackage{amsfonts}
 \usepackage{nameref}
 \usepackage{listings}
+\usepackage{minted}
 \usepackage{xcolor}
 \usepackage{csquotes}
 \usepackage{amssymb}
@@ -56,7 +57,6 @@
   numbersep=6pt,
   frame=single
 }
-
 
 \newcommand{\TP}{\mathrm{TP}}
 \newcommand{\FP}{\mathrm{FP}}
@@ -909,8 +909,47 @@ in the memory or there are some hidden optimizations (fused layers).
     So, early YOLO layers (e.g., 320×320 feature maps) cannot fit in cache.
     Later layers (40×40, 20×20) may fit in L3 → more compute-bound behavior.
 
+\section{GPU structure}
+
+In this work we use NVIDIA Orin Nano Platform. It is an embedded AI computing module designed for edge
+inference
+and robotics applications. Its SoC combines: ARM-based CPU with 6 Cores, NVIDIA Ampere-based GPU and
+various I/O. The shared by CPU and GPU LPDDR memory reduces latency and speeds-up edge-workloads.
+The GPU in Orin Nano supports CUDA, Tensor Cores, Mixed precision (FP32, FP16, INT8).
+
+\section{Apache TVM}
+
+Apache TVM is a modular ML compiler framework that transforms high-level tensor programs into optimized
+low-level code and runtime artifacts. It is an Open Source Project, mainly developed by a
+Tianqi Chen's team at Carnegie Mellon University.
+
+Deep learning frameworks make models easy to define, train, and export. However, they do not always produce
+hardware-efficient binaries for every deployment target. TVM exists to close that gap: it turns
+model programs into optimized executables across heterogeneous hardware. It also provides deep optimization
+control over the model.
+
+TVM addresses this with a compiler-first approach: represents computation in intermediate forms,
+applies transformations, searches optimization spaces, and generates code for many targets.
+
+\subsection*{Core architecture}
+
+TVM can be understood as a pipeline:
+
+\begin{enumerate}
+\item Frontend import: ONNX, PyTorch-exported graphs, TensorFlow, etc.
+\item Graph-level IR transformations: operator fusion, layout rewrite, constant folding.
+\item Tensor-level lowering and scheduling: loop tiling, vectorization, unrolling, memory placement.
+\item Target code generation: LLVM for CPU, CUDA for NVIDIA GPU, other backends.
+\item Runtime packaging: graph executor, VM, or AOT runtime.
+\end{enumerate}
+
+\begin{minted}[linenos, breaklines, frame=single]{python}
+def add(a, b):
+    return a + b
+\end{minted}
 
 
+TVM performs hardware-aware graph partitioning.
 
 \section{Dataset and Annotation }
 
