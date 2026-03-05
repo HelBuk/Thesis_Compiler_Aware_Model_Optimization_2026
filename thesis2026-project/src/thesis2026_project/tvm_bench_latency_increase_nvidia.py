@@ -111,22 +111,73 @@ def bench_pt(pt_path="../models/yolov8n.pt", imgsz=640, device="cpu",
     fps = 1000.0 / ms_
     return ms_, fps
 
+def _resolve_torch_dtype(dtype):
+    if dtype is None:
+        return None
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    key = str(dtype).lower()
+    mapping = {
+        "float32": torch.float32, "fp32": torch.float32, "f32": torch.float32,
+        "float16": torch.float16, "fp16": torch.float16, "f16": torch.float16,
+        "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
+    }
+    if key not in mapping:
+        raise ValueError(f"Unsupported dtype: {dtype}")
+    return mapping[key]
+
+
 @torch.inference_mode()
-def bench_pt_tensor(pt_path, x, runs=10, warmup=20, compiled=False):
+def bench_pt_tensor(
+    pt_path,
+    x,
+    runs=10,
+    warmup=20,
+    compiled=False,
+    device=None,   # e.g. "cuda", "cpu", torch.device("cuda:0")
+    dtype=None,    # e.g. torch.float16, "fp16", "float32"
+):
+    if not isinstance(x, torch.Tensor):
+        x = torch.as_tensor(x)
+
+    dev = torch.device(device) if device is not None else x.device
+    dt = _resolve_torch_dtype(dtype) or x.dtype
+
+    if dev.type == "cpu" and dt == torch.float16:
+        raise ValueError("FP16 on CPU is usually unsupported/slow. Use float32 or bfloat16.")
+
     y = YOLO(pt_path)
-    model = y.model.eval().to(x.device)
+    model = y.model.eval().to(device=dev, dtype=dt)
+    x = x.to(device=dev, dtype=dt, non_blocking=True).contiguous()
+
     if compiled:
         model = torch.compile(model, mode="max-autotune", fullgraph=False)
+
     for _ in range(warmup):
         _ = model(x)
-    sync_torch(x.device)
+    sync_torch(dev)
+
     t0 = time.perf_counter()
     for _ in range(runs):
         _ = model(x)
-    sync_torch(x.device)
+    sync_torch(dev)
     t1 = time.perf_counter()
+
     ms_ = (t1 - t0) * 1000.0 / runs
     return ms_, 1000.0 / ms_
+
+def _ort_expected_np_dtype(sess):
+    t = sess.get_inputs()[0].type  # e.g. "tensor(float)", "tensor(float16)"
+    m = {
+        "tensor(float)": np.float32,
+        "tensor(float16)": np.float16,
+        "tensor(double)": np.float64,
+        "tensor(int64)": np.int64,
+        "tensor(int32)": np.int32,
+    }
+    if t not in m:
+        raise ValueError(f"Unsupported ONNX input type: {t}")
+    return m[t]
 
 def bench_ort(
     onnx_path: str,
@@ -134,7 +185,7 @@ def bench_ort(
     runs: int = 10,
     warmup: int = 20,
     threads: int = 4,
-    use_arena: bool = True,
+    use_arena: bool = True
 ):
     """
     Benchmark ONNX Runtime on CPU with controlled threading.
@@ -163,6 +214,9 @@ def bench_ort(
     inp = sess.get_inputs()[0]
     inp_name = inp.name
 
+    expected = _ort_expected_np_dtype(sess)
+    x_np = np.ascontiguousarray(x_np.astype(expected, copy=False))
+
     # Warmup
     feed = {inp_name: x_np}
     for _ in range(warmup):
@@ -177,28 +231,46 @@ def bench_ort(
     fps = 1000.0 / ms_
     return ms_, fps
 
+
+def _cast_to_onnx_input_dtype(sess, x_np: np.ndarray) -> np.ndarray:
+    inp = sess.get_inputs()[0]
+    typ = inp.type  # e.g. "tensor(float)", "tensor(float16)"
+    type_map = {
+        "tensor(float)": np.float32,
+        "tensor(float16)": np.float16,
+        "tensor(double)": np.float64,
+        "tensor(int64)": np.int64,
+        "tensor(int32)": np.int32,
+    }
+    if typ not in type_map:
+        raise ValueError(f"Unsupported ONNX input type: {typ}")
+    return np.ascontiguousarray(x_np.astype(type_map[typ], copy=False))
+
+
 def bench_ort_trt(
     onnx_path: str,
     x_np: np.ndarray,
     runs: int = 10,
     warmup: int = 20,
     cache_dir: str = "./trt_cache",
+    dtype=None
 ):
     so = ort.SessionOptions()
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-
+    TRT_FP16 = (dtype == "float16")
     providers = [
         ("TensorrtExecutionProvider", {
             "trt_engine_cache_enable": True,
             "trt_engine_cache_path": cache_dir,
-            "trt_fp16_enable": False,   # set False if you want pure FP32
+            "trt_fp16_enable": TRT_FP16,   # set False if you want pure FP32
         }),
         ("CUDAExecutionProvider", {}),
     ]
 
     sess = ort.InferenceSession(onnx_path, sess_options=so, providers=providers)
     inp_name = sess.get_inputs()[0].name
-    feed = {inp_name: x_np}
+    x_np_cast = _cast_to_onnx_input_dtype(sess, x_np)
+    feed = {inp_name: x_np_cast}
 
     for _ in range(warmup):
         _ = sess.run(None, feed)
@@ -315,15 +387,18 @@ def run_targeted_tuning(mod, target, work_dir, op_name, max_trials_global=200, m
 if __name__ == "__main__":
 
     print("script started")
-    ONNX_MODEL_PATH = "../../models/yolov8n.onnx"
-    LOG_DIR = "../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03"
+    TYPE = "float16"
+    NP_DTYPE = np.float16 if TYPE == "float16" else np.float32
+    TORCH_DTYPE = torch.float16 if TYPE == "float16" else torch.float32
+    TVM_INPUT_DTYPE = np.float32
+    if TYPE == "float16":
+        ONNX_MODEL_PATH = "../../models/yolov8n_fp16_fixed.onnx"
+    else: 
+        ONNX_MODEL_PATH = "../../models/yolov8n_fp32.onnx"
+    LOG_DIR = f"../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_{TYPE}_04"
     RUN_TUNING = False  # set False after this op gets non-N/A
     RUN_TARGETED_TUNING = False  # set False after this op gets non-N/A
-    MISSING_OP = None #[
-       # 'conv2d40'
-    #] #['fused_conv2d13_add10_tir_sigmoid7_multiply7',
-                    #'fused_conv2d_add_tir_sigmoid_multiply'] 
-    #None #"fused_conv2d34_add15_tir_sigmoid11_multiply11"
+    MISSING_OP = None
     RUN_COMPILATION = False  # set False after this op gets non-N/A # Has to be set for RUN_DEFAULT_INFERENCE
     RUN_DEFAULT_INFERENCE = False
     EXPORT_MODEL = False
@@ -331,10 +406,10 @@ if __name__ == "__main__":
     # export_path = get_next_versioned_path(
     #     "../../models/compiled_tvm_models/tvm_yolov8n.so"
     # )
-    export_path = "../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v5.so"
-    max_trials_global=10
-    max_trials_per_task=1
-    num_trials_per_iter=1
+    export_path = f"../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_{TYPE}_v7.so"
+    max_trials_global=10000
+    max_trials_per_task=150
+    num_trials_per_iter=64
     timeout_sec_builder=300
     timeout_sec_runner=300
 
@@ -472,19 +547,20 @@ if __name__ == "__main__":
         )
     
     info(f"Starting to benchmark")
-    x_np = np.random.randn(1,3,640,640).astype("float32")
-    x = torch.from_numpy(x_np).to(device)
-    ms_tvm_cpu, fps_tvm_cpu = bench_tvm(vm, dev, x_np, runs=BENCH_RUNS)
+    x_np = np.ascontiguousarray(np.random.randn(1, 3, 640, 640).astype(NP_DTYPE))
+    x = torch.from_numpy(x_np).to(device=device, dtype=TORCH_DTYPE)
+    x_np_tvm = np.ascontiguousarray(x_np.astype(TVM_INPUT_DTYPE, copy=False))
+    ms_tvm_cpu, fps_tvm_cpu = bench_tvm(vm, dev, x_np_tvm, runs=BENCH_RUNS)
     print("TVM", ms_tvm_cpu, fps_tvm_cpu)
-    ms_pt_cpu, fps_pt_cpu = bench_pt_tensor("../../models/yolov8n.pt", x, runs=BENCH_RUNS)
+    ms_pt_cpu, fps_pt_cpu = bench_pt_tensor("../../models/yolov8n.pt", x, runs=BENCH_RUNS, dtype=TYPE, device=device)
     print("PyTorch", ms_pt_cpu, fps_pt_cpu)
     # ms_pt_comp,  fps_pt_comp  = bench_pt_tensor("../../models/yolov8n.pt", x, compiled=True, runs=BENCH_RUNS)
     # print("PyTorch (Compiled)", ms_pt_comp,  fps_pt_comp)
-    ms_ort_cpu, fps_ort_cpu = bench_ort("../../models/yolov8n.onnx", x_np, runs=BENCH_RUNS, threads=4)
-    print("ONNX Runtime", ms_ort_cpu, fps_ort_cpu)
+    ms_ort_gpu, fps_ort_gpu = bench_ort(ONNX_MODEL_PATH, x_np, runs=BENCH_RUNS, threads=4)
+    print("ONNX Runtime", ms_ort_gpu, fps_ort_gpu)
     print("ORT providers:", ort.get_available_providers())
     print("TVM CUDA:", tvm.cuda(0).exist)
-    ms_trt, fps_trt = bench_ort_trt("../../models/yolov8n.onnx", x_np, runs=BENCH_RUNS)
+    ms_trt, fps_trt = bench_ort_trt(ONNX_MODEL_PATH, x_np, runs=BENCH_RUNS, dtype=TYPE)
     print("TensorRT (ORT EP)", ms_trt, fps_trt)
 
     

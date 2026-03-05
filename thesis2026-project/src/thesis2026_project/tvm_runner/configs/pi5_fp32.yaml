@@ -1,0 +1,44 @@
+run:
+  name: "yolov8n_pi5_cpu_fp32"
+  out_dir: "./out/experiments"
+
+model:
+  onnx_path: "../../../models/yolov8n_fp32.onnx"
+  pt_path: "../../../models/yolov8n.pt"
+  imgsz: 640
+  batch: 1
+
+device:
+  kind: "cuda"            # "cuda" or "cpu"
+
+precision:
+  name: "fp32"            # "fp32" | "fp16" | "bf16" | "int8"
+
+tvm:
+  log_dir: "./out/tvm_tuning_logs/tuning_yolov8n_pi5_cpu_fp32"
+  use_existing_db: true   # compile can reuse DB without tuning
+  max_trials_global: 10000
+  max_trials_per_task: 150
+  num_trials_per_iter: 64
+  timeout_builder_s: 300
+  timeout_runner_s: 300
+  export_path: "./out/tvm_compiled_models"
+
+tvm_target:
+  "kind": "llvm",
+  "mtriple": "aarch64-linux-gnu",
+  "mcpu": "cortex-a76",
+  "num-cores": 4,
+
+tvm_targeted_tuning:
+  enable: False
+  operations: None                    # Tasks to tune: String or List[str]
+
+benchmark:
+  runs: 200
+  warmup: 20
+
+onnxruntime:
+  provider: "CPUExecutionProvider"   # "CPUExecutionProvider" | "CUDAExecutionProvider" | "TensorrtExecutionProvider"
+  threads: 4
+  use_arena: True
