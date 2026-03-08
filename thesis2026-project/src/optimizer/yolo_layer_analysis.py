@@ -223,7 +223,7 @@ if __name__ == "__main__":
     from ultralytics import YOLO
 
     # Load model
-    PATH_YOLO = '/Users/helbuk/Library/Mobile Documents/com~apple~CloudDocs/NTNU/NTNU_Thesis_2026/Compiler-Aware_Model_Optimization/Thesis_Compiler_Aware_Model_Optimization_2026/thesis2026-project/models/yolov8n.pt'
+    PATH_YOLO = '../../models/yolov8n.pt'
     y = YOLO(PATH_YOLO)
     net = y.model
 
@@ -235,7 +235,7 @@ if __name__ == "__main__":
 
     # Optional: export to CSV
     import csv
-    PATH_to_save = '/Users/helbuk/Library/Mobile Documents/com~apple~CloudDocs/NTNU/NTNU_Thesis_2026/Compiler-Aware_Model_Optimization/Thesis_Compiler_Aware_Model_Optimization_2026/thesis2026-project/tmp'
+    PATH_to_save = '../tmp'
     with open(PATH_to_save + "yolov8n_module_stats.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(asdict(stats[0]).keys()))
         w.writeheader()

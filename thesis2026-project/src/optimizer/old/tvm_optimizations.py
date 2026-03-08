@@ -26,8 +26,8 @@ Notes:
   - For best performance, ensure your TVM build has LLVM enabled.
 """
 
-MODEL_PATH_ONNX = "/Users/helbuk/Documents/NTNU_Thesis_2026/Compiler-Aware_Model_Optimization/Thesis_Compiler_Aware_Model_Optimization_2026/thesis2026-project/models/yolov8n.onnx"
-MODEL_PATH_PT = "/Users/helbuk/Documents/NTNU_Thesis_2026/Compiler-Aware_Model_Optimization/Thesis_Compiler_Aware_Model_Optimization_2026/thesis2026-project/models/yolov8n.pt"
+MODEL_PATH_ONNX = "../models/yolov8n.onnx"
+MODEL_PATH_PT = "../models/yolov8n.pt"
 
 IMG_SIZE = 640
 DTYPE = "float32"
