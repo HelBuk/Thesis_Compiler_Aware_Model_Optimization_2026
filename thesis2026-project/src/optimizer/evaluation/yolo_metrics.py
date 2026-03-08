@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -12,13 +10,10 @@ from ultralytics.models.yolo.detect import DetectionValidator
 from ultralytics.utils import IterableSimpleNamespace
 
 
-# -----------------------------
-# Backend adapters
-# -----------------------------
 class Backend:
     """Return preds in Ultralytics validator format:
     list length B of dicts:
-      {"bboxes": (N,4) xyxy in *imgsz* space, "conf": (N,), "cls": (N,), "extra": (N,0)}
+      {"bboxes": (N,4) xyxy in imgsz space, "conf": (N,), "cls": (N,), "extra": (N,0)}
     """
 
     def __init__(self, imgsz: int, conf: float, iou: float, max_det: int, device: str):
@@ -76,18 +71,14 @@ def yolo8_output_to_preds_ultra(
     max_det: int,
     torch_device: str,
 ) -> Dict[str, torch.Tensor]:
-    """
-    Works for common YOLOv8 exports where output is (1,84,8400) or (1,8400,84):
-      [x,y,w,h, cls0..cls79] in the *imgsz* coordinate space.
-    """
     if out.ndim == 3 and out.shape[0] == 1:
         out = out[0]
     else:
         raise ValueError(f"Unexpected output shape {out.shape}, expected [1,*,*]")
 
-    if out.shape[0] == 84:  # (84,8400)
-        pred = out.T  # (8400,84)
-    elif out.shape[1] == 84:  # (8400,84)
+    if out.shape[0] == 84:
+        pred = out.T
+    elif out.shape[1] == 84:
         pred = out
     else:
         raise ValueError(f"Can't interpret output shape {out.shape} as YOLOv8 (84 channels).")
@@ -110,7 +101,6 @@ def yolo8_output_to_preds_ultra(
     score = score[keep]
     cls_id = cls_id[keep]
 
-    # xywh -> xyxy
     x, y, w, h = xywh[:, 0], xywh[:, 1], xywh[:, 2], xywh[:, 3]
     x1 = x - w / 2
     y1 = y - h / 2
@@ -118,15 +108,12 @@ def yolo8_output_to_preds_ultra(
     y2 = y + h / 2
     boxes = np.stack([x1, y1, x2, y2], axis=1).astype(np.float32)
 
-    # If boxes are normalized (0..1), scale to pixel coords
     if boxes.max() <= 2.0:
         boxes *= float(imgsz)
 
-    # clip to imgsz
     boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, imgsz)
     boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, imgsz)
 
-    # class-wise NMS
     out_boxes, out_scores, out_cls = [], [], []
     for c in np.unique(cls_id):
         idx = np.where(cls_id == c)[0]
@@ -150,7 +137,6 @@ def yolo8_output_to_preds_ultra(
     s = np.concatenate(out_scores, axis=0)
     k = np.concatenate(out_cls, axis=0)
 
-    # global top max_det
     if s.size > max_det:
         top = np.argsort(-s)[:max_det]
         b, s, k = b[top], s[top], k[top]
@@ -179,7 +165,6 @@ class TFLiteBackend(Backend):
 
         delegates = None
         if delegate == "gpu":
-            # NOTE: This is Linux .so; on macOS it will likely fail.
             try:
                 delegates = [tf.lite.experimental.load_delegate("libtensorflowlite_gpu_delegate.so")]
             except Exception as e:
@@ -192,25 +177,18 @@ class TFLiteBackend(Backend):
         self.inp = self.interp.get_input_details()[0]
         self.out = self.interp.get_output_details()[0]
 
-        # print("[DEBUG] TFLite output shape:", self.out["shape"], "dtype:", self.out["dtype"], "quant:", self.out.get("quantization"))
-
     def infer_batch(self, imgs_bchw01: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
-        # Convert BCHW [0..1] -> NHWC
-        imgs = (
-            imgs_bchw01.permute(0, 2, 3, 1).contiguous().cpu().numpy().astype(np.float32)
-        )  # B,H,W,C in [0..1]
+        imgs = imgs_bchw01.permute(0, 2, 3, 1).contiguous().cpu().numpy().astype(np.float32)
         preds = []
 
         in_dtype = self.inp["dtype"]
         in_scale, in_zero = self.inp.get("quantization", (0.0, 0))
-
         out_dtype = self.out["dtype"]
         out_scale, out_zero = self.out.get("quantization", (0.0, 0))
 
         for i in range(imgs.shape[0]):
-            x = imgs[i : i + 1]  # [1,H,W,C]
+            x = imgs[i : i + 1]
 
-            # Quantize input if needed
             if in_dtype in (np.uint8, np.int8):
                 if in_scale == 0:
                     raise RuntimeError("TFLite input scale is 0; cannot quantize input.")
@@ -222,7 +200,6 @@ class TFLiteBackend(Backend):
             self.interp.invoke()
             y = self.interp.get_tensor(self.out["index"])
 
-            # Dequantize output if needed
             if out_dtype in (np.uint8, np.int8):
                 y = (y.astype(np.float32) - out_zero) * out_scale
             else:
@@ -255,7 +232,7 @@ class ORTBackend(Backend):
 
     def infer_batch(self, imgs_bchw01: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
         x = imgs_bchw01.detach().cpu().numpy().astype(np.float32)
-        y = self.sess.run(None, {self.in_name: x})[0]  # assume single output
+        y = self.sess.run(None, {self.in_name: x})[0]
 
         preds = []
         for i in range(x.shape[0]):
@@ -277,7 +254,6 @@ class TorchBackend(Backend):
         from ultralytics import YOLO
 
         self.torch_device = device or detect_best_device()
-
         y = YOLO(model_path)
         self.model = y.model
         self.model.eval()
@@ -309,9 +285,6 @@ class TorchBackend(Backend):
         return preds
 
 
-# -----------------------------
-# Evaluation with Ultralytics metrics
-# -----------------------------
 def make_validator(
     data_yaml: str,
     imgsz: int,
@@ -352,12 +325,14 @@ def make_validator(
     v = DetectionValidator(args=IterableSimpleNamespace(**args))
     v.data = data_dict
     v.args.data = data_yaml
-    v.device = torch.device("cpu")  # metrics on CPU; inference handled by backend
+    v.device = torch.device("cpu")
     return v
+
 
 class _NamesOnlyModel:
     def __init__(self, names):
         self.names = names
+
 
 def eval_backend(
     backend: Backend,
@@ -372,7 +347,7 @@ def eval_backend(
     save_json: bool,
     save_txt: bool,
     plots: bool,
-    max_batches: int
+    max_batches: int,
 ) -> Dict[str, float]:
     v = make_validator(
         data_yaml,
@@ -389,8 +364,6 @@ def eval_backend(
         plots=plots,
     )
 
-    # v.init_metrics(model=None)
-    # Ultralytics validator needs model.names for COCO mapping/metrics
     names = v.data.get("names", None)
     if names is None:
         raise RuntimeError(
@@ -410,61 +383,10 @@ def eval_backend(
             p0 = preds[0]
             print("[DEBUG] first batch preds[0]:", p0["bboxes"].shape, p0["conf"].shape, p0["cls"].shape)
 
-            cls = preds[0]["cls"].cpu().numpy()
-            conf = preds[0]["conf"].cpu().numpy()
-            # print("[DEBUG] cls min/max:", cls.min() if cls.size else None, cls.max() if cls.size else None)
-            # print("[DEBUG] conf min/max:", conf.min() if conf.size else None, conf.max() if conf.size else None)
-            # print("[DEBUG] unique cls (first 20):", np.unique(cls)[:20])
-
-            # b = preds[0]["bboxes"].cpu().numpy()
-            # print("[DEBUG] box min/max:", b.min(), b.max())
-            # print("[DEBUG] first 3 boxes:", b[:3])
-
         if max_batches and batch_i + 1 >= max_batches:
             break
 
     return v.get_stats()
-
-
-# -----------------------------
-# CLI
-# -----------------------------
-def parse_args():
-    ap = argparse.ArgumentParser("Evaluate model outputs using Ultralytics COCO metrics")
-
-    ap.add_argument("--data", required=True, help="Ultralytics dataset YAML")
-    ap.add_argument("--imgsz", type=int, default=640)
-    ap.add_argument("--batch", type=int, default=1)
-    ap.add_argument("--conf", type=float, default=0.001)
-    ap.add_argument("--iou", type=float, default=0.7)
-    ap.add_argument("--max_det", type=int, default=300)
-    ap.add_argument("--max_batches", type=int, default=0, help="0 = full val, else stop after N batches")
-
-    ap.add_argument("--project", type=str, default="runs/val_custom")
-    ap.add_argument("--plots", action="store_true")
-    ap.add_argument("--save_txt", action="store_true")
-    ap.add_argument("--save_json", action="store_true")
-
-    ap.add_argument("--model_a", required=True, help="Path to model A (.tflite/.onnx/.pt)")
-    ap.add_argument("--model_b", required=True, help="Path to model B (.tflite/.onnx/.pt)")
-
-    # New: per-model backends
-    ap.add_argument("--backend_a", choices=["tflite", "ort", "torch"], default=None, help="Backend for model A")
-    ap.add_argument("--backend_b", choices=["tflite", "ort", "torch"], default=None, help="Backend for model B")
-
-    # Backward-compat: single backend for both
-    ap.add_argument("--backend", choices=["tflite", "ort", "torch"], default=None,
-                    help="(Deprecated) single backend for both A and B")
-
-    # Optional per-model devices
-    ap.add_argument("--device_a", default=None, help="Device for A (torch: cpu/mps/cuda:0; ort: cpu/cuda:0)")
-    ap.add_argument("--device_b", default=None, help="Device for B (torch: cpu/mps/cuda:0; ort: cpu/cuda:0)")
-
-    # Shared tflite knobs (used for whichever side uses tflite)
-    ap.add_argument("--threads", type=int, default=4, help="Threads for TFLite")
-    ap.add_argument("--tflite_delegate", choices=["cpu", "gpu"], default="cpu", help="TFLite delegate (gpu optional)")
-
-    return ap.parse_args()
 
 
 def build_backend(kind: str, model_path: str, args, device_override: Optional[str] = None) -> Backend:
@@ -500,67 +422,3 @@ def build_backend(kind: str, model_path: str, args, device_override: Optional[st
             device=device,
         )
     raise ValueError(kind)
-
-
-def main():
-    args = parse_args()
-
-    backend_a_kind = args.backend_a or args.backend
-    backend_b_kind = args.backend_b or args.backend
-    if backend_a_kind is None or backend_b_kind is None:
-        raise SystemExit("Specify either --backend (both) or both --backend_a and --backend_b.")
-
-    print(f"[A] {args.model_a} (backend={backend_a_kind}, device={args.device_a or detect_best_device()})")
-    backend_a = build_backend(backend_a_kind, args.model_a, args, device_override=args.device_a)
-    stats_a = eval_backend(
-        backend=backend_a,
-        data_yaml=args.data,
-        imgsz=args.imgsz,
-        batch=args.batch,
-        conf=args.conf,
-        iou=args.iou,
-        max_det=args.max_det,
-        project=args.project,
-        name="A_eval",
-        save_json=args.save_json,
-        save_txt=args.save_txt,
-        plots=args.plots,
-        max_batches = args.max_batches
-    )
-    print("\n===== A stats =====")
-    for k, v in stats_a.items():
-        print(f"{k}: {v}")
-
-    print(f"\n[B] {args.model_b} (backend={backend_b_kind}, device={args.device_b or detect_best_device()})")
-    backend_b = build_backend(backend_b_kind, args.model_b, args, device_override=args.device_b)
-    stats_b = eval_backend(
-        backend=backend_b,
-        data_yaml=args.data,
-        imgsz=args.imgsz,
-        batch=args.batch,
-        conf=args.conf,
-        iou=args.iou,
-        max_det=args.max_det,
-        project=args.project,
-        name="B_eval",
-        save_json=args.save_json,
-        save_txt=args.save_txt,
-        plots=args.plots,
-        max_batches = args.max_batches
-    )
-    print("\n===== B stats =====")
-    for k, v in stats_b.items():
-        print(f"{k}: {v}")
-
-    print("\n===== Delta (B - A) =====")
-    for key in sorted(set(stats_a.keys()) & set(stats_b.keys())):
-        try:
-            da = float(stats_a[key])
-            db = float(stats_b[key])
-            print(f"{key}: {db - da:+.6f}")
-        except Exception:
-            pass
-
-
-if __name__ == "__main__":
-    main()

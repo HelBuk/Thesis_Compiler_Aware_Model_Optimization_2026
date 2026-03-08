@@ -37,7 +37,7 @@ trt_cache/                  # TensorRT engine cache
 ```bash
 source ~/venvs/tvm/bin/activate
 
-Needs 
+Needs: 
     - Installed TVM: 
     https://tvm.apache.org/docs/install/from_source.html
     - Installation for ONNX Runtime: 
