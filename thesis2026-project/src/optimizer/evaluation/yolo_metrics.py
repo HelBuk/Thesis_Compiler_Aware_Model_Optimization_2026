@@ -219,16 +219,65 @@ class TFLiteBackend(Backend):
 
 
 class ORTBackend(Backend):
-    def __init__(self, model_path: str, imgsz: int, conf: float, iou: float, max_det: int, device: str):
+    def __init__(
+        self,
+        model_path: str,
+        imgsz: int,
+        conf: float,
+        iou: float,
+        max_det: int,
+        device: str,
+        provider_kind: str = "ort",
+        trt_fp16: bool = False,
+        trt_int8: bool = False,
+        trt_engine_cache: bool = False,
+        trt_engine_cache_path: str = "./trt_cache",
+        trt_workspace_size: int = 2147483648,
+    ):
         super().__init__(imgsz, conf, iou, max_det, device)
         import onnxruntime as ort
 
-        providers = ["CPUExecutionProvider"]
-        if device.startswith("cuda") or device == "0":
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        self.provider_kind = provider_kind
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
-        self.sess = ort.InferenceSession(model_path, providers=providers)
+        provider_kind = provider_kind.lower()
+        provider_options = None
+
+        if provider_kind == "tensorrt":
+            providers = [
+                "TensorrtExecutionProvider",
+                "CUDAExecutionProvider",
+                "CPUExecutionProvider",
+            ]
+            provider_options = [
+                {
+                    "trt_fp16_enable": trt_fp16,
+                    "trt_int8_enable": trt_int8,
+                    "trt_engine_cache_enable": trt_engine_cache,
+                    "trt_engine_cache_path": trt_engine_cache_path,
+                    "trt_max_workspace_size": str(trt_workspace_size),
+                },
+                {},
+                {},
+            ]
+        elif device.startswith("cuda") or device == "0":
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            provider_options = [{}, {}]
+        else:
+            providers = ["CPUExecutionProvider"]
+            provider_options = [{}]
+
+        self.sess = ort.InferenceSession(
+            model_path,
+            sess_options=sess_options,
+            providers=providers,
+            provider_options=provider_options,
+        )
         self.in_name = self.sess.get_inputs()[0].name
+
+        print("[ORT] requested providers:", providers)
+        print("[ORT] active providers:", self.sess.get_providers())
 
     def infer_batch(self, imgs_bchw01: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
         x = imgs_bchw01.detach().cpu().numpy().astype(np.float32)
@@ -246,7 +295,37 @@ class ORTBackend(Backend):
             )
             preds.append(pred_i)
         return preds
+        
 
+class TensorRTBackend(ORTBackend):
+    def __init__(
+        self,
+        model_path: str,
+        imgsz: int,
+        conf: float,
+        iou: float,
+        max_det: int,
+        device: str,
+        trt_fp16: bool = False,
+        trt_int8: bool = False,
+        trt_engine_cache: bool = False,
+        trt_engine_cache_path: str = "./trt_cache",
+        trt_workspace_size: int = 2147483648,
+    ):
+        super().__init__(
+            model_path=model_path,
+            imgsz=imgsz,
+            conf=conf,
+            iou=iou,
+            max_det=max_det,
+            device=device,
+            provider_kind="tensorrt",
+            trt_fp16=trt_fp16,
+            trt_int8=trt_int8,
+            trt_engine_cache=trt_engine_cache,
+            trt_engine_cache_path=trt_engine_cache_path,
+            trt_workspace_size=trt_workspace_size,
+        )
 
 class TorchBackend(Backend):
     def __init__(self, model_path: str, imgsz: int, conf: float, iou: float, max_det: int, device: str):
@@ -391,6 +470,7 @@ def eval_backend(
 
 def build_backend(kind: str, model_path: str, args, device_override: Optional[str] = None) -> Backend:
     device = device_override or detect_best_device()
+    kind = kind.lower()
 
     if kind == "tflite":
         return TFLiteBackend(
@@ -403,6 +483,7 @@ def build_backend(kind: str, model_path: str, args, device_override: Optional[st
             threads=args.threads,
             delegate=args.tflite_delegate,
         )
+
     if kind == "ort":
         return ORTBackend(
             model_path=model_path,
@@ -411,7 +492,29 @@ def build_backend(kind: str, model_path: str, args, device_override: Optional[st
             iou=args.iou,
             max_det=args.max_det,
             device=device,
+            provider_kind="ort",
+            trt_fp16=getattr(args, "trt_fp16", False),
+            trt_int8=getattr(args, "trt_int8", False),
+            trt_engine_cache=getattr(args, "trt_engine_cache", False),
+            trt_engine_cache_path=getattr(args, "trt_engine_cache_path", "./trt_cache"),
+            trt_workspace_size=getattr(args, "trt_workspace_size", 2147483648),
         )
+
+    if kind == "tensorrt":
+        return TensorRTBackend(
+            model_path=model_path,
+            imgsz=args.imgsz,
+            conf=args.conf,
+            iou=args.iou,
+            max_det=args.max_det,
+            device=device,
+            trt_fp16=getattr(args, "trt_fp16", False),
+            trt_int8=getattr(args, "trt_int8", False),
+            trt_engine_cache=getattr(args, "trt_engine_cache", False),
+            trt_engine_cache_path=getattr(args, "trt_engine_cache_path", "./trt_cache"),
+            trt_workspace_size=getattr(args, "trt_workspace_size", 2147483648),
+        )
+
     if kind == "torch":
         return TorchBackend(
             model_path=model_path,
@@ -421,4 +524,5 @@ def build_backend(kind: str, model_path: str, args, device_override: Optional[st
             max_det=args.max_det,
             device=device,
         )
-    raise ValueError(kind)
+
+    raise ValueError(f"Unsupported backend: {kind}")

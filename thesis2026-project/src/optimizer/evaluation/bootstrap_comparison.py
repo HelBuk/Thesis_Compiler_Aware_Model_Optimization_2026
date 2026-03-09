@@ -397,21 +397,34 @@ def parse_args():
     ap.add_argument("--save_txt", action="store_true")
     ap.add_argument("--save_json", action="store_true")
 
-    ap.add_argument("--model_a", required=True, help="Path to model A (.tflite/.onnx/.pt)")
-    ap.add_argument("--model_b", required=True, help="Path to model B (.tflite/.onnx/.pt)")
+    ap.add_argument("--model_a", required=True, help="Path to model A (.tflite/.onnx/.pt/.engine)")
+    ap.add_argument("--model_b", required=True, help="Path to model B (.tflite/.onnx/.pt/.engine)")
 
-    ap.add_argument("--backend_a", choices=["tflite", "ort", "torch"], default=None, help="Backend for model A")
-    ap.add_argument("--backend_b", choices=["tflite", "ort", "torch"], default=None, help="Backend for model B")
+    ap.add_argument("--backend_a", choices=["tflite", "ort", "torch", "tensorrt"], default=None, help="Backend for model A")
+    ap.add_argument("--backend_b", choices=["tflite", "ort", "torch", "tensorrt"], default=None, help="Backend for model B")
     ap.add_argument(
         "--backend",
-        choices=["tflite", "ort", "torch"],
+        choices=["tflite", "ort", "torch", "tensorrt"],
         default=None,
         help="(Deprecated) single backend for both A and B",
     )
 
-    ap.add_argument("--device_a", default='cpu', help="Device for A (torch: cpu/mps/cuda:0; ort: cpu/cuda:0)")
-    ap.add_argument("--device_b", default='cpu', help="Device for B (torch: cpu/mps/cuda:0; ort: cpu/cuda:0)")
+    ap.add_argument("--trt_fp16", action="store_true", help="Enable TensorRT FP16")
+    ap.add_argument("--trt_int8", action="store_true", help="Enable TensorRT INT8")
+    ap.add_argument("--trt_engine_cache", action="store_true", help="Enable TensorRT engine cache")
+    ap.add_argument("--trt_engine_cache_path", type=str, default="./trt_cache", help="TensorRT engine cache path")
+    ap.add_argument("--trt_workspace_size", type=int, default=2147483648, help="TensorRT workspace size in bytes")
 
+    ap.add_argument(
+        "--device_a",
+        default="cpu",
+        help="Device for A (torch: cpu/mps/cuda:0; ort/tensorrt: cpu/cuda:0)",
+    )
+    ap.add_argument(
+        "--device_b",
+        default="cpu",
+        help="Device for B (torch: cpu/mps/cuda:0; ort/tensorrt: cpu/cuda:0)",
+    )
     ap.add_argument("--threads", type=int, default=4, help="Threads for TFLite")
     ap.add_argument("--tflite_delegate", choices=["cpu", "gpu"], default="cpu", help="TFLite delegate (gpu optional)")
 
@@ -428,6 +441,8 @@ def parse_args():
         ),
     )
     ap.add_argument("--skip_bootstrap", action="store_true", help="Only compute point estimates")
+
+
 
     return ap.parse_args()
 
