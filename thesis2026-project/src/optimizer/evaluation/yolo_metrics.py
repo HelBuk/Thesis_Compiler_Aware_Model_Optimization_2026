@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import gc
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -25,6 +26,10 @@ class Backend:
 
     def infer_batch(self, imgs_bchw01: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
         raise NotImplementedError
+
+    def close(self) -> None:
+        """Optional cleanup hook for backends with native resources."""
+        pass
 
 
 def detect_best_device() -> str:
@@ -171,7 +176,9 @@ class TFLiteBackend(Backend):
                 raise RuntimeError(f"Failed to load TFLite GPU delegate: {e}")
 
         self.interp = tf.lite.Interpreter(
-            model_path=model_path, num_threads=threads, experimental_delegates=delegates
+            model_path=model_path,
+            num_threads=threads,
+            experimental_delegates=delegates,
         )
         self.interp.allocate_tensors()
         self.inp = self.interp.get_input_details()[0]
@@ -205,15 +212,16 @@ class TFLiteBackend(Backend):
             else:
                 y = y.astype(np.float32)
 
-            pred_i = yolo8_output_to_preds_ultra(
-                out=y,
-                imgsz=self.imgsz,
-                conf=self.conf,
-                iou=self.iou,
-                max_det=self.max_det,
-                torch_device="cpu",
+            preds.append(
+                yolo8_output_to_preds_ultra(
+                    out=y,
+                    imgsz=self.imgsz,
+                    conf=self.conf,
+                    iou=self.iou,
+                    max_det=self.max_det,
+                    torch_device="cpu",
+                )
             )
-            preds.append(pred_i)
 
         return preds
 
@@ -231,18 +239,16 @@ class ORTBackend(Backend):
         trt_fp16: bool = False,
         trt_int8: bool = False,
         trt_engine_cache: bool = False,
-        trt_engine_cache_path: str = "./trt_cache",
+        trt_engine_cache_path: str = "../models/trt_cache",
         trt_workspace_size: int = 2147483648,
     ):
         super().__init__(imgsz, conf, iou, max_det, device)
         import onnxruntime as ort
 
-        self.provider_kind = provider_kind
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
         provider_kind = provider_kind.lower()
-        provider_options = None
 
         if provider_kind == "tensorrt":
             providers = [
@@ -285,17 +291,18 @@ class ORTBackend(Backend):
 
         preds = []
         for i in range(x.shape[0]):
-            pred_i = yolo8_output_to_preds_ultra(
-                out=y[i : i + 1],
-                imgsz=self.imgsz,
-                conf=self.conf,
-                iou=self.iou,
-                max_det=self.max_det,
-                torch_device="cpu",
+            preds.append(
+                yolo8_output_to_preds_ultra(
+                    out=y[i : i + 1],
+                    imgsz=self.imgsz,
+                    conf=self.conf,
+                    iou=self.iou,
+                    max_det=self.max_det,
+                    torch_device="cpu",
+                )
             )
-            preds.append(pred_i)
         return preds
-        
+
 
 class TensorRTBackend(ORTBackend):
     def __init__(
@@ -327,6 +334,231 @@ class TensorRTBackend(ORTBackend):
             trt_workspace_size=trt_workspace_size,
         )
 
+
+class TensorRTEngineBackend(Backend):
+    def __init__(
+        self,
+        model_path: str,
+        imgsz: int,
+        conf: float,
+        iou: float,
+        max_det: int,
+        device: str,
+    ):
+        super().__init__(imgsz, conf, iou, max_det, device)
+
+        if device in ("cpu", "", None):
+            device = "cuda:0"
+        if not str(device).startswith("cuda"):
+            raise ValueError(f"TensorRT engine backend requires CUDA device, got: {device}")
+
+        import json
+        import struct
+        import tensorrt as trt
+        import pycuda.driver as cuda
+        import pycuda.autoinit  # noqa: F401
+
+        self.trt = trt
+        self.cuda = cuda
+        self.logger = trt.Logger(trt.Logger.WARNING)
+        self.model_path = model_path
+        self.torch_device = device
+
+        self._d_input = None
+        self._d_output = None
+        self._d_input_nbytes = 0
+        self._d_output_nbytes = 0
+
+        with open(model_path, "rb") as f:
+            engine_bytes = None
+            metadata = {}
+
+            try:
+                meta_len_bytes = f.read(4)
+                if len(meta_len_bytes) != 4:
+                    raise RuntimeError("Could not read engine header")
+
+                meta_len = struct.unpack("<I", meta_len_bytes)[0]
+                meta_raw = f.read(meta_len)
+                metadata = json.loads(meta_raw.decode("utf-8"))
+                engine_bytes = f.read()
+
+                if not engine_bytes:
+                    raise RuntimeError("No engine payload after metadata header")
+
+                print("[TRT] detected Ultralytics engine metadata:", metadata)
+
+            except Exception:
+                f.seek(0)
+                metadata = {}
+                engine_bytes = f.read()
+                print("[TRT] treating file as raw TensorRT engine")
+
+        self.runtime = trt.Runtime(self.logger)
+
+        try:
+            dla = metadata.get("dla", None)
+            if dla is not None:
+                self.runtime.DLA_core = int(dla)
+        except Exception:
+            pass
+
+        self.engine = self.runtime.deserialize_cuda_engine(engine_bytes)
+        if self.engine is None:
+            raise RuntimeError(f"Failed to deserialize TensorRT engine: {model_path}")
+
+        self.context = self.engine.create_execution_context()
+        if self.context is None:
+            raise RuntimeError("Failed to create TensorRT execution context")
+
+        self.stream = self.cuda.Stream()
+
+        self.input_name = None
+        self.output_name = None
+        self.input_dtype = None
+        self.output_dtype = None
+
+        has_num_io_tensors = hasattr(self.engine, "num_io_tensors")
+        has_get_tensor_name = hasattr(self.engine, "get_tensor_name")
+        has_tensor_mode = hasattr(self.engine, "get_tensor_mode")
+
+        if has_num_io_tensors and has_get_tensor_name and has_tensor_mode:
+            for i in range(self.engine.num_io_tensors):
+                name = self.engine.get_tensor_name(i)
+                mode = self.engine.get_tensor_mode(name)
+                if mode == trt.TensorIOMode.INPUT:
+                    self.input_name = name
+                    self.input_dtype = trt.nptype(self.engine.get_tensor_dtype(name))
+                elif mode == trt.TensorIOMode.OUTPUT:
+                    self.output_name = name
+                    self.output_dtype = trt.nptype(self.engine.get_tensor_dtype(name))
+        else:
+            for i in range(self.engine.num_bindings):
+                name = self.engine.get_binding_name(i)
+                if self.engine.binding_is_input(i):
+                    self.input_name = name
+                    self.input_dtype = trt.nptype(self.engine.get_binding_dtype(i))
+                else:
+                    self.output_name = name
+                    self.output_dtype = trt.nptype(self.engine.get_binding_dtype(i))
+
+        if self.input_name is None or self.output_name is None:
+            raise RuntimeError("Could not identify TensorRT input/output tensors")
+
+        print("[TRT] input tensor:", self.input_name, self.input_dtype)
+        print("[TRT] output tensor:", self.output_name, self.output_dtype)
+
+    def _set_input_shape(self, x_shape: Tuple[int, ...]) -> None:
+        if hasattr(self.context, "set_input_shape"):
+            self.context.set_input_shape(self.input_name, x_shape)
+            return
+
+        if hasattr(self.engine, "get_binding_index") and hasattr(self.context, "set_binding_shape"):
+            idx = self.engine.get_binding_index(self.input_name)
+            self.context.set_binding_shape(idx, x_shape)
+            return
+
+        raise RuntimeError("Could not set TensorRT input shape for this runtime/API version")
+
+    def _get_output_shape(self) -> Tuple[int, ...]:
+        if hasattr(self.context, "get_tensor_shape"):
+            return tuple(self.context.get_tensor_shape(self.output_name))
+
+        if hasattr(self.engine, "get_binding_index") and hasattr(self.context, "get_binding_shape"):
+            idx = self.engine.get_binding_index(self.output_name)
+            return tuple(self.context.get_binding_shape(idx))
+
+        raise RuntimeError("Could not get TensorRT output shape for this runtime/API version")
+
+    def _execute(self, d_input, d_output) -> None:
+        if hasattr(self.context, "set_tensor_address") and hasattr(self.context, "execute_async_v3"):
+            self.context.set_tensor_address(self.input_name, int(d_input))
+            self.context.set_tensor_address(self.output_name, int(d_output))
+            ok = self.context.execute_async_v3(self.stream.handle)
+            if not ok:
+                raise RuntimeError("TensorRT execute_async_v3 failed")
+            return
+
+        if hasattr(self.engine, "get_binding_index") and hasattr(self.context, "execute_async_v2"):
+            bindings = [None] * self.engine.num_bindings
+            in_idx = self.engine.get_binding_index(self.input_name)
+            out_idx = self.engine.get_binding_index(self.output_name)
+            bindings[in_idx] = int(d_input)
+            bindings[out_idx] = int(d_output)
+            ok = self.context.execute_async_v2(bindings=bindings, stream_handle=self.stream.handle)
+            if not ok:
+                raise RuntimeError("TensorRT execute_async_v2 failed")
+            return
+
+        raise RuntimeError("No supported TensorRT execution API found")
+
+    def _ensure_buffers(self, input_nbytes: int, output_nbytes: int) -> None:
+        if self._d_input is None or self._d_input_nbytes < input_nbytes:
+            if self._d_input is not None:
+                self._d_input.free()
+            self._d_input = self.cuda.mem_alloc(input_nbytes)
+            self._d_input_nbytes = input_nbytes
+
+        if self._d_output is None or self._d_output_nbytes < output_nbytes:
+            if self._d_output is not None:
+                self._d_output.free()
+            self._d_output = self.cuda.mem_alloc(output_nbytes)
+            self._d_output_nbytes = output_nbytes
+
+    def infer_batch(self, imgs_bchw01: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
+        x = imgs_bchw01.detach().cpu().numpy()
+        x = np.ascontiguousarray(x.astype(self.input_dtype, copy=False))
+
+        preds = []
+        for i in range(x.shape[0]):
+            x_i = np.ascontiguousarray(x[i : i + 1])
+
+            self._set_input_shape(tuple(x_i.shape))
+            out_shape = self._get_output_shape()
+            if any(d < 0 for d in out_shape):
+                out_shape = (1, 84, 8400)
+
+            y_i = np.empty(out_shape, dtype=self.output_dtype)
+            self._ensure_buffers(x_i.nbytes, y_i.nbytes)
+
+            self.cuda.memcpy_htod_async(self._d_input, x_i, self.stream)
+            self._execute(self._d_input, self._d_output)
+            self.cuda.memcpy_dtoh_async(y_i, self._d_output, self.stream)
+            self.stream.synchronize()
+
+            preds.append(
+                yolo8_output_to_preds_ultra(
+                    out=y_i,
+                    imgsz=self.imgsz,
+                    conf=self.conf,
+                    iou=self.iou,
+                    max_det=self.max_det,
+                    torch_device="cpu",
+                )
+            )
+
+        return preds
+
+    def close(self) -> None:
+        try:
+            if self._d_input is not None:
+                self._d_input.free()
+                self._d_input = None
+                self._d_input_nbytes = 0
+            if self._d_output is not None:
+                self._d_output.free()
+                self._d_output = None
+                self._d_output_nbytes = 0
+        except Exception:
+            pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 class TorchBackend(Backend):
     def __init__(self, model_path: str, imgsz: int, conf: float, iou: float, max_det: int, device: str):
         super().__init__(imgsz, conf, iou, max_det, device)
@@ -338,9 +570,9 @@ class TorchBackend(Backend):
         self.model.eval()
         self.model.to(self.torch_device)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def infer_batch(self, imgs_bchw01: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
-        x = imgs_bchw01.to(self.torch_device)
+        x = imgs_bchw01.to(self.torch_device, non_blocking=False)
         if x.dtype != torch.float32:
             x = x.float()
 
@@ -352,16 +584,23 @@ class TorchBackend(Backend):
 
         preds = []
         for i in range(out_np.shape[0]):
-            pred_i = yolo8_output_to_preds_ultra(
-                out=out_np[i : i + 1],
-                imgsz=self.imgsz,
-                conf=self.conf,
-                iou=self.iou,
-                max_det=self.max_det,
-                torch_device="cpu",
+            preds.append(
+                yolo8_output_to_preds_ultra(
+                    out=out_np[i : i + 1],
+                    imgsz=self.imgsz,
+                    conf=self.conf,
+                    iou=self.iou,
+                    max_det=self.max_det,
+                    torch_device="cpu",
+                )
             )
-            preds.append(pred_i)
         return preds
+
+    def close(self) -> None:
+        try:
+            self.model.to("cpu")
+        except Exception:
+            pass
 
 
 def make_validator(
@@ -377,6 +616,7 @@ def make_validator(
     save_json: bool,
     save_txt: bool,
     plots: bool,
+    workers: int = 0,
 ):
     args = dict(
         data=data_yaml,
@@ -398,12 +638,14 @@ def make_validator(
         project=project,
         name=name,
         exist_ok=True,
+        workers=workers,
     )
 
     data_dict = check_det_dataset(data_yaml)
     v = DetectionValidator(args=IterableSimpleNamespace(**args))
     v.data = data_dict
     v.args.data = data_yaml
+    v.args.workers = workers
     v.device = torch.device("cpu")
     return v
 
@@ -427,20 +669,22 @@ def eval_backend(
     save_txt: bool,
     plots: bool,
     max_batches: int,
+    workers: int = 0,
 ) -> Dict[str, float]:
     v = make_validator(
-        data_yaml,
-        imgsz,
-        batch,
-        conf,
-        iou,
-        max_det,
+        data_yaml=data_yaml,
+        imgsz=imgsz,
+        batch=batch,
+        conf=conf,
+        iou=iou,
+        max_det=max_det,
         device="cpu",
         project=project,
         name=name,
         save_json=save_json,
         save_txt=save_txt,
         plots=plots,
+        workers=workers,
     )
 
     names = v.data.get("names", None)
@@ -451,16 +695,43 @@ def eval_backend(
 
     v.init_metrics(model=_NamesOnlyModel(names))
     v.dataloader = v.get_dataloader(v.data[v.args.split], batch)
+    print(f"[DEBUG dataloader] workers={getattr(v.dataloader, 'num_workers', 'N/A')}")
+
+    import time
+
+    t_start = time.perf_counter()
 
     for batch_i, batch_data in enumerate(v.dataloader):
+        t0 = time.perf_counter()
         batch_data = v.preprocess(batch_data)
+        t1 = time.perf_counter()
+
         imgs = batch_data["img"]
         preds = backend.infer_batch(imgs)
+        t2 = time.perf_counter()
+
         v.update_metrics(preds, batch_data)
+        t3 = time.perf_counter()
 
         if batch_i == 0:
             p0 = preds[0]
             print("[DEBUG] first batch preds[0]:", p0["bboxes"].shape, p0["conf"].shape, p0["cls"].shape)
+
+        if (batch_i + 1) % 100 == 0:
+            print(
+                f"[EVAL] processed={batch_i + 1} "
+                f"preprocess={t1 - t0:.4f}s "
+                f"infer={t2 - t1:.4f}s "
+                f"metrics={t3 - t2:.4f}s "
+                f"elapsed={t3 - t_start:.1f}s"
+            )
+
+        del imgs, preds, batch_data
+
+        if (batch_i + 1) % 200 == 0:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if max_batches and batch_i + 1 >= max_batches:
             break
@@ -513,6 +784,16 @@ def build_backend(kind: str, model_path: str, args, device_override: Optional[st
             trt_engine_cache=getattr(args, "trt_engine_cache", False),
             trt_engine_cache_path=getattr(args, "trt_engine_cache_path", "./trt_cache"),
             trt_workspace_size=getattr(args, "trt_workspace_size", 2147483648),
+        )
+
+    if kind == "trt_engine":
+        return TensorRTEngineBackend(
+            model_path=model_path,
+            imgsz=args.imgsz,
+            conf=args.conf,
+            iou=args.iou,
+            max_det=args.max_det,
+            device=device,
         )
 
     if kind == "torch":

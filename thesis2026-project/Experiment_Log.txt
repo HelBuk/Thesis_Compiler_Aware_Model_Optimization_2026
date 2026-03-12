@@ -1,0 +1,106 @@
+Quantization
+
+
+-TFLite: 
+
+1. Post Training Dynamic Rwnge Quantization
+
+	•	Weights: FP32 → INT8
+	•	Activations: kept in FP32 during inference
+
+
+Formula
+
+Quantization maps floats to integers:
+
+q = \text{round}\left(\frac{x}{scale}\right) + zero\_point
+
+and dequantization:
+
+x = scale \cdot (q - zero\_point)
+ 
+Where:
+	•	scale → floating scaling factor
+	•	zero_point → integer offset
+
+
+2. Full Integer Quantization (INT8):
+
+weights, activations, inference ops - INT8
+
+After:
+
+model.export(format="tflite", imgsz=640, int8=True, nms=False, data=PATH_CALIB_DATA, device='cpu', split="train", simplify=True, opset=17, verbose=True) 
+
+Generated:
+
+TFLite:
+
+3,3M    yolov8n_full_integer_quant.tflite : weights: INT8, activations: INT8, input: INT8, output: INT8
+3,3M    yolov8n_integer_quant.tflite -- weights: INT8, activations: INT8, input/output tensors: FP32
+3,4M    yolov8n_int8.tflite -- weights: INT8, activations: mostly FP32, execution hybrid kernels: The runtime dynamically quantizes activations during execution
+6,2M    yolov8n_float16.tflite -- weights: FP16, activations: FP32, float inference
+13M     yolov8n_float32.tflite -- weights: FP32, activations: FP32, float inference
+
+Original model:
+
+6,3M    yolov8n.pt
+
+Onnx:
+
+Generated with script:
+./src/optimizer/quantization/quantize_onnx.py
+
+3,4M    yolov8n_opset17_int8.onnx
+6,2M    yolov8n_opset17_fp16.onnx
+13M     yolov8n_opset17_fp32.onnx
+
+TensorRT:
+
+Generated with script:
+./src/optimizer/quantization/compile_yolo.py
+
+5,1M    yolov8n.engine
+
+Mesurements:
+
+- yolov8n_full_integer_quant.tflite:
+
+python -m optimizer.evaluation.bootstrap_comparison   --data "../datasets/coco/data.yaml"   --max_batches 1000  --model_a "../models/yolov8n.pt"   --model_b "../models/quantized_models/yolov8n_tflite_int8/yolov8n_full_integer_quant.tflite"   --backend_a torch   --backend_b tflite   --batch 1   --bootstrap_iters 100  --device_a "cpu"   --device_b "cpu"  --workers 2
+
+--- metrics/mAP50(B) ---
+A: 0.538408
+B: 0.504211
+delta (B - A): -0.034197
+bootstrap mean delta: -0.035634
+95% CI: [-0.042811, -0.029440]
+approx. two-sided p-value: 0
+significant at 95% level: True
+
+--- metrics/mAP50-95(B) ---
+A: 0.389772
+B: 0.348624
+delta (B - A): -0.041148
+bootstrap mean delta: -0.042058
+95% CI: [-0.049260, -0.035164]
+approx. two-sided p-value: 0
+significant at 95% level: True
+
+--- metrics/precision(B) ---
+A: 0.629099
+B: 0.617206
+delta (B - A): -0.011892
+bootstrap mean delta: -0.020901
+95% CI: [-0.072510, +0.014979]
+approx. two-sided p-value: 0.356
+significant at 95% level: False
+
+--- metrics/recall(B) ---
+A: 0.488400
+B: 0.445009
+delta (B - A): -0.043391
+bootstrap mean delta: -0.037908
+95% CI: [-0.056568, -0.010225]
+approx. two-sided p-value: 0.004
+significant at 95% level: True
+

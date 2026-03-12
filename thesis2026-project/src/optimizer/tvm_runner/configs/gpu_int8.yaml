@@ -1,0 +1,54 @@
+run:
+  name: "yolov8n_orin_gpu_int8"
+  out_dir: "./out/experiments"
+  seed: 0
+
+model:
+  onnx_path: "../../../models/quantized_models/onnx/yolov8n_opset17_int8_qop.onnx"
+  pt_path: "../../../models/yolov8n.pt"
+  imgsz: 640
+  batch: 1
+
+device:
+  kind: "cuda"            # "cuda" or "cpu"
+  arch: null
+  max_num_threads: 1024
+  max_threads_per_block: 1024
+  thread_warp_size: 32
+  max_shared_memory_per_block: 49152
+  registers_per_block: 65536
+  host:
+    kind: "llvm"
+    mtriple: "aarch64-linux-gnu"
+    mcpu: "cortex-a78" # native - for automatic detection
+    #num_cores: 6
+
+precision:
+  name: "fp32"            # "fp32" | "fp16"
+
+tvm:
+  log_dir: "./out/tvm_tuning_logs/yolov8n_orin_gpu_int8_v1"
+  use_existing_db: true   # compile can reuse DB without tuning
+  max_trials_global: 100
+  max_trials_per_task: 5
+  num_trials_per_iter: 3
+  timeout_builder_s: 300
+  timeout_runner_s: 300
+  export_path: "./out/tvm_compiled_models/yolov8n_orin_gpu_int8_v1.so"
+
+tvm_targeted_tuning:
+  enable: false
+  operations: null                    # Tasks to tune: String or List[str]
+
+benchmark:
+  runs: 200
+  warmup: 20
+
+onnxruntime:
+  #provider: "CUDAExecutionProvider"   # "CPUExecutionProvider" | "CUDAExecutionProvider" | "TensorrtExecutionProvider"
+  threads: 1 #so.intra_op_num_threads for ONNXRT
+  trt:
+    enable_engine_cache: true
+    engine_cache_path: "./trt_cache/trt_current"
+    fp16_enable: false
+  use_arena: true # Default: True; if None: True; Otherwise: val; 
