@@ -27,6 +27,11 @@
 \usepackage{xcolor}
 \usepackage{csquotes}
 \usepackage{amssymb}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage[acronym]{glossaries}
+\makeglossaries
 \lstdefinelanguage{json}{
   morestring=[b]",
   morecomment=[l]{//},
@@ -66,6 +71,11 @@
 \newcommand{\mAP}{\mathrm{mAP}}
 \newcommand{\Precision}{\mathrm{P}}
 \newcommand{\Recall}{\mathrm{R}}
+
+\newglossaryentry{fp32}{name=FP32, description={32-bit floating-point precision}}
+\newglossaryentry{int8}{name=INT8, description={8-bit integer precision}}
+\newglossaryentry{fps}{name=FPS, description={frames per second}}
+\newglossaryentry{dvfs}{name=DVFS, description={dynamic voltage and frequency scaling}}
 
 % ======= Basic Formatting =======
 \onehalfspacing
@@ -962,6 +972,150 @@ TVM performs hardware-aware graph partitioning.
     \subsection{Performance overview}
     \subsection{Prediction Examples}
     \subsection{Hailo impact}
+
+\section{FP32 Runtime Comparison on Jetson Orin}
+\label{subsec:fp32_runtime_comparison_orin}
+
+To establish a consistent FP32 baseline across deployment runtimes, a unified benchmark was executed on Jetson Orin.
+The run was performed on the shared evaluation pipeline, which measures four
+inference backends under the same input tensor shape and benchmarking procedure:
+\begin{itemize}
+  \item TVM (Relax VM, loaded from a precompiled \texttt{.so}),
+  \item ONNX Runtime CUDA Execution Provider,
+  \item ONNX Runtime TensorRT Execution Provider,
+  \item PyTorch (Ultralytics model execution).
+\end{itemize}
+
+The configuration (\texttt{gpu\_fp32.yaml}) used:
+\begin{itemize}
+  \item input model: \texttt{yolov8n\_opset17\_fp32.onnx},
+  \item PyTorch checkpoint: \texttt{yolov8n.pt},
+  \item device: CUDA (\texttt{cuda:0}),
+  \item precision: FP32,
+  \item input size: \(640 \times 640\), batch size \(=1\),
+  \item benchmark protocol: 200 measured runs with 20 warmup iterations.
+\end{itemize}
+
+For TVM, the evaluated module was compiled using an existing MetaSchedule database generated in an earlier tuning stage.
+The tuning logs indicate a substantial search effort (\(4282\) total trials), suggesting that the measured TVM result reflects a tuned, deployment-oriented build rather than an untuned baseline.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lrr}
+\hline
+Runtime & Latency [ms] & FPS \\
+\hline
+ONNX Runtime TensorRT EP & 13.5292 & 73.9142 \\
+TVM (Relax VM) & 23.5091 & 42.5368 \\
+ONNX Runtime CUDA EP & 23.8097 & 41.9998 \\
+PyTorch (Ultralytics) & 24.7877 & 40.3426 \\
+\hline
+\end{tabular}
+\caption{FP32 runtime benchmark results on Jetson Orin (\(640 \times 640\), batch \(=1\)).}
+\label{tab:fp32_runtime_benchmark_orin}
+\end{table}
+
+The results show a clear separation between TensorRT-backed and non-TensorRT execution in this setup.
+ONNX Runtime with TensorRT EP achieved the lowest latency (\(13.53\) ms), corresponding to \(73.91\) FPS, while TVM, ONNX Runtime CUDA EP, and PyTorch formed a second cluster around \(23.5\)--\(24.8\) ms (\(\sim 40\)--\(43\) FPS).
+Relative to ONNX Runtime CUDA EP, TensorRT EP reduced latency by approximately \(43.2\%\) (about \(1.76\times\) speedup).
+TVM and ONNX Runtime CUDA EP were close in performance, with TVM slightly faster in this run.
+
+Overall, this experiment provides a practical FP32 deployment baseline for subsequent quantization analysis.
+It also indicates that, on Jetson Orin, backend selection can have an impact comparable to model-level optimization: the same FP32 network exhibits markedly different inference speed depending on the runtime execution provider.
+
+
+\section{Quantization Influence on YOLOv8n}
+Statistical significance was evaluated with a paired bootstrap test on validation images (1000 resamples), and
+confidence intervals were computed using the percentile method. The results indicate that INT8 quantization causes
+a statistically significant decrease in detection accuracy.
+
+\subsection{TensorRT FP32 vs INT8 Benchmarking on Jetson Orin}
+\label{subsec:tensorrt_fp32_int8_orin}
+
+To compare TensorRT performance for FP32 and INT8 inference on Jetson Orin, two engines were exported from the same
+YOLOv8n model (FP32 and INT8) using Ultralytics export.
+Benchmarks used batch size $1$ and input size $640 \times 640$. Reported latency is end-to-end per-batch latency,
+including host invocation, device execution, synchronization, and output transfer.
+
+\paragraph{Export parameters.}
+\begin{itemize}
+  \item Model: \texttt{yolov8n.pt}
+  \item Input: \texttt{640 \(\times\) 640}, batch size \(=1\)
+  \item Device: GPU (\texttt{device=0})
+  \item TensorRT workspace: \(4\) GB
+  \item FP32 engine: \texttt{int8=False, half=False}
+  \item INT8 engine: \texttt{int8=True, half=False, data=DATA\_YAML, fraction=1.0, split="train"}
+\end{itemize}
+
+Early measurements showed strong sensitivity to benchmarking procedure. In particular, when both engines were loaded
+and benchmarked sequentially in one process, the second run often benefited from a warmer runtime state. To control
+this effect, additional experiments were performed with:
+\begin{itemize}
+  \item reversed engine order,
+  \item longer warmup ($500$ iterations),
+  \item fixed Jetson performance settings (\texttt{sudo nvpmodel -m 0}, \texttt{sudo jetson\_clocks}).
+\end{itemize}
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{llrrrrrr}
+\hline
+Phase & Run mode & FP32 ms & FP32 FPS & INT8 ms & INT8 FPS & INT8 gain \\
+\hline
+No clocks & dual (int8$\rightarrow$fp32) & 21.274 & 47.006 & 20.473 & 48.844 & 3.8\% \\
+No clocks & dual (fp32$\rightarrow$int8) & 21.067 & 47.469 & 15.545 & 64.330 & 26.2\% \\
+No clocks & separate runs & 23.122 & 43.248 & 20.249 & 49.385 & 12.4\% \\
+With clocks & dual (int8$\rightarrow$fp32) & 16.459 & 60.756 & 9.876 & 101.252 & 40.0\% \\
+With clocks & dual (fp32$\rightarrow$int8) & 16.768 & 59.639 & 9.655 & 103.569 & 42.4\% \\
+With clocks & separate runs & 16.588 & 60.284 & 10.068 & 99.328 & 39.3\% \\
+\hline
+\end{tabular}
+\caption{TensorRT YOLOv8n benchmark summary (batch=1, runs=1000, warmup=500).}
+\label{tab:trt_1000_500_summary}
+\end{table}
+
+Under locked-performance conditions, the INT8 engine achieved approximately $1.65\times$ higher throughput than FP32.
+Before locking power and clocks, the measured FP32--INT8 gap varied substantially with run order and process isolation.
+After enabling maximum performance mode and fixed clocks, measurements became more stable and the INT8 advantage
+increased. The resulting measurements are summarized in Table~\ref{tab:trt_1000_500_summary}.
+
+This pattern suggests that earlier variability was dominated by DVFS and runtime warmup effects.
+In sequential same-process benchmarking, the later run can benefit from an already initialized CUDA runtime, warmed
+TensorRT execution context, and elevated GPU/memory clocks. These effects are especially pronounced on Jetson platforms.
+
+Therefore, Jetson benchmarking should report not only numerical performance but also measurement protocol, warmup
+configuration, and device power state.
+
+\texttt{sudo nvpmodel -m 0} selects a high-performance power mode (power budget, online cores, and allowed
+CPU/GPU/EMC clock limits).
+\texttt{sudo jetson\_clocks} then fixes clocks near their maximum allowed values.
+
+Although these settings improve peak performance, they are not always appropriate for continuous use:
+\begin{itemize}
+  \item higher power consumption,
+  \item increased heat and possible thermal throttling in long runs,
+  \item more fan noise,
+  \item lower realism for power-managed deployment scenarios,
+  \item reduced responsiveness for mixed workloads,
+  \item greater long-term thermal stress.
+\end{itemize}
+
+A practical approach is to enable them for controlled benchmarking and disable them for routine development or
+power-constrained deployment.
+
+
+\section{YOLO pruning}
+
+The main caveat is that once YOLOv8n is converted into a TensorRT engine,
+TensorRT may fuse layers, insert reformats, and choose different
+kernels/tactics. So the “slow part” you see in TensorRT is not always
+a 1:1 match with the original YOLO PyTorch layers. NVIDIA explicitly
+notes that each TensorRT layer can launch multiple kernels, and extra
+reformat operations may appear as kernels or device-to-device copies. 
+
+
 
 % Tables, figures; explain what the numbers mean.
 
