@@ -1,7 +1,7 @@
 from ultralytics import YOLO
 
 MODEL_PT = "../models/yolov8n.pt"
-DATA_YAML = "../datasets/coco_subset/train_0_1percent/coco_subset.yaml"
+DATA_YAML = "../datasets/coco_subset/train_1percent/coco_subset.yaml"
 
 model = YOLO(MODEL_PT)
 

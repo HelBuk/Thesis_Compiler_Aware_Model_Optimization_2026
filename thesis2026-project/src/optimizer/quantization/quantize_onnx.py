@@ -14,7 +14,7 @@ from onnxruntime.quantization import (
 # Config
 # ---------------------------
 MODEL_FP32 = "../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"
-MODEL_INT8 = "../models/quantized_models/onnx/yolov8n_opset17_int8_qop.onnx"
+MODEL_INT8 = "../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_0_1percent_coco.onnx"
 IMAGE_DIR = "../datasets/coco_subset/train_0_1percent/images"
 INPUT_NAME = "images"
 IMG_SIZE = (640, 640)
@@ -23,8 +23,9 @@ IMG_SIZE = (640, 640)
 def preprocess_image(image_path: str, img_size=(640, 640)) -> np.ndarray:
     target_h, target_w = img_size
 
-    img = Image.open(image_path).convert("RGB")
-    img = np.asarray(img)  # HWC uint8
+    with Image.open(image_path) as img:
+        img = img.convert("RGB")
+        img = np.asarray(img)  # HWC uint8
 
     h, w = img.shape[:2]
     r = min(target_w / w, target_h / h)
@@ -51,47 +52,44 @@ def preprocess_image(image_path: str, img_size=(640, 640)) -> np.ndarray:
 
 
 class ImageCalibrationDataReader(CalibrationDataReader):
-    def __init__(self, image_dir: str, input_name: str, img_size=(640, 640), max_samples=None):
+    def __init__(self, image_dir: str, input_name: str, img_size=(640, 640)):
         self.input_name = input_name
         self.img_size = img_size
 
         exts = {".jpg", ".jpeg", ".png", ".bmp"}
         self.image_paths = sorted(
-            [p for p in Path(image_dir).iterdir() if p.suffix.lower() in exts]
+            p for p in Path(image_dir).iterdir() if p.suffix.lower() in exts
         )
 
-        if max_samples is not None:
-            self.image_paths = self.image_paths[:max_samples]
+        self._index = 0
 
-        self.data_list = [
-            {self.input_name: preprocess_image(str(p), self.img_size)}
-            for p in self.image_paths
-        ]
-        self.enum_data = None
-
-        print(f"Loaded {len(self.data_list)} calibration images")
+        print(f"Found {len(self.image_paths)} calibration images")
 
     def get_next(self):
-        if self.enum_data is None:
-            self.enum_data = iter(self.data_list)
-        return next(self.enum_data, None)
+        if self._index >= len(self.image_paths):
+            return None
+
+        image_path = self.image_paths[self._index]
+        self._index += 1
+
+        arr = preprocess_image(str(image_path), self.img_size)
+        return {self.input_name: arr}
 
     def rewind(self):
-        self.enum_data = None
+        self._index = 0
 
 
 dr = ImageCalibrationDataReader(
     image_dir=IMAGE_DIR,
     input_name=INPUT_NAME,
     img_size=IMG_SIZE,
-    max_samples=100,   # optional
 )
 
 quantize_static(
     model_input=MODEL_FP32,
     model_output=MODEL_INT8,
     calibration_data_reader=dr,
-    quant_format=QuantFormat.QOperator, #QDQ
+    quant_format=QuantFormat.QDQ,  # QOperator / QDQ
     activation_type=QuantType.QInt8,
     weight_type=QuantType.QInt8,
     calibrate_method=CalibrationMethod.MinMax,

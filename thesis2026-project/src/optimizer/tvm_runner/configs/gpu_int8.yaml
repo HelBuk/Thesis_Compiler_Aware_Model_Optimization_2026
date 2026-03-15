@@ -4,7 +4,7 @@ run:
   seed: 0
 
 model:
-  onnx_path: "../../../models/quantized_models/onnx/yolov8n_opset17_int8_qop.onnx"
+  onnx_path: "../../../models/quantized_models/onnx/yolov8n_opset17_int8_qdq_tvmfix.onnx"
   pt_path: "../../../models/yolov8n.pt"
   imgsz: 640
   batch: 1
