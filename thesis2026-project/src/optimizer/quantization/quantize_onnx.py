@@ -14,7 +14,7 @@ from onnxruntime.quantization import (
 # Config
 # ---------------------------
 MODEL_FP32 = "../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"
-MODEL_INT8 = "../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_0_1percent_coco.onnx"
+MODEL_INT8 = "../models/quantized_models/onnx/yolov8n_opset17_int8_QOperator_0_1percent_coco.onnx"
 IMAGE_DIR = "../datasets/coco_subset/train_0_1percent/images"
 INPUT_NAME = "images"
 IMG_SIZE = (640, 640)
@@ -89,7 +89,7 @@ quantize_static(
     model_input=MODEL_FP32,
     model_output=MODEL_INT8,
     calibration_data_reader=dr,
-    quant_format=QuantFormat.QDQ,  # QOperator / QDQ
+    quant_format=QuantFormat.QOperator,  # QOperator / QDQ
     activation_type=QuantType.QInt8,
     weight_type=QuantType.QInt8,
     calibrate_method=CalibrationMethod.MinMax,
