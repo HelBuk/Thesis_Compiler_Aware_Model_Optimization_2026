@@ -65,6 +65,7 @@ class ORTBackend:
         self.provider = _to_ort_provider_name(provider)
 
         so = ort.SessionOptions()
+        so.enable_profiling = True
         so.intra_op_num_threads = int(threads)
         so.inter_op_num_threads = 1
         so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -72,29 +73,36 @@ class ORTBackend:
         so.enable_cpu_mem_arena = bool(use_arena)
 
         providers: Sequence[ProviderSpec]
+
         if self.provider == "TensorrtExecutionProvider":
+            trt_options = {
+                "trt_engine_cache_enable": bool(trt_engine_cache_enable),
+                "trt_engine_cache_path": trt_engine_cache_path,
+                "trt_fp16_enable": bool(trt_fp16_enable),
+                "trt_max_workspace_size": int(trt_max_workspace_size),
+            }
+
+            if trt_int8_enable:
+                trt_options["trt_int8_enable"] = True
+                if trt_int8_calibration_table_name:
+                    trt_options["trt_int8_calibration_table_name"] = trt_int8_calibration_table_name
+
             providers = [
-                (
-                    "TensorrtExecutionProvider",
-                    {
-                        "trt_engine_cache_enable": bool(trt_engine_cache_enable),
-                        "trt_engine_cache_path": trt_engine_cache_path,
-                        "trt_fp16_enable": bool(trt_fp16_enable),
-                        "trt_max_workspace_size": int(trt_max_workspace_size),
-                        "trt_int8_enable": bool(args.trt_int8_enable),
-                        "trt_int8_calibration_table_name": args.trt_int8_calibration_table_name,
-                    },
-                ),
+                ("TensorrtExecutionProvider", trt_options),
                 ("CUDAExecutionProvider", {}),
                 ("CPUExecutionProvider", {}),
             ]
+
         elif self.provider == "CUDAExecutionProvider":
             providers = [
                 ("CUDAExecutionProvider", {}),
                 ("CPUExecutionProvider", {}),
             ]
+
         else:
-            providers = [("CPUExecutionProvider", {})]
+            providers = [
+                ("CPUExecutionProvider", {}),
+            ]
 
         self.session = ort.InferenceSession(
             self.model_path,
@@ -285,6 +293,9 @@ def main() -> None:
         )
 
         print_dict(f"{args.name} benchmark", bench)
+
+        profile_path = backend.session.end_profiling()
+        print(f"ONNX Runtime profile saved to: {profile_path}")
 
         if args.out_json:
             results = {

@@ -139,7 +139,7 @@ def build_arg_namespace(args: argparse.Namespace) -> argparse.Namespace:
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Benchmark and evaluate one TensorRT engine in an isolated process")
 
-    ap.add_argument("--data", required=True, help="Ultralytics dataset YAML")
+    ap.add_argument("--data", required=False, help="Ultralytics dataset YAML")
     ap.add_argument("--engine", required=True, help="Path to TensorRT engine")
     ap.add_argument("--name", required=True, help="Display name")
     ap.add_argument("--device", default="cuda:0")
@@ -157,7 +157,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--eval_max_batches", type=int, default=0, help="0 = full val set")
     ap.add_argument("--workers", type=int, default=0)
 
-    ap.add_argument("--project", type=str, default="runs/engine_eval")
+    ap.add_argument("--project", type=str, default="runs/trt_engine_eval")
     ap.add_argument("--save_json", action="store_true")
     ap.add_argument("--save_txt", action="store_true")
     ap.add_argument("--plots", action="store_true")
@@ -166,7 +166,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--trt_engine_cache_path", type=str, default="./trt_cache")
     ap.add_argument("--trt_workspace_size", type=int, default=2147483648)
 
-    ap.add_argument("--out_json", required=True, help="Output JSON path for this single engine result")
+    ap.add_argument("--out_json", required=False, help="Output JSON path for this single engine result")
 
     return ap.parse_args()
 
