@@ -157,6 +157,7 @@ def main(args):
             resume=(epoch > 0),
             save=False,
             val=True,
+            fraction=args.fraction,
         )
 
         # rebuild pruner over updated model weights
@@ -200,6 +201,7 @@ def main(args):
         name=f"{args.name}_finetune",
         exist_ok=True,
         resume=False,
+        fraction=args.fraction,
     )
 
 if __name__ == "__main__":
@@ -221,4 +223,5 @@ if __name__ == "__main__":
     ap.add_argument("--search-epochs", type=int, default=40)
     ap.add_argument("--finetune-epochs", type=int, default=100)
     ap.add_argument("--pruned-weights", default="yolov8n_ocs_pruned.pt")
+    ap.add_argument("--fraction", type=float, default=0.01)
     main(ap.parse_args())
