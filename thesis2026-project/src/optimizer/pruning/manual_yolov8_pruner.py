@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 import re
-from dataclasses import dataclass
 
 import yaml
 import torch
@@ -17,12 +16,17 @@ from ultralytics.models.yolo.detect import DetectionTrainer
 
 RX_C2F_CV1 = re.compile(r"^model\.(\d+)\.cv1$")
 RX_SPPF_CV1 = re.compile(r"^model\.(\d+)\.cv1$")
+RX_C2F_BN_CV1 = re.compile(r"^model\.(\d+)\.m\.(\d+)\.cv1$")
+RX_C2F_BN_CV2 = re.compile(r"^model\.(\d+)\.m\.(\d+)\.cv2$")
+#CV2 should work by default 
 
 @dataclass
 class ResolvedTargets:
     block_targets: list[int]
     c2f_hidden_targets: list[int]
     sppf_hidden_targets: list[int]
+    c2f_bn_cv1_targets: list[tuple[int, int]]
+    c2f_bn_cv2_targets: list[tuple[int, int]]
     unknown: list[str]
 
 
@@ -122,7 +126,10 @@ def resolve_targets(model: nn.Module, targets_csv: str) -> ResolvedTargets:
     block_targets: set[int] = set()
     c2f_hidden_targets: set[int] = set()
     sppf_hidden_targets: set[int] = set()
+    c2f_bn_cv1_targets: set[tuple[int, int]] = set()
+    c2f_bn_cv2_targets: set[tuple[int, int]] = set()
     unknown: list[str] = []
+
 
     for raw in [x.strip() for x in targets_csv.split(",") if x.strip()]:
         t = _norm_target(raw)
@@ -168,13 +175,32 @@ def resolve_targets(model: nn.Module, targets_csv: str) -> ResolvedTargets:
         cls = model.model[li].__class__.__name__.lower()
 
         if cls == "c2f":
-            # internal C2f targets map to hidden prune (safe + shape-consistent)
-            if re.match(rf"^model\.{li}\.cv1$", t) or re.match(rf"^model\.{li}\.m\.\d+\.cv[12]$", t):
+            if t == f"model.{li}.cv1":
                 c2f_hidden_targets.add(li)
-            elif re.match(rf"^model\.{li}\.cv2$", t):
-                block_targets.add(li)  # output prune
-            else:
-                unknown.append(f"{t} (unsupported C2f path)")
+                continue
+            if t == f"model.{li}.cv2":
+                block_targets.add(li)
+                continue
+
+            m1 = RX_C2F_BN_CV1.match(t)
+            if m1:
+                bi = int(m1.group(2))
+                if 0 <= bi < len(model.model[li].m):
+                    c2f_bn_cv1_targets.add((li, bi))
+                else:
+                    unknown.append(f"{t} (bottleneck index out of range)")
+                continue
+
+            m2 = RX_C2F_BN_CV2.match(t)
+            if m2:
+                bi = int(m2.group(2))
+                if 0 <= bi < len(model.model[li].m):
+                    c2f_bn_cv2_targets.add((li, bi))
+                else:
+                    unknown.append(f"{t} (bottleneck index out of range)")
+                continue
+
+            unknown.append(f"{t} (unsupported C2f path)")
             continue
 
         if cls == "sppf":
@@ -196,6 +222,8 @@ def resolve_targets(model: nn.Module, targets_csv: str) -> ResolvedTargets:
         block_targets=sorted(block_targets),
         c2f_hidden_targets=sorted(c2f_hidden_targets),
         sppf_hidden_targets=sorted(sppf_hidden_targets),
+        c2f_bn_cv1_targets=sorted(c2f_bn_cv1_targets),
+        c2f_bn_cv2_targets=sorted(c2f_bn_cv2_targets),
         unknown=unknown,
     )
 
@@ -483,6 +511,17 @@ def apply_structural_pruning_and_realign(
 
 ### --------------- ###
 
+def _sync_bottleneck_add(b: nn.Module) -> None:
+    # Bottleneck residual is valid only if input channels == cv2 output channels
+    if not (hasattr(b, "cv1") and hasattr(b, "cv2")):
+        return
+    if not (hasattr(b.cv1, "conv") and hasattr(b.cv2, "conv")):
+        return
+    cin = int(b.cv1.conv.in_channels)
+    cout = int(b.cv2.conv.out_channels)
+    b.add = bool(getattr(b, "add", False) and cin == cout)
+
+
 
 def _topk_keep_from_score(score: torch.Tensor, prune_ratio: float, round_to: int) -> torch.Tensor:
     n = int(score.numel())
@@ -534,6 +573,95 @@ def prune_c2f_cv1(model: nn.Module, li: int, prune_ratio: float, round_to: int) 
         new_out=int(c2f.cv1.conv.out_channels),
         old_params=old_params,
         new_params=params_count(c2f),
+    )
+
+
+def _c2f_part_widths(c2f: nn.Module) -> list[int]:
+    # y = [cv1 chunk0, cv1 chunk1, b0_out, b1_out, ...]
+    widths = [int(c2f.c), int(c2f.c)]
+    widths.extend(int(b.cv2.conv.out_channels) for b in c2f.m)
+    return widths
+
+
+def _c2f_cv2_input_keep_for_bn_prune(c2f: nn.Module, bi: int, keep: torch.Tensor) -> torch.Tensor:
+    widths = _c2f_part_widths(c2f)  # current layout before applying this prune
+    target_part = 2 + bi
+    parts: list[torch.Tensor] = []
+    off = 0
+    for j, w in enumerate(widths):
+        if j == target_part:
+            parts.append(keep + off)
+        else:
+            parts.append(torch.arange(w, dtype=torch.long) + off)
+        off += w
+    return torch.cat(parts, dim=0)
+
+
+def prune_c2f_bottleneck_cv1(model: nn.Module, li: int, bi: int, prune_ratio: float, round_to: int) -> Change | None:
+    c2f = model.model[li]
+    if c2f.__class__.__name__.lower() != "c2f":
+        return None
+    if not (0 <= bi < len(c2f.m)):
+        return None
+
+    b = c2f.m[bi]
+    old_params = params_count(b)
+    old_out = int(b.cv1.conv.out_channels)
+
+    keep = _choose_keep_idx(b.cv1.conv, prune_ratio, round_to)
+    if len(keep) == old_out:
+        return None
+
+    _prune_wrapper_output_channels(b.cv1, keep)  # prune once
+    _set_wrapper_input_channels(b.cv2, keep)     # propagate once
+    _sync_bottleneck_add(b)
+
+    return Change(
+        path=f"model.{li}.m.{bi}.cv1",
+        old_out=old_out,
+        new_out=int(b.cv1.conv.out_channels),
+        old_params=old_params,
+        new_params=params_count(b),
+    )
+
+
+def prune_c2f_bottleneck_cv2(model: nn.Module, li: int, bi: int, prune_ratio: float, round_to: int) -> Change | None:
+    c2f = model.model[li]
+    if c2f.__class__.__name__.lower() != "c2f":
+        return None
+    if not (0 <= bi < len(c2f.m)):
+        return None
+
+    b = c2f.m[bi]
+    old_params = params_count(b)
+    old_out = int(b.cv2.conv.out_channels)
+
+    keep = _choose_keep_idx(b.cv2.conv, prune_ratio, round_to)
+    if len(keep) == old_out:
+        return None
+
+    # build cv2-input remap for the parent C2f before changing b.cv2
+    in_keep_c2f_cv2 = _c2f_cv2_input_keep_for_bn_prune(c2f, bi, keep)
+
+    # prune bottleneck output
+    _prune_wrapper_output_channels(b.cv2, keep)
+    _sync_bottleneck_add(b)
+
+    # if next bottleneck consumes this output, align its input
+    if bi + 1 < len(c2f.m):
+        nb = c2f.m[bi + 1]
+        _set_wrapper_input_channels(nb.cv1, keep)
+        _sync_bottleneck_add(nb)
+
+    # realign parent C2f final conv input
+    _set_wrapper_input_channels(c2f.cv2, in_keep_c2f_cv2)
+
+    return Change(
+        path=f"model.{li}.m.{bi}.cv2",
+        old_out=old_out,
+        new_out=int(b.cv2.conv.out_channels),
+        old_params=old_params,
+        new_params=params_count(b),
     )
 
 
@@ -656,6 +784,8 @@ def main() -> None:
         resolved = resolve_targets(y.model, args.targets)
         blocks = resolved.block_targets
         c2f_hidden_targets = resolved.c2f_hidden_targets
+        c2f_bn_cv1_targets = resolved.c2f_bn_cv1_targets
+        c2f_bn_cv2_targets = resolved.c2f_bn_cv2_targets
         sppf_hidden_targets = resolved.sppf_hidden_targets
 
         if resolved.unknown:
@@ -683,6 +813,20 @@ def main() -> None:
         else:
             changes.append(ch)
 
+    for li, bi in c2f_bn_cv1_targets:
+        ch = prune_c2f_bottleneck_cv1(y.model, li, bi, args.prune_ratio, args.round_to)
+        if ch is None:
+            skipped.append(f"model.{li}.m.{bi}.cv1 no-op")
+        else:
+            changes.append(ch)
+
+    for li, bi in c2f_bn_cv2_targets:
+        ch = prune_c2f_bottleneck_cv2(y.model, li, bi, args.prune_ratio, args.round_to)
+        if ch is None:
+            skipped.append(f"model.{li}.m.{bi}.cv2 no-op")
+        else:
+            changes.append(ch)
+
     # Prune SPPF Conv Blocks
     for li in sppf_hidden_targets:
         ch = prune_sppf_cv1(y.model, li, args.prune_ratio, args.round_to)
@@ -691,6 +835,8 @@ def main() -> None:
         else:
             changes.append(ch)
 
+    if not (blocks or c2f_hidden_targets or sppf_hidden_targets or c2f_bn_cv1_targets or c2f_bn_cv2_targets):
+        raise ValueError("No valid targets resolved from --targets.")
 
     if skipped:
         print("[INFO] Skipped:", ", ".join(skipped))

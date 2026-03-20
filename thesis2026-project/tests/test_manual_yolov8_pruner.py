@@ -23,7 +23,9 @@ from optimizer.pruning.manual_yolov8_pruner import (
     prune_c2f_cv1,
     prune_sppf_cv1,
     resolve_targets,
-    _is_prunable_wrapper
+    _is_prunable_wrapper,
+    prune_c2f_bottleneck_cv1,
+    prune_c2f_bottleneck_cv2
 )
 
 RX_INT = re.compile(r"^-?\d+$")
@@ -250,13 +252,9 @@ def test_resolve_targets_mixed_cases(det_model):
         det_model,
         "model.4.cv2,model.4.m.1.cv2.conv,model.9.cv1,model.22.cv2.0.0.conv,bad.path",
     )
-    # model.4.cv2 -> output prune block
     assert 4 in r.block_targets
-    # model.4.m.1.cv2.conv -> C2f hidden prune on block 4
-    assert 4 in r.c2f_hidden_targets
-    # model.9.cv1 -> SPPF hidden prune
+    assert (4, 1) in r.c2f_bn_cv2_targets   # changed expectation
     assert 9 in r.sppf_hidden_targets
-    # detect + bad path should be unknown
     assert any("Detect targets disabled" in u for u in r.unknown)
     assert any("bad.path" in u for u in r.unknown)
 
@@ -436,12 +434,23 @@ def _apply_targets_once(det_model, targets: str, prune_ratio: float = 0.10, roun
         if ch is not None:
             changes.append(ch)
 
+    for li, bi in r.c2f_bn_cv1_targets:
+        ch = prune_c2f_bottleneck_cv1(det_model, li, bi, prune_ratio, round_to)
+        if ch is not None:
+            changes.append(ch)
+
+    for li, bi in r.c2f_bn_cv2_targets:
+        ch = prune_c2f_bottleneck_cv2(det_model, li, bi, prune_ratio, round_to)
+        if ch is not None:
+            changes.append(ch)
+
     for li in r.sppf_hidden_targets:
         ch = prune_sppf_cv1(det_model, li, prune_ratio, round_to)
         if ch is not None:
             changes.append(ch)
 
     return r, changes, skipped, realign
+
 
 
 @pytest.mark.integration
@@ -462,12 +471,15 @@ def test_multi_target_conv_output_and_next_c2f_pipeline(det_model):
 
 @pytest.mark.integration
 def test_multi_target_bottleneck_out_and_next_bottleneck_in(det_model):
-    # one bottleneck out (cv2) + next bottleneck in (cv1)
     r, changes, _, _ = _apply_targets_once(det_model, "model.4.m.0.cv2,model.4.m.1.cv1")
 
-    # both map to one C2f hidden prune at layer 4
-    assert r.c2f_hidden_targets == [4]
-    assert any(c.path == "model.4.cv1" for c in changes)
+    assert r.c2f_hidden_targets == []
+    assert (4, 0) in r.c2f_bn_cv2_targets
+    assert (4, 1) in r.c2f_bn_cv1_targets
+
+
+    assert any(c.path == "model.4.m.0.cv2" for c in changes)
+    assert any(c.path == "model.4.m.1.cv1" for c in changes)
 
     b0 = det_model.model[4].m[0]
     b1 = det_model.model[4].m[1]
