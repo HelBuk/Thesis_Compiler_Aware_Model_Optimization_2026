@@ -17,9 +17,6 @@ from ultralytics.models.yolo.detect import DetectionTrainer
 
 RX_C2F_CV1 = re.compile(r"^model\.(\d+)\.cv1$")
 RX_SPPF_CV1 = re.compile(r"^model\.(\d+)\.cv1$")
-# RX_BOTTLENECK_CV1 = re.compile(r"^model\.(\d+)\.m\.(\d+)\.cv1$")
-RX_INT = re.compile(r"^-?\d+$")
-RX_RANGE = re.compile(r"^(-?\d+)\s*-\s*(-?\d+)$")
 
 @dataclass
 class ResolvedTargets:
@@ -38,178 +35,6 @@ class Change:
     new_params: int
 
 
-def make_pruned_trainer(pruned_nn: nn.Module):
-    class PrunedTrainer(DetectionTrainer):
-        def get_model(self, cfg=None, weights=None, verbose=True):
-            return pruned_nn
-    return PrunedTrainer
-
-
-def _norm_target(t: str) -> str:
-    t = t.strip().replace("model.model[", "model.").replace("]", "")
-    if t.endswith(".conv"):
-        t = t[:-5]
-    return t
-
-
-# def _get_by_path(root: nn.Module, path: str) -> nn.Module:
-#     m = root
-#     for tok in path.split("."):
-#         if tok.isdigit():
-#             m = m[int(tok)]
-#         else:
-#             m = getattr(m, tok)
-#     return m
-
-
-def parse_blocks(spec: str, max_idx: int) -> list[int]:
-    out: set[int] = set()
-    bad: list[str] = []
-
-    for raw in spec.split(","):
-        part = raw.strip()
-        if not part:
-            continue
-
-        m = RX_RANGE.match(part)
-        if m:
-            a, b = int(m.group(1)), int(m.group(2))
-            lo, hi = sorted((a, b))
-            for i in range(lo, hi + 1):
-                if 0 <= i <= max_idx:
-                    out.add(i)
-            continue
-
-        if RX_INT.match(part):
-            i = int(part)
-            if 0 <= i <= max_idx:
-                out.add(i)
-            continue
-
-        bad.append(part)
-
-    if bad:
-        raise ValueError(f"Invalid block tokens: {', '.join(bad)}")
-    return sorted(out)
-
-
-
-def _topk_keep_from_score(score: torch.Tensor, prune_ratio: float, round_to: int) -> torch.Tensor:
-    n = int(score.numel())
-    keep = max(1, int(round(n * (1.0 - prune_ratio))))
-    if round_to > 1:
-        keep = max(round_to, (keep // round_to) * round_to)
-        keep = min(keep, n)
-    return score.topk(keep).indices.sort().values.cpu()
-
-
-def prune_c2f_cv1(model: nn.Module, li: int, prune_ratio: float, round_to: int) -> Change | None:
-    c2f = model.model[li]
-    if c2f.__class__.__name__.lower() != "c2f":
-        return None
-
-    old_params = params_count(c2f)
-    old_hidden = int(c2f.c)  # hidden channels in C2f
-    old_out = int(c2f.cv1.conv.out_channels)  # should be 2*hidden
-
-    if old_out != 2 * old_hidden:
-        return None
-
-    # pairwise score for split halves
-    s = c2f.cv1.conv.weight.detach().flatten(1).norm(p=2, dim=1)
-    keep_h = _topk_keep_from_score(s[:old_hidden] + s[old_hidden:2 * old_hidden], prune_ratio, round_to)
-    if len(keep_h) == old_hidden:
-        return None
-
-    keep_cv1 = torch.cat([keep_h, keep_h + old_hidden]).sort().values
-    _prune_wrapper_output_channels(c2f.cv1, keep_cv1)
-
-    # update hidden size used by forward
-    c2f.c = int(len(keep_h))
-
-    # prune all bottleneck internals to new hidden width
-    for b in c2f.m:
-        _set_wrapper_input_channels(b.cv1, keep_h)
-        _prune_wrapper_output_channels(b.cv1, keep_h)
-        _set_wrapper_input_channels(b.cv2, keep_h)
-        _prune_wrapper_output_channels(b.cv2, keep_h)
-
-    # cv2 input is concat([y0,y1,m0,...]) with chunks of old_hidden each
-    parts = [keep_h + j * old_hidden for j in range(2 + len(c2f.m))]
-    _set_wrapper_input_channels(c2f.cv2, torch.cat(parts))
-
-    return Change(
-        path=f"model.{li}.cv1",
-        old_out=old_out,
-        new_out=int(c2f.cv1.conv.out_channels),
-        old_params=old_params,
-        new_params=params_count(c2f),
-    )
-
-
-def prune_sppf_cv1(model: nn.Module, li: int, prune_ratio: float, round_to: int) -> Change | None:
-    sppf = model.model[li]
-    if sppf.__class__.__name__.lower() != "sppf":
-        return None
-
-    old_params = params_count(sppf)
-    old_h = int(sppf.cv1.conv.out_channels)
-
-    keep_h = _choose_keep_idx(sppf.cv1.conv, prune_ratio, round_to)
-    if len(keep_h) == old_h:
-        return None
-
-    _prune_wrapper_output_channels(sppf.cv1, keep_h)
-    # cv2 input is concat of 4 pooled branches
-    in_keep = torch.cat([keep_h + j * old_h for j in range(4)])
-    _set_wrapper_input_channels(sppf.cv2, in_keep)
-
-    return Change(
-        path=f"model.{li}.cv1",
-        old_out=old_h,
-        new_out=int(sppf.cv1.conv.out_channels),
-        old_params=old_params,
-        new_params=params_count(sppf),
-    )
-
-
-# def prune_bottleneck_cv1(model: nn.Module, li: int, bi: int, prune_ratio: float, round_to: int) -> Change | None:
-#     b = model.model[li].m[bi]
-#     old_params = params_count(b)
-#     old_out = int(b.cv1.conv.out_channels)
-
-#     keep = _choose_keep_idx(b.cv1.conv, prune_ratio, round_to)
-#     if len(keep) == old_out:
-#         return None
-
-#     _prune_wrapper_output_channels(b.cv1, keep)
-#     _set_wrapper_input_channels(b.cv2, keep)
-
-#     return Change(
-#         path=f"model.{li}.m.{bi}.cv1",
-#         old_out=old_out,
-#         new_out=int(b.cv1.conv.out_channels),
-#         old_params=old_params,
-#         new_params=params_count(b),
-#     )
-
-
-# def apply_local_target(model: nn.Module, target: str, prune_ratio: float, round_to: int) -> Change | None:
-#     m = RX_BOTTLENECK_CV1.match(target)
-#     if m:
-#         return prune_bottleneck_cv1(model, int(m.group(1)), int(m.group(2)), prune_ratio, round_to)
-
-#     m = RX_C2F_CV1.match(target)
-#     if m:
-#         li = int(m.group(1))
-#         if model.model[li].__class__.__name__.lower() == "c2f":
-#             return prune_c2f_cv1(model, li, prune_ratio, round_to)
-#         if model.model[li].__class__.__name__.lower() == "sppf":
-#             return prune_sppf_cv1(model, li, prune_ratio, round_to)
-
-#     return None
-
-
 def params_count(m: nn.Module) -> int:
     return sum(p.numel() for p in m.parameters())
 
@@ -217,43 +42,17 @@ def params_count(m: nn.Module) -> int:
 def fp32_param_mb(m: nn.Module) -> float:
     return params_count(m) * 4 / (1024**2)
 
+def _detect_layer_idx(model: nn.Module) -> int | None:
+    for i, m in enumerate(model.model):
+        if m.__class__.__name__.lower() == "detect":
+            return i
+    return None
 
-def eval_model(
-    y: YOLO,
-    data: str,
-    imgsz: int,
-    device: str,
-    batch: int,
-    *,
-    split: str = "val",
-    project: str = "./optimizer/pruning/runs/manual_prune",
-) -> dict[str, float]:
-    with open(data, "r") as f:
-        d = yaml.safe_load(f) or {}
-    if split == "val" and d.get("val") is None and d.get("valid") is not None:
-        split = "valid"
+### --------------- ###
 
-    m = y.val(
-        data=data,
-        imgsz=imgsz,
-        device=device,
-        batch=batch,
-        split=split,
-        project=project,
-        verbose=False,
-    )
-    return {
-        "map50_95": float(m.box.map),
-        "map50": float(m.box.map50),
-        "lat_ms": float(m.speed.get("inference", 0.0)),
-    }
+# Determine output conv in Conv, C2f, SPPF blocks, add them to a table
 
-
-def _sources(i: int, layer: nn.Module) -> list[int]:
-    f = getattr(layer, "f", -1)
-    refs = [f] if isinstance(f, int) else list(f)
-    return [i - 1 if r == -1 else int(r) for r in refs]
-
+### --------------- ###
 
 def _first_wrapper_with_conv(mod: nn.Module) -> nn.Module | None:
     if hasattr(mod, "conv") and isinstance(mod.conv, nn.Conv2d):
@@ -264,14 +63,6 @@ def _first_wrapper_with_conv(mod: nn.Module) -> nn.Module | None:
             return w
     return None
 
-
-def _block_input_wrapper(block: nn.Module) -> nn.Module | None:
-    cls = block.__class__.__name__.lower()
-    if cls in {"c2f", "sppf"} and hasattr(block, "cv1"):
-        return _first_wrapper_with_conv(block.cv1)
-    return _first_wrapper_with_conv(block)
-
-
 def _block_output_wrapper(block: nn.Module) -> nn.Module | None:
     cls = block.__class__.__name__.lower()
     if cls in {"c2f", "sppf"} and hasattr(block, "cv2"):
@@ -279,7 +70,175 @@ def _block_output_wrapper(block: nn.Module) -> nn.Module | None:
     return _first_wrapper_with_conv(block)
 
 
+def build_output_target_table(model: nn.Module) -> dict[str, int]:
+    name_of = {id(m): n for n, m in model.named_modules()}
+    table: dict[str, int] = {}
+    det_i = _detect_layer_idx(model)
+
+    for i, block in enumerate(model.model):
+        if det_i is not None and i == det_i:
+            continue
+        w = _block_output_wrapper(block)
+        if w is None or not hasattr(w, "conv") or not isinstance(w.conv, nn.Conv2d):
+            continue
+        if w.conv.groups != 1:
+            continue
+
+        p = name_of.get(id(w), f"model.{i}")
+        if det_i is not None and p.startswith(f"model.{det_i}."):
+            continue
+        table[p] = i
+    return table
+
+### --------------- ###
+
+# Prepare structure ResolvedTargets with block_targets, hidden_targets and unknown
+
+### --------------- ###
+
+def _norm_target(t: str) -> str:
+    t = t.strip().replace("model.model[", "model.").replace("]", "")
+    if t.endswith(".conv"):
+        t = t[:-5]
+    return t
+
+
+def _layer_idx_from_target(t: str) -> int | None:
+    p = t.split(".")
+    if len(p) < 2 or p[0] != "model" or not p[1].isdigit():
+        return None
+    return int(p[1])
+
+
+def _is_prunable_wrapper(m: nn.Module) -> bool:
+    return hasattr(m, "conv") and isinstance(m.conv, nn.Conv2d) and m.conv.groups == 1
+
+
+def resolve_targets(model: nn.Module, targets_csv: str) -> ResolvedTargets:
+    named = dict(model.named_modules())
+    out_table = build_output_target_table(model)  # output-wrapper path -> top-level block idx
+    det_i = _detect_layer_idx(model)
+
+    block_targets: set[int] = set()
+    c2f_hidden_targets: set[int] = set()
+    sppf_hidden_targets: set[int] = set()
+    unknown: list[str] = []
+
+    for raw in [x.strip() for x in targets_csv.split(",") if x.strip()]:
+        t = _norm_target(raw)
+
+        li = _layer_idx_from_target(t)
+        if li is None or li >= len(model.model):
+            unknown.append(t)
+            continue
+
+        if det_i is not None and t.startswith(f"model.{det_i}."):
+            unknown.append(f"{t} (Detect targets disabled)")
+            continue
+
+        # direct output-conv target (Conv block, C2f.cv2, SPPF.cv2, etc.)
+        if t in out_table:
+            bi = out_table[t]
+            if det_i is not None and bi == det_i:
+                unknown.append(f"{t} (Detect targets disabled)")
+            else:
+                block_targets.add(bi)
+            continue
+
+        m = named.get(t)
+        if m is None:
+            unknown.append(t)
+            continue
+
+        # if raw leaf Conv2d is passed, try parent wrapper
+        if isinstance(m, nn.Conv2d):
+            parent = t.rsplit(".", 1)[0]
+            pm = named.get(parent)
+            if pm is not None and _is_prunable_wrapper(pm):
+                t = parent
+                m = pm
+            else:
+                unknown.append(f"{t} (raw Conv2d without supported wrapper)")
+                continue
+
+        if not _is_prunable_wrapper(m):
+            unknown.append(f"{t} (not a prunable Conv wrapper)")
+            continue
+
+        cls = model.model[li].__class__.__name__.lower()
+
+        if cls == "c2f":
+            # internal C2f targets map to hidden prune (safe + shape-consistent)
+            if re.match(rf"^model\.{li}\.cv1$", t) or re.match(rf"^model\.{li}\.m\.\d+\.cv[12]$", t):
+                c2f_hidden_targets.add(li)
+            elif re.match(rf"^model\.{li}\.cv2$", t):
+                block_targets.add(li)  # output prune
+            else:
+                unknown.append(f"{t} (unsupported C2f path)")
+            continue
+
+        if cls == "sppf":
+            if t == f"model.{li}.cv1":
+                sppf_hidden_targets.add(li)
+            elif t == f"model.{li}.cv2":
+                block_targets.add(li)
+            else:
+                unknown.append(f"{t} (unsupported SPPF path)")
+            continue
+
+        # plain top-level Conv block
+        if t == f"model.{li}":
+            block_targets.add(li)
+        else:
+            unknown.append(f"{t} (unsupported non-C2f/SPPF local path)")
+
+    return ResolvedTargets(
+        block_targets=sorted(block_targets),
+        c2f_hidden_targets=sorted(c2f_hidden_targets),
+        sppf_hidden_targets=sorted(sppf_hidden_targets),
+        unknown=unknown,
+    )
+
+### --------------- ###
+
+# Structural Pruning
+
+### --------------- ###
+
+def _sources(i: int, layer: nn.Module) -> list[int]:
+    f = getattr(layer, "f", -1)
+    refs = [f] if isinstance(f, int) else list(f)
+    return [i - 1 if r == -1 else int(r) for r in refs]
+
+
+def _build_old_out_channels(layers: nn.Sequential, model_in_ch: int = 3) -> dict[int, int]:
+    old_out: dict[int, int] = {}
+    for i, m in enumerate(layers):
+        cls = m.__class__.__name__.lower()
+        src = _sources(i, m)
+
+        if cls == "concat":
+            old_out[i] = int(sum(old_out[s] for s in src))
+            continue
+        if cls in {"upsample", "split"}:
+            old_out[i] = int(old_out[src[0]])
+            continue
+        if cls == "detect":
+            old_out[i] = int(sum(old_out[s] for s in src))
+            continue
+
+        w = _block_output_wrapper(m)
+        if w is not None and hasattr(w, "conv") and isinstance(w.conv, nn.Conv2d):
+            old_out[i] = int(w.conv.out_channels)
+        else:
+            old_out[i] = int(model_in_ch if not src else sum(old_out[s] for s in src))
+    return old_out
+
+
 def _choose_keep_idx(conv: nn.Conv2d, prune_ratio: float, round_to: int) -> torch.Tensor:
+    # 
+    # Computes which output channels to keep. Ranking is based on L2 norm
+    # 
     cout = int(conv.out_channels)
     keep = max(1, int(round(cout * (1.0 - prune_ratio))))
     if round_to > 1:
@@ -347,6 +306,25 @@ def _prune_wrapper_output_channels(wrapper: nn.Module, keep_idx: torch.Tensor) -
     return True
 
 
+def _concat_input_keep_idx(
+    src: list[int],
+    keep_map: dict[int, torch.Tensor],
+    old_out: dict[int, int],
+    model_in_ch: int,
+) -> torch.Tensor:
+    parts: list[torch.Tensor] = []
+    offset = 0
+    for s in src:
+        if s < 0:
+            idx = torch.arange(model_in_ch, dtype=torch.long) + offset
+            offset += model_in_ch
+        else:
+            idx = keep_map[s] + offset
+            offset += old_out[s]
+        parts.append(idx)
+    return torch.cat(parts, dim=0)
+
+
 def _rebuild_conv_in_select(old: nn.Conv2d, in_keep_idx: torch.Tensor) -> nn.Conv2d:
     idx = in_keep_idx.tolist()
     if old.groups != 1:
@@ -368,7 +346,6 @@ def _rebuild_conv_in_select(old: nn.Conv2d, in_keep_idx: torch.Tensor) -> nn.Con
             new.bias.copy_(old.bias.clone())
     return new
 
-
 def _set_wrapper_input_channels(wrapper: nn.Module, in_keep_idx: torch.Tensor) -> bool:
     if not (hasattr(wrapper, "conv") and isinstance(wrapper.conv, nn.Conv2d)):
         return False
@@ -381,50 +358,6 @@ def _set_wrapper_input_channels(wrapper: nn.Module, in_keep_idx: torch.Tensor) -
         return True
     wrapper.conv = _rebuild_conv_in_select(old, in_keep_idx)
     return True
-
-
-def _build_old_out_channels(layers: nn.Sequential, model_in_ch: int = 3) -> dict[int, int]:
-    old_out: dict[int, int] = {}
-    for i, m in enumerate(layers):
-        cls = m.__class__.__name__.lower()
-        src = _sources(i, m)
-
-        if cls == "concat":
-            old_out[i] = int(sum(old_out[s] for s in src))
-            continue
-        if cls in {"upsample", "split"}:
-            old_out[i] = int(old_out[src[0]])
-            continue
-        if cls == "detect":
-            old_out[i] = int(sum(old_out[s] for s in src))
-            continue
-
-        w = _block_output_wrapper(m)
-        if w is not None and hasattr(w, "conv") and isinstance(w.conv, nn.Conv2d):
-            old_out[i] = int(w.conv.out_channels)
-        else:
-            old_out[i] = int(model_in_ch if not src else sum(old_out[s] for s in src))
-    return old_out
-
-
-def _concat_input_keep_idx(
-    src: list[int],
-    keep_map: dict[int, torch.Tensor],
-    old_out: dict[int, int],
-    model_in_ch: int,
-) -> torch.Tensor:
-    parts: list[torch.Tensor] = []
-    offset = 0
-    for s in src:
-        if s < 0:
-            idx = torch.arange(model_in_ch, dtype=torch.long) + offset
-            offset += model_in_ch
-        else:
-            idx = keep_map[s] + offset
-            offset += old_out[s]
-        parts.append(idx)
-    return torch.cat(parts, dim=0)
-
 
 def _adjust_detect_inputs(detect: nn.Module, src: list[int], keep_map: dict[int, torch.Tensor]) -> list[str]:
     changed: list[str] = []
@@ -443,121 +376,11 @@ def _adjust_detect_inputs(detect: nn.Module, src: list[int], keep_map: dict[int,
     return changed
 
 
-def _detect_layer_idx(model: nn.Module) -> int | None:
-    for i, m in enumerate(model.model):
-        if m.__class__.__name__.lower() == "detect":
-            return i
-    return None
-
-
-def _layer_idx_from_target(t: str) -> int | None:
-    p = t.split(".")
-    if len(p) < 2 or p[0] != "model" or not p[1].isdigit():
-        return None
-    return int(p[1])
-
-
-def _is_prunable_wrapper(m: nn.Module) -> bool:
-    return hasattr(m, "conv") and isinstance(m.conv, nn.Conv2d) and m.conv.groups == 1
-
-
-def list_all_cv_targets(model: nn.Module) -> list[str]:
-    named = dict(model.named_modules())
-    det_i = _detect_layer_idx(model)
-    out: set[str] = set()
-    for name, m in named.items():
-        if det_i is not None and name.startswith(f"model.{det_i}."):
-            continue
-        if _is_prunable_wrapper(m):
-            out.add(name)
-            out.add(f"{name}.conv")  # alias accepted by _norm_target
-    return sorted(out)
-
-
-def resolve_targets(model: nn.Module, targets_csv: str) -> ResolvedTargets:
-    named = dict(model.named_modules())
-    out_table = build_output_target_table(model)  # output-wrapper path -> top-level block idx
-    det_i = _detect_layer_idx(model)
-
-    block_targets: set[int] = set()
-    c2f_hidden_targets: set[int] = set()
-    sppf_hidden_targets: set[int] = set()
-    unknown: list[str] = []
-
-    for raw in [x.strip() for x in targets_csv.split(",") if x.strip()]:
-        t = _norm_target(raw)
-
-        li = _layer_idx_from_target(t)
-        if li is None or li >= len(model.model):
-            unknown.append(t)
-            continue
-
-        if det_i is not None and t.startswith(f"model.{det_i}."):
-            unknown.append(f"{t} (Detect targets disabled)")
-            continue
-
-        # direct output-conv target (Conv block, C2f.cv2, SPPF.cv2, etc.)
-        if t in out_table:
-            bi = out_table[t]
-            if det_i is not None and bi == det_i:
-                unknown.append(f"{t} (Detect targets disabled)")
-            else:
-                block_targets.add(bi)
-            continue
-
-        m = named.get(t)
-        if m is None:
-            unknown.append(t)
-            continue
-
-        # if user passed raw leaf Conv2d, try parent wrapper
-        if isinstance(m, nn.Conv2d):
-            parent = t.rsplit(".", 1)[0]
-            pm = named.get(parent)
-            if pm is not None and _is_prunable_wrapper(pm):
-                t = parent
-                m = pm
-            else:
-                unknown.append(f"{t} (raw Conv2d without supported wrapper)")
-                continue
-
-        if not _is_prunable_wrapper(m):
-            unknown.append(f"{t} (not a prunable Conv wrapper)")
-            continue
-
-        cls = model.model[li].__class__.__name__.lower()
-
-        if cls == "c2f":
-            # internal C2f targets map to hidden prune (safe + shape-consistent)
-            if re.match(rf"^model\.{li}\.cv1$", t) or re.match(rf"^model\.{li}\.m\.\d+\.cv[12]$", t):
-                c2f_hidden_targets.add(li)
-            elif re.match(rf"^model\.{li}\.cv2$", t):
-                block_targets.add(li)  # output prune
-            else:
-                unknown.append(f"{t} (unsupported C2f path)")
-            continue
-
-        if cls == "sppf":
-            if t == f"model.{li}.cv1":
-                sppf_hidden_targets.add(li)
-            elif t == f"model.{li}.cv2":
-                block_targets.add(li)
-            else:
-                unknown.append(f"{t} (unsupported SPPF path)")
-            continue
-
-        # plain top-level Conv block
-        if t == f"model.{li}":
-            block_targets.add(li)
-        else:
-            unknown.append(f"{t} (unsupported non-C2f/SPPF local path)")
-
-    return ResolvedTargets(
-        block_targets=sorted(block_targets),
-        c2f_hidden_targets=sorted(c2f_hidden_targets),
-        sppf_hidden_targets=sorted(sppf_hidden_targets),
-        unknown=unknown,
-    )
+def _block_input_wrapper(block: nn.Module) -> nn.Module | None:
+    cls = block.__class__.__name__.lower()
+    if cls in {"c2f", "sppf"} and hasattr(block, "cv1"):
+        return _first_wrapper_with_conv(block.cv1)
+    return _first_wrapper_with_conv(block)
 
 
 def apply_structural_pruning_and_realign(
@@ -654,41 +477,138 @@ def apply_structural_pruning_and_realign(
     return changes, skipped, realign_changes, keep_map
 
 
-def build_output_target_table(model: nn.Module) -> dict[str, int]:
-    name_of = {id(m): n for n, m in model.named_modules()}
-    table: dict[str, int] = {}
-    det_i = _detect_layer_idx(model)
+### --------------- ###
 
-    for i, block in enumerate(model.model):
-        if block.__class__.__name__.lower() == "detect":
-            continue
-        if det_i is not None and i == det_i:
-            continue
+# Structural Pruning of C2F
 
-        w = _block_output_wrapper(block)
-        if w is None or not hasattr(w, "conv") or not isinstance(w.conv, nn.Conv2d):
-            continue
-        if w.conv.groups != 1:
-            continue
-
-        p = name_of.get(id(w), f"model.{i}")
-        if det_i is not None and p.startswith(f"model.{det_i}."):
-            continue
-        table[p] = i
-    return table
+### --------------- ###
 
 
-# def resolve_blocks_from_targets(model: nn.Module, targets_csv: str) -> tuple[list[int], list[str]]:
-#     table = build_output_target_table(model)
-#     want = [_norm_target(x) for x in targets_csv.split(",") if x.strip()]
-#     blocks: set[int] = set()
-#     missing: list[str] = []
-#     for t in want:
-#         if t in table:
-#             blocks.add(table[t])
-#         else:
-#             missing.append(t)
-#     return sorted(blocks), missing
+def _topk_keep_from_score(score: torch.Tensor, prune_ratio: float, round_to: int) -> torch.Tensor:
+    n = int(score.numel())
+    keep = max(1, int(round(n * (1.0 - prune_ratio))))
+    if round_to > 1:
+        keep = max(round_to, (keep // round_to) * round_to)
+        keep = min(keep, n)
+    return score.topk(keep).indices.sort().values.cpu()
+
+
+def prune_c2f_cv1(model: nn.Module, li: int, prune_ratio: float, round_to: int) -> Change | None:
+    c2f = model.model[li]
+    if c2f.__class__.__name__.lower() != "c2f":
+        return None
+
+    old_params = params_count(c2f)
+    old_hidden = int(c2f.c)  # hidden channels in C2f
+    old_out = int(c2f.cv1.conv.out_channels)  # should be 2*hidden
+
+    if old_out != 2 * old_hidden:
+        return None
+
+    # pairwise score for split halves
+    s = c2f.cv1.conv.weight.detach().flatten(1).norm(p=2, dim=1)
+    keep_h = _topk_keep_from_score(s[:old_hidden] + s[old_hidden:2 * old_hidden], prune_ratio, round_to)
+    if len(keep_h) == old_hidden:
+        return None
+
+    keep_cv1 = torch.cat([keep_h, keep_h + old_hidden]).sort().values
+    _prune_wrapper_output_channels(c2f.cv1, keep_cv1)
+
+    # update hidden size used by forward
+    c2f.c = int(len(keep_h))
+
+    # prune all bottleneck internals to new hidden width
+    for b in c2f.m:
+        _set_wrapper_input_channels(b.cv1, keep_h)
+        _prune_wrapper_output_channels(b.cv1, keep_h)
+        _set_wrapper_input_channels(b.cv2, keep_h)
+        _prune_wrapper_output_channels(b.cv2, keep_h)
+
+    # cv2 input is concat([y0,y1,m0,...]) with chunks of old_hidden each
+    parts = [keep_h + j * old_hidden for j in range(2 + len(c2f.m))]
+    _set_wrapper_input_channels(c2f.cv2, torch.cat(parts))
+
+    return Change(
+        path=f"model.{li}.cv1",
+        old_out=old_out,
+        new_out=int(c2f.cv1.conv.out_channels),
+        old_params=old_params,
+        new_params=params_count(c2f),
+    )
+
+
+
+### --------------- ###
+
+# Structural Pruning of SPPF
+
+### --------------- ###
+
+
+def prune_sppf_cv1(model: nn.Module, li: int, prune_ratio: float, round_to: int) -> Change | None:
+    sppf = model.model[li]
+    if sppf.__class__.__name__.lower() != "sppf":
+        return None
+
+    old_params = params_count(sppf)
+    old_h = int(sppf.cv1.conv.out_channels)
+
+    keep_h = _choose_keep_idx(sppf.cv1.conv, prune_ratio, round_to)
+    if len(keep_h) == old_h:
+        return None
+
+    _prune_wrapper_output_channels(sppf.cv1, keep_h)
+    # cv2 input is concat of 4 pooled branches
+    in_keep = torch.cat([keep_h + j * old_h for j in range(4)])
+    _set_wrapper_input_channels(sppf.cv2, in_keep)
+
+    return Change(
+        path=f"model.{li}.cv1",
+        old_out=old_h,
+        new_out=int(sppf.cv1.conv.out_channels),
+        old_params=old_params,
+        new_params=params_count(sppf),
+    )
+
+########################################
+
+def make_pruned_trainer(pruned_nn: nn.Module):
+    # prevents Ultralytics trainer from rebuilding a fresh model from YAML/config.
+    class PrunedTrainer(DetectionTrainer):
+        def get_model(self, cfg=None, weights=None, verbose=True):
+            return pruned_nn
+    return PrunedTrainer
+
+
+def eval_model(
+    y: YOLO,
+    data: str,
+    imgsz: int,
+    device: str,
+    batch: int,
+    *,
+    split: str = "val",
+    project: str = "./optimizer/pruning/runs/manual_prune",
+) -> dict[str, float]:
+    with open(data, "r") as f:
+        d = yaml.safe_load(f) or {}
+    if split == "val" and d.get("val") is None and d.get("valid") is not None:
+        split = "valid"
+
+    m = y.val(
+        data=data,
+        imgsz=imgsz,
+        device=device,
+        batch=batch,
+        split=split,
+        project=project,
+        verbose=False,
+    )
+    return {
+        "map50_95": float(m.box.map),
+        "map50": float(m.box.map50),
+        "lat_ms": float(m.speed.get("inference", 0.0)),
+    }
 
 
 def main() -> None:
@@ -705,7 +625,7 @@ def main() -> None:
     ap.add_argument("--fraction", type=float, default=1.0)
     ap.add_argument("--project", type=str, default="./optimizer/pruning/runs/manual_prune")
     ap.add_argument("--name", type=str, default="yolov8_manual_structural_prune")
-    ap.add_argument("--save-pruned", type=str, default="thesis2026-project/models/pruned_models/yolov8_manual_pruned_v1.pt")
+    ap.add_argument("--save-pruned", type=str, default="../models/pruned_models/yolov8_manual_pruned_v1.pt")
     ap.add_argument(
         "--targets",
         type=str,
@@ -732,7 +652,6 @@ def main() -> None:
     y = YOLO(args.weights)
     max_idx = len(y.model.model) - 1
 
-
     if args.targets.strip():
         resolved = resolve_targets(y.model, args.targets)
         blocks = resolved.block_targets
@@ -744,17 +663,19 @@ def main() -> None:
         if not blocks and not c2f_hidden_targets and not sppf_hidden_targets:
             raise ValueError("No valid targets resolved from --targets.")
     else:
-        raise ValueError("Use --targets (blocks-only fallback removed).")
+        raise ValueError("Use --targets")
 
 
+    # Prune Individual Conv Blocks
     changes, skipped, realign_changes, _ = apply_structural_pruning_and_realign(
         y.model,
         blocks=blocks,
         prune_ratio=args.prune_ratio,
         round_to=args.round_to,
-        model_in_ch=3,
+        model_in_ch=3, #input image channels
     )
 
+    # Prune C2F Conv Blocks
     for li in c2f_hidden_targets:
         ch = prune_c2f_cv1(y.model, li, args.prune_ratio, args.round_to)
         if ch is None:
@@ -762,13 +683,13 @@ def main() -> None:
         else:
             changes.append(ch)
 
+    # Prune SPPF Conv Blocks
     for li in sppf_hidden_targets:
         ch = prune_sppf_cv1(y.model, li, args.prune_ratio, args.round_to)
         if ch is None:
             skipped.append(f"model.{li}.cv1 (SPPF hidden) no-op")
         else:
             changes.append(ch)
-
 
 
     if skipped:

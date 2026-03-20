@@ -6,15 +6,73 @@ import pytest
 import torch
 import torch.nn as nn
 from ultralytics import YOLO
-
-
-
+import re
 
 from optimizer.pruning.manual_yolov8_pruner import (
-    apply_structural_pruning_and_realign,
-    params_count,
+    _norm_target,
+    _concat_input_keep_idx,
+    _detect_layer_idx,
     _block_output_wrapper,
+    _choose_keep_idx,
+    _prune_wrapper_output_channels,
+    _set_wrapper_input_channels,
+    apply_structural_pruning_and_realign,
+    build_output_target_table,
+    # parse_blocks,
+    params_count,
+    prune_c2f_cv1,
+    prune_sppf_cv1,
+    resolve_targets,
+    _is_prunable_wrapper
 )
+
+RX_INT = re.compile(r"^-?\d+$")
+RX_RANGE = re.compile(r"^(-?\d+)\s*-\s*(-?\d+)$")
+
+def list_all_cv_targets(model: nn.Module) -> list[str]:
+    named = dict(model.named_modules())
+    det_i = _detect_layer_idx(model)
+    out: set[str] = set()
+    for name, m in named.items():
+        if det_i is not None and name.startswith(f"model.{det_i}."):
+            continue
+        if _is_prunable_wrapper(m):
+            out.add(name)
+            out.add(f"{name}.conv")  # alias accepted by _norm_target
+    return sorted(out)
+
+
+def parse_blocks(spec: str, max_idx: int) -> list[int]:
+    out: set[int] = set()
+    bad: list[str] = []
+
+    for raw in spec.split(","):
+        part = raw.strip()
+        if not part:
+            continue
+
+        m = RX_RANGE.match(part)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            lo, hi = sorted((a, b))
+            for i in range(lo, hi + 1):
+                if 0 <= i <= max_idx:
+                    out.add(i)
+            continue
+
+        if RX_INT.match(part):
+            i = int(part)
+            if 0 <= i <= max_idx:
+                out.add(i)
+            continue
+
+        bad.append(part)
+
+    if bad:
+        raise ValueError(f"Invalid block tokens: {', '.join(bad)}")
+    return sorted(out)
+
+
 
 def snapshot_conv_layers(model: nn.Module) -> dict[str, dict]:
     snap = {}
@@ -104,25 +162,6 @@ def test_all_wrapper_convs_remain_shape_consistent():
         if hasattr(m, "conv") and isinstance(m.conv, nn.Conv2d):
             assert m.conv.weight.shape[0] == m.conv.out_channels, f"{name}: bad out_channels"
             assert m.conv.weight.shape[1] == m.conv.in_channels, f"{name}: bad in_channels"
-
-
-from optimizer.pruning.manual_yolov8_pruner import (
-    _norm_target,
-    _concat_input_keep_idx,
-    _detect_layer_idx,
-    _block_output_wrapper,
-    _choose_keep_idx,
-    _prune_wrapper_output_channels,
-    _set_wrapper_input_channels,
-    apply_structural_pruning_and_realign,
-    build_output_target_table,
-    list_all_cv_targets,
-    parse_blocks,
-    params_count,
-    prune_c2f_cv1,
-    prune_sppf_cv1,
-    resolve_targets,
-)
 
 
 class _Wrap(nn.Module):
