@@ -556,12 +556,13 @@ def prune_c2f_cv1(model: nn.Module, li: int, prune_ratio: float, round_to: int) 
     # update hidden size used by forward
     c2f.c = int(len(keep_h))
 
-    # prune all bottleneck internals to new hidden width
     for b in c2f.m:
         _set_wrapper_input_channels(b.cv1, keep_h)
         _prune_wrapper_output_channels(b.cv1, keep_h)
         _set_wrapper_input_channels(b.cv2, keep_h)
         _prune_wrapper_output_channels(b.cv2, keep_h)
+        _sync_bottleneck_add(b)
+
 
     # cv2 input is concat([y0,y1,m0,...]) with chunks of old_hidden each
     parts = [keep_h + j * old_hidden for j in range(2 + len(c2f.m))]
@@ -790,10 +791,18 @@ def main() -> None:
 
         if resolved.unknown:
             print("[WARN] Unknown/unsupported targets:", ", ".join(resolved.unknown))
-        if not blocks and not c2f_hidden_targets and not sppf_hidden_targets:
+
+        if not (
+            blocks
+            or c2f_hidden_targets
+            or sppf_hidden_targets
+            or c2f_bn_cv1_targets
+            or c2f_bn_cv2_targets
+        ):
             raise ValueError("No valid targets resolved from --targets.")
     else:
         raise ValueError("Use --targets")
+
 
 
     # Prune Individual Conv Blocks
