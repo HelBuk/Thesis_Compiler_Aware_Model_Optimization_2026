@@ -133,6 +133,7 @@ def build_arg_namespace(args: argparse.Namespace) -> argparse.Namespace:
         trt_engine_cache=False,
         trt_engine_cache_path=args.trt_engine_cache_path,
         trt_workspace_size=args.trt_workspace_size,
+        trt_plugin_so=args.trt_plugin_so,
     )
 
 
@@ -167,6 +168,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--trt_workspace_size", type=int, default=2147483648)
 
     ap.add_argument("--out_json", required=False, help="Output JSON path for this single engine result")
+    ap.add_argument("--trt_plugin_so", type=str, default=None,
+                help="Optional path to TensorRT plugin .so")
 
     return ap.parse_args()
 

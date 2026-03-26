@@ -344,6 +344,7 @@ class TensorRTEngineBackend(Backend):
         iou: float,
         max_det: int,
         device: str,
+        trt_plugin_so: Optional[str] = None,
     ):
         super().__init__(imgsz, conf, iou, max_det, device)
 
@@ -357,6 +358,9 @@ class TensorRTEngineBackend(Backend):
         import tensorrt as trt
         import pycuda.driver as cuda
         import pycuda.autoinit  # noqa: F401
+
+        import ctypes
+        from pathlib import Path
 
         self.trt = trt
         self.cuda = cuda
@@ -393,6 +397,15 @@ class TensorRTEngineBackend(Backend):
                 metadata = {}
                 engine_bytes = f.read()
                 print("[TRT] treating file as raw TensorRT engine")
+
+        trt.init_libnvinfer_plugins(None, "")
+
+        if trt_plugin_so:
+            plugin_so = Path(trt_plugin_so).expanduser().resolve()
+            if not plugin_so.exists():
+                raise FileNotFoundError(f"TensorRT plugin library not found: {plugin_so}")
+            ctypes.CDLL(str(plugin_so))
+            print(f"[TRT] loaded plugin library: {plugin_so}")
 
         self.runtime = trt.Runtime(self.logger)
 
@@ -794,6 +807,7 @@ def build_backend(kind: str, model_path: str, args, device_override: Optional[st
             iou=args.iou,
             max_det=args.max_det,
             device=device,
+            trt_plugin_so=getattr(args, "trt_plugin_so", None),
         )
 
     if kind == "torch":
