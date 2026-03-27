@@ -7,6 +7,27 @@
 #include <string>
 #include <vector>
 
+// ---------------------------------------------------------------------------
+// Per-convolution cached cuDNN state.
+// Created once in initialize(), destroyed in terminate().
+// Re-using descriptors across enqueue() calls avoids ~20 descriptor
+// create/destroy ops per inference — a critical performance fix.
+// ---------------------------------------------------------------------------
+struct ConvDescSet {
+    cudnnTensorDescriptor_t    xDesc{nullptr};
+    cudnnFilterDescriptor_t    wDesc{nullptr};
+    cudnnConvolutionDescriptor_t cDesc{nullptr};
+    cudnnTensorDescriptor_t    yDesc{nullptr};
+    cudnnTensorDescriptor_t    bDesc{nullptr};
+    cudnnConvolutionFwdAlgo_t  algo{CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM};
+    size_t                     workspaceBytes{0};
+
+    void destroy() noexcept;
+};
+
+// ---------------------------------------------------------------------------
+// Plugin
+// ---------------------------------------------------------------------------
 class YoloC2fM2Plugin final : public nvinfer1::IPluginV2DynamicExt {
 public:
     explicit YoloC2fM2Plugin(std::string weightsPath = "");
@@ -14,16 +35,16 @@ public:
     ~YoloC2fM2Plugin() override;
 
     // IPluginV2
-    const char* getPluginType() const noexcept override;
+    const char* getPluginType()    const noexcept override;
     const char* getPluginVersion() const noexcept override;
-    int getNbOutputs() const noexcept override;
-    int initialize() noexcept override;
-    void terminate() noexcept override;
-    size_t getSerializationSize() const noexcept override;
-    void serialize(void* buffer) const noexcept override;
-    void destroy() noexcept override;
-    void setPluginNamespace(char const* pluginNamespace) noexcept override;
-    char const* getPluginNamespace() const noexcept override;
+    int  getNbOutputs()            const noexcept override;
+    int  initialize()                    noexcept override;
+    void terminate()                     noexcept override;
+    size_t getSerializationSize()  const noexcept override;
+    void serialize(void* buffer)   const noexcept override;
+    void destroy()                       noexcept override;
+    void setPluginNamespace(char const* ns) noexcept override;
+    char const* getPluginNamespace()    const noexcept override;
 
     // IPluginV2Ext
     nvinfer1::DataType getOutputDataType(
@@ -62,87 +83,106 @@ public:
         nvinfer1::PluginTensorDesc const* inputDesc,
         nvinfer1::PluginTensorDesc const* outputDesc,
         void const* const* inputs,
-        void* const* outputs,
-        void* workspace,
-        cudaStream_t stream) noexcept override;
+        void* const*       outputs,
+        void*              workspace,
+        cudaStream_t       stream) noexcept override;
 
+    // attachToContext / detachFromContext exist only in TRT 8.x.
+    // TRT 10.x (JetPack 6.x) removed them from IPluginV2DynamicExt entirely.
+#if NV_TENSORRT_MAJOR < 10
     void attachToContext(
-        cudnnContext* cudnn,
-        cublasContext* cublas,
+        cudnnContext*            cudnn,
+        cublasContext*           cublas,
         nvinfer1::IGpuAllocator* allocator) noexcept override;
 
     void detachFromContext() noexcept override;
+#endif
 
 private:
-    void destroyWeights() noexcept;
-    bool loadWeightsToDevice();
-    size_t getMaxConvWorkspaceBytes(int N, int C, int H, int W) const noexcept;
+    // -------------------------------------------------------------------
+    // Weight management
+    // -------------------------------------------------------------------
+    void destroyWeights()       noexcept;
+    bool loadWeightsToDevice();             // reads .bin file, uploads to GPU
 
-    bool runConv1x1(
-        const float* x,
-        float* y,
-        int N, int Cin, int Cout, int H, int W,
-        const float* w,
-        const float* b,
-        void* workspace,
-        size_t workspaceBytes,
-        cudaStream_t stream) const noexcept;
+    // -------------------------------------------------------------------
+    // cuDNN descriptor helpers
+    // -------------------------------------------------------------------
+    bool buildDescSets()        noexcept;   // called from initialize()
+    void destroyDescSets()      noexcept;   // called from terminate()
 
-    bool runConv3x3(
-        const float* x,
-        float* y,
+    bool buildOneDescSet(
+        ConvDescSet& d,
         int N, int Cin, int Cout, int H, int W,
-        const float* w,
-        const float* b,
-        void* workspace,
-        size_t workspaceBytes,
+        int kH, int kW, int padH, int padW) noexcept;
+
+    bool runConv(
+        ConvDescSet const& d,
+        float const* x,
+        float*       y,
+        float const* w,
+        float const* b,
+        void*        workspace,
         cudaStream_t stream) const noexcept;
 
 private:
     std::string mNamespace;
     std::string mWeightsPath;
 
-    // C2f(m=2) module-2 assumptions:
-    // input  : [N, C,   H, W]
-    // cv1    : [N, C,   H, W]
-    // split  : x1=[N,C/2,H,W], x2=[N,C/2,H,W]
-    // m0.cv1 : [N,C/2,H,W] -> [N,C/2,H,W]
-    // m0.cv2 : [N,C/2,H,W] -> [N,C/2,H,W]
-    // concat : [N,3C/2,H,W]
-    // cv2    : [N,3C/2,H,W] -> [N,C,H,W]
+    // ---------------------------------------------------------------
+    // Channel / spatial dimensions — populated from weight shapes and
+    // configurePlugin().  Needed for getOutputDimensions() & workspace.
+    // ---------------------------------------------------------------
+    int mCin{0};    // input channels to C2f  (e.g. 32 for model.2)
+    int mCout{0};   // output channels of C2f (e.g. 64 for model.2)
+    int mHalfC{0};  // mCout / 2              (e.g. 32)
+    int mN{1};      // batch size (from configurePlugin optimal profile)
+    int mH{0};      // spatial height
+    int mW{0};      // spatial width
 
+    bool mShortcut{true};   // bottleneck residual add flag
+
+    // cuDNN handle — either our own (created in initialize) or from TRT
     cudnnHandle_t mCudnn{nullptr};
+    bool          mCudnnOwned{false};   // true → we destroy it in terminate
 
-    // Device weights
+    // ---------------------------------------------------------------
+    // Cached cuDNN descriptor sets (one per conv in the C2f block)
+    // ---------------------------------------------------------------
+    ConvDescSet mCv1Desc;     // cv1   : Cin  → Cout,   1×1
+    ConvDescSet mM0Cv1Desc;   // m0.cv1: halfC→ halfC,  3×3
+    ConvDescSet mM0Cv2Desc;   // m0.cv2: halfC→ halfC,  3×3
+    ConvDescSet mCv2Desc;     // cv2   : 3*halfC→Cout,  1×1
+    bool        mDescsCached{false};
+
+    // ---------------------------------------------------------------
+    // Device weight pointers
+    // ---------------------------------------------------------------
     float* d_cv1_w{nullptr};
     float* d_cv1_b{nullptr};
-
     float* d_m0_cv1_w{nullptr};
     float* d_m0_cv1_b{nullptr};
-
     float* d_m0_cv2_w{nullptr};
     float* d_m0_cv2_b{nullptr};
-
     float* d_cv2_w{nullptr};
     float* d_cv2_b{nullptr};
 
-    // Host-side cached raw weights if you want serialization later
-    std::vector<float> h_cv1_w, h_cv1_b;
+    // Host-side raw weights for serialisation round-trip
+    std::vector<float> h_cv1_w,    h_cv1_b;
     std::vector<float> h_m0_cv1_w, h_m0_cv1_b;
     std::vector<float> h_m0_cv2_w, h_m0_cv2_b;
-    std::vector<float> h_cv2_w, h_cv2_b;
+    std::vector<float> h_cv2_w,    h_cv2_b;
 };
 
 
-// ============================
+// ---------------------------------------------------------------------------
 // Creator
-// ============================
-
+// ---------------------------------------------------------------------------
 class YoloC2fM2PluginCreator : public nvinfer1::IPluginCreator {
 public:
     YoloC2fM2PluginCreator();
 
-    const char* getPluginName() const noexcept override;
+    const char* getPluginName()    const noexcept override;
     const char* getPluginVersion() const noexcept override;
     const nvinfer1::PluginFieldCollection* getFieldNames() noexcept override;
 
@@ -153,13 +193,13 @@ public:
     nvinfer1::IPluginV2* deserializePlugin(
         const char* name,
         const void* serialData,
-        size_t serialLength) noexcept override;
+        size_t      serialLength) noexcept override;
 
-    void setPluginNamespace(const char* libNamespace) noexcept override;
-    const char* getPluginNamespace() const noexcept override;
+    void        setPluginNamespace(const char* ns) noexcept override;
+    const char* getPluginNamespace()         const noexcept override;
 
 private:
     std::string mNamespace;
     std::vector<nvinfer1::PluginField> mPluginAttributes;
-    nvinfer1::PluginFieldCollection mFC{};
+    nvinfer1::PluginFieldCollection    mFC{};
 };
