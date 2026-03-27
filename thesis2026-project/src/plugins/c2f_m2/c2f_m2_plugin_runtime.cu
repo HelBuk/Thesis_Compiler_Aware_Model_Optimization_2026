@@ -1,6 +1,7 @@
 #include "c2f_m2_plugin.hpp"
 #include <cuda_runtime.h>
 #include <cudnn.h>
+#include <iostream>
 
 using namespace nvinfer1;
 
@@ -16,10 +17,14 @@ extern "C" __global__ void slice_ch_kernel(
 // ---------------------------------------------------------------------------
 // Convenience macros
 // ---------------------------------------------------------------------------
-#define CUDA_CHECK_LAST()                                       \
-    do {                                                        \
-        cudaError_t _e = cudaGetLastError();                    \
-        if (_e != cudaSuccess) return 1;                        \
+#define CUDA_CHECK_LAST(MSG)                                                  \
+    do {                                                                      \
+        cudaError_t _e = cudaGetLastError();                                  \
+        if (_e != cudaSuccess) {                                              \
+            std::cerr << "[CUDA] " << MSG << " failed: "                      \
+                      << cudaGetErrorString(_e) << std::endl;                 \
+            return 1;                                                         \
+        }                                                                     \
     } while (0)
 
 // ---------------------------------------------------------------------------
@@ -56,7 +61,7 @@ static void launchAddInplace(float* x, const float* y, size_t n, cudaStream_t st
 // ===========================================================================
 // enqueue — C2f(m=1) forward pass
 //
-// Architecture for YOLOv8n model.2 (Cin=32, Cout=64, halfC=32, H=W=160):
+// Architecture for YOLOv8n model.2 (Cin=32, Cout=32, halfC=32, H=W=160):
 //
 //   input [N, Cin, H, W]
 //     └─► cv1 (1×1, Cin→Cout) + SiLU  → cv1_out [N, Cout, H, W]
@@ -90,102 +95,143 @@ int YoloC2fM2Plugin::enqueue(
     void*              workspace,
     cudaStream_t       stream) noexcept
 {
-    if (!mCudnn || !mDescsCached) return 1;
-    if (inputDesc[0].dims.nbDims != 4) return 1;
+    if (!mCudnn || !mDescsCached) {
+        std::cerr << "[enqueue] state not ready, calling initialize()"
+                  << " mCudnn=" << (mCudnn != nullptr)
+                  << " mDescsCached=" << mDescsCached
+                  << std::endl;
 
-    int N   = inputDesc[0].dims.d[0];
-    int Cin = inputDesc[0].dims.d[1];   // == mCin
-    int H   = inputDesc[0].dims.d[2];
-    int W   = inputDesc[0].dims.d[3];
+        if (initialize() != 0) {
+            std::cerr << "[enqueue] initialize FAILED" << std::endl;
+            return 1;
+        }
+    }
 
-    if (N <= 0 || H <= 0 || W <= 0 || Cin <= 0) return 1;
+    int N = 1;
+    int Cin = 0;
+    int H = 0;
+    int W = 0;
 
-    const float* x   = static_cast<const float*>(inputs[0]);
-    float*       out = static_cast<float*>(outputs[0]);
+    std::cerr << "[enqueue] input nbDims=" << inputDesc[0].dims.nbDims << " dims=(";
+    for (int i = 0; i < inputDesc[0].dims.nbDims; ++i) {
+        std::cerr << inputDesc[0].dims.d[i];
+        if (i + 1 < inputDesc[0].dims.nbDims) std::cerr << ", ";
+    }
+    std::cerr << ")" << std::endl;
+
+    if (inputDesc[0].dims.nbDims == 3) {
+        Cin = inputDesc[0].dims.d[0];
+        H   = inputDesc[0].dims.d[1];
+        W   = inputDesc[0].dims.d[2];
+        N   = 1;
+    } else if (inputDesc[0].dims.nbDims == 4) {
+        N   = inputDesc[0].dims.d[0];
+        Cin = inputDesc[0].dims.d[1];
+        H   = inputDesc[0].dims.d[2];
+        W   = inputDesc[0].dims.d[3];
+    } else {
+        std::cerr << "[enqueue] unsupported nbDims="
+                  << inputDesc[0].dims.nbDims << std::endl;
+        return 1;
+    }
+
+    std::cerr << "[enqueue] resolved"
+              << " N=" << N
+              << " Cin=" << Cin
+              << " H=" << H
+              << " W=" << W
+              << " mCin=" << mCin
+              << " mCout=" << mCout
+              << " mHalfC=" << mHalfC
+              << std::endl;
+
+    if (N <= 0 || H <= 0 || W <= 0 || Cin <= 0) {
+        std::cerr << "[enqueue] invalid resolved dims"
+                  << " N=" << N
+                  << " Cin=" << Cin
+                  << " H=" << H
+                  << " W=" << W
+                  << std::endl;
+        return 1;
+    }
+
+    const float* x = static_cast<const float*>(inputs[0]);
+    float* out     = static_cast<float*>(outputs[0]);
 
     const size_t HW        = static_cast<size_t>(H) * W;
     const size_t cv1Total  = static_cast<size_t>(N) * mCout  * HW;
     const size_t halfTotal = static_cast<size_t>(N) * mHalfC * HW;
 
-    // -----------------------------------------------------------------------
-    // Carve workspace into named regions (no aliasing)
-    // -----------------------------------------------------------------------
     char* ws = static_cast<char*>(workspace);
 
-    float* cv1_out   = reinterpret_cast<float*>(ws);
-    ws += cv1Total  * sizeof(float);
+    float* cv1_out = reinterpret_cast<float*>(ws);
+    ws += cv1Total * sizeof(float);
 
     float* m0cv1_out = reinterpret_cast<float*>(ws);
     ws += halfTotal * sizeof(float);
 
-    float* concat    = reinterpret_cast<float*>(ws);
+    float* concat = reinterpret_cast<float*>(ws);
     ws += 3 * halfTotal * sizeof(float);
 
-    void*  conv_ws   = ws;   // cuDNN scratch — one region shared across all convs
+    void* conv_ws = ws;
 
-    // Pointers into the three concat segments
-    float* x1    = concat;                       // [0,  halfC)
-    float* x2    = concat + halfTotal;            // [halfC, 2*halfC)
-    float* m0out = concat + 2 * halfTotal;        // [2*halfC, 3*halfC)
+    float* x1    = concat;
+    float* x2    = concat + halfTotal;
+    float* m0out = concat + 2 * halfTotal;
 
-    // Max workspace available for cuDNN (rest of the allocated workspace)
-    size_t maxConvWs = std::max({
-        mCv1Desc.workspaceBytes,
-        mM0Cv1Desc.workspaceBytes,
-        mM0Cv2Desc.workspaceBytes,
-        mCv2Desc.workspaceBytes});
+    std::cerr << "[enqueue] workspace"
+              << " cv1Total=" << cv1Total
+              << " halfTotal=" << halfTotal
+              << " bytes(cv1_out)=" << cv1Total * sizeof(float)
+              << " bytes(m0cv1_out)=" << halfTotal * sizeof(float)
+              << " bytes(concat)=" << 3 * halfTotal * sizeof(float)
+              << std::endl;
 
-    // -----------------------------------------------------------------------
-    // 1) cv1 : [N, Cin, H, W] → [N, Cout, H, W]  (1×1 conv + bias)
-    // -----------------------------------------------------------------------
-    if (!runConv(mCv1Desc, x, cv1_out, d_cv1_w, d_cv1_b, conv_ws, stream))
+    std::cerr << "[enqueue] stage=cv1" << std::endl;
+    if (!runConv(mCv1Desc, x, cv1_out, d_cv1_w, d_cv1_b, conv_ws, stream)) {
+        std::cerr << "[enqueue] runConv cv1 FAILED" << std::endl;
         return 1;
+    }
     launchSiLU(cv1_out, cv1Total, stream);
-    CUDA_CHECK_LAST();
+    CUDA_CHECK_LAST("launchSiLU cv1");
 
-    // -----------------------------------------------------------------------
-    // 2) Split cv1_out into x1 (concat seg 0) and x2 (concat seg 1)
-    // -----------------------------------------------------------------------
-    launchSlice(cv1_out, x1, N, mCout, mHalfC, H, W, 0,       stream);
-    CUDA_CHECK_LAST();
-    launchSlice(cv1_out, x2, N, mCout, mHalfC, H, W, mHalfC,  stream);
-    CUDA_CHECK_LAST();
+    std::cerr << "[enqueue] stage=split" << std::endl;
+    launchSlice(cv1_out, x1, N, mCout, mHalfC, H, W, 0, stream);
+    CUDA_CHECK_LAST("launchSlice x1");
 
-    // -----------------------------------------------------------------------
-    // 3) m0.cv1 : x2 → m0cv1_out  (3×3 conv + bias)
-    // -----------------------------------------------------------------------
-    if (!runConv(mM0Cv1Desc, x2, m0cv1_out, d_m0_cv1_w, d_m0_cv1_b, conv_ws, stream))
+    launchSlice(cv1_out, x2, N, mCout, mHalfC, H, W, mHalfC, stream);
+    CUDA_CHECK_LAST("launchSlice x2");
+
+    std::cerr << "[enqueue] stage=m0.cv1" << std::endl;
+    if (!runConv(mM0Cv1Desc, x2, m0cv1_out, d_m0_cv1_w, d_m0_cv1_b, conv_ws, stream)) {
+        std::cerr << "[enqueue] runConv m0.cv1 FAILED" << std::endl;
         return 1;
+    }
     launchSiLU(m0cv1_out, halfTotal, stream);
-    CUDA_CHECK_LAST();
+    CUDA_CHECK_LAST("launchSiLU m0cv1");
 
-    // -----------------------------------------------------------------------
-    // 4) m0.cv2 : m0cv1_out → m0out  (3×3 conv + bias)
-    //    m0out lives in concat seg 2 — written directly, no extra copy
-    // -----------------------------------------------------------------------
-    if (!runConv(mM0Cv2Desc, m0cv1_out, m0out, d_m0_cv2_w, d_m0_cv2_b, conv_ws, stream))
+    std::cerr << "[enqueue] stage=m0.cv2" << std::endl;
+    if (!runConv(mM0Cv2Desc, m0cv1_out, m0out, d_m0_cv2_w, d_m0_cv2_b, conv_ws, stream)) {
+        std::cerr << "[enqueue] runConv m0.cv2 FAILED" << std::endl;
         return 1;
+    }
     launchSiLU(m0out, halfTotal, stream);
-    CUDA_CHECK_LAST();
+    CUDA_CHECK_LAST("launchSiLU m0cv2");
 
-    // -----------------------------------------------------------------------
-    // 5) Shortcut residual: m0out += x2
-    //    x2 and m0out are in different concat segments — safe, no aliasing
-    // -----------------------------------------------------------------------
     if (mShortcut) {
+        std::cerr << "[enqueue] stage=shortcut" << std::endl;
         launchAddInplace(m0out, x2, halfTotal, stream);
-        CUDA_CHECK_LAST();
+        CUDA_CHECK_LAST("launchAddInplace");
     }
 
-    // -----------------------------------------------------------------------
-    // 6) cv2 : concat [N, 3*halfC, H, W] → out [N, Cout, H, W]  (1×1 + bias)
-    //    concat is already contiguous [x1 | x2 | m0out] — no explicit concat
-    //    kernel needed.
-    // -----------------------------------------------------------------------
-    if (!runConv(mCv2Desc, concat, out, d_cv2_w, d_cv2_b, conv_ws, stream))
+    std::cerr << "[enqueue] stage=cv2" << std::endl;
+    if (!runConv(mCv2Desc, concat, out, d_cv2_w, d_cv2_b, conv_ws, stream)) {
+        std::cerr << "[enqueue] runConv cv2 FAILED" << std::endl;
         return 1;
-    launchSiLU(out, cv1Total, stream);   // cv1Total == N*Cout*H*W
-    CUDA_CHECK_LAST();
+    }
+    launchSiLU(out, cv1Total, stream);
+    CUDA_CHECK_LAST("launchSiLU cv2");
 
+    std::cerr << "[enqueue] OK" << std::endl;
     return 0;
 }

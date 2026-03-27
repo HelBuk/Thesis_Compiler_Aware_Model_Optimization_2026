@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include <cudnn.h>
 
+#include <iostream>
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -152,12 +153,19 @@ void YoloC2fM2Plugin::destroyWeights() noexcept {
 
 // ---------------------------------------------------------------------------
 bool YoloC2fM2Plugin::loadWeightsToDevice() {
-    if (mWeightsPath.empty()) return false;
+    std::cout << "[loadWeightsToDevice] path=" << mWeightsPath << std::endl;
+
+    if (mWeightsPath.empty()) {
+        std::cout << "[loadWeightsToDevice] empty weights path" << std::endl;
+        return false;
+    }
 
     auto entries = loadBinWeights(mWeightsPath);
-    if (entries.empty()) return false;
+    if (entries.empty()) {
+        std::cout << "[loadWeightsToDevice] failed to read weights file or file empty" << std::endl;
+        return false;
+    }
 
-    // Index by name for easy lookup
     std::unordered_map<std::string, WeightEntry*> idx;
     for (auto& e : entries) idx[e.name] = &e;
 
@@ -166,17 +174,15 @@ bool YoloC2fM2Plugin::loadWeightsToDevice() {
         return (it != idx.end()) ? it->second : nullptr;
     };
 
-    // Read channel metadata written by the Python exporter
     auto* meta_cin  = get("meta_cin");
     auto* meta_cout = get("meta_cout");
-    if (meta_cin  && !meta_cin->data.empty())  mCin   = static_cast<int>(meta_cin->data[0]);
-    if (meta_cout && !meta_cout->data.empty()) mCout  = static_cast<int>(meta_cout->data[0]);
+    if (meta_cin  && !meta_cin->data.empty())  mCin  = static_cast<int>(meta_cin->data[0]);
+    if (meta_cout && !meta_cout->data.empty()) mCout = static_cast<int>(meta_cout->data[0]);
     mHalfC = mCout / 2;
 
     auto* sc = get("shortcut");
     if (sc && !sc->data.empty()) mShortcut = sc->data[0] > 0.5f;
 
-    // Validate expected tensors exist
     auto* cv1_w    = get("cv1_w");
     auto* cv1_b    = get("cv1_b");
     auto* m0cv1_w  = get("m0_cv1_w");
@@ -187,24 +193,38 @@ bool YoloC2fM2Plugin::loadWeightsToDevice() {
     auto* cv2_b    = get("cv2_b");
 
     if (!cv1_w || !cv1_b || !m0cv1_w || !m0cv1_b ||
-        !m0cv2_w || !m0cv2_b || !cv2_w || !cv2_b)
+        !m0cv2_w || !m0cv2_b || !cv2_w || !cv2_b) {
+        std::cout << "[loadWeightsToDevice] missing required tensors" << std::endl;
+        std::cout << "  cv1_w=" << (cv1_w != nullptr)
+                  << " cv1_b=" << (cv1_b != nullptr)
+                  << " m0_cv1_w=" << (m0cv1_w != nullptr)
+                  << " m0_cv1_b=" << (m0cv1_b != nullptr)
+                  << " m0_cv2_w=" << (m0cv2_w != nullptr)
+                  << " m0_cv2_b=" << (m0cv2_b != nullptr)
+                  << " cv2_w=" << (cv2_w != nullptr)
+                  << " cv2_b=" << (cv2_b != nullptr)
+                  << std::endl;
         return false;
+    }
 
-    // Derive dimensions from weight shapes (overrides meta if present)
-    // cv1_w : [Cout, Cin, 1, 1]
     if (cv1_w->shape.size() == 4) {
         mCout  = cv1_w->shape[0];
         mCin   = cv1_w->shape[1];
         mHalfC = mCout / 2;
     }
 
-    // Cache host copies for serialisation
+    std::cout << "[loadWeightsToDevice] derived dims"
+              << " mCin=" << mCin
+              << " mCout=" << mCout
+              << " mHalfC=" << mHalfC
+              << " shortcut=" << mShortcut
+              << std::endl;
+
     h_cv1_w    = cv1_w->data;    h_cv1_b    = cv1_b->data;
     h_m0_cv1_w = m0cv1_w->data;  h_m0_cv1_b = m0cv1_b->data;
     h_m0_cv2_w = m0cv2_w->data;  h_m0_cv2_b = m0cv2_b->data;
     h_cv2_w    = cv2_w->data;    h_cv2_b    = cv2_b->data;
 
-    // Upload to GPU
     bool ok = true;
     ok &= uploadToDevice(&d_cv1_w,    h_cv1_w);
     ok &= uploadToDevice(&d_cv1_b,    h_cv1_b);
@@ -214,6 +234,8 @@ bool YoloC2fM2Plugin::loadWeightsToDevice() {
     ok &= uploadToDevice(&d_m0_cv2_b, h_m0_cv2_b);
     ok &= uploadToDevice(&d_cv2_w,    h_cv2_w);
     ok &= uploadToDevice(&d_cv2_b,    h_cv2_b);
+
+    std::cout << "[loadWeightsToDevice] upload ok=" << ok << std::endl;
     return ok;
 }
 
@@ -228,27 +250,80 @@ bool YoloC2fM2Plugin::buildOneDescSet(
     int N, int Cin, int Cout, int H, int W,
     int kH, int kW, int padH, int padW) noexcept
 {
-    if (cudnnCreateTensorDescriptor(&d.xDesc)      != CUDNN_STATUS_SUCCESS) return false;
-    if (cudnnCreateFilterDescriptor(&d.wDesc)      != CUDNN_STATUS_SUCCESS) return false;
-    if (cudnnCreateConvolutionDescriptor(&d.cDesc) != CUDNN_STATUS_SUCCESS) return false;
-    if (cudnnCreateTensorDescriptor(&d.yDesc)      != CUDNN_STATUS_SUCCESS) return false;
-    if (cudnnCreateTensorDescriptor(&d.bDesc)      != CUDNN_STATUS_SUCCESS) return false;
+    std::cout << "[buildOneDescSet] enter"
+              << " N=" << N
+              << " Cin=" << Cin
+              << " Cout=" << Cout
+              << " H=" << H
+              << " W=" << W
+              << " k=" << kH << "x" << kW
+              << " pad=" << padH << "," << padW
+              << std::endl;
 
-    cudnnSetTensor4dDescriptor(d.xDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, Cin,  H, W);
-    cudnnSetTensor4dDescriptor(d.yDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, Cout, H, W);
-    cudnnSetTensor4dDescriptor(d.bDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, Cout, 1, 1);
-    cudnnSetFilter4dDescriptor(d.wDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW,
-                               Cout, Cin, kH, kW);
-    cudnnSetConvolution2dDescriptor(d.cDesc, padH, padW, 1, 1, 1, 1,
-                                    CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
+    if (cudnnCreateTensorDescriptor(&d.xDesc) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnCreateTensorDescriptor x FAILED" << std::endl;
+        return false;
+    }
+    if (cudnnCreateFilterDescriptor(&d.wDesc) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnCreateFilterDescriptor FAILED" << std::endl;
+        return false;
+    }
+    if (cudnnCreateConvolutionDescriptor(&d.cDesc) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnCreateConvolutionDescriptor FAILED" << std::endl;
+        return false;
+    }
+    if (cudnnCreateTensorDescriptor(&d.yDesc) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnCreateTensorDescriptor y FAILED" << std::endl;
+        return false;
+    }
+    if (cudnnCreateTensorDescriptor(&d.bDesc) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnCreateTensorDescriptor b FAILED" << std::endl;
+        return false;
+    }
 
-    // Enable TF32 — lets Ampere TensorCores handle FP32 convolutions at
-    // TF32 precision (negligible accuracy loss for inference).
-    cudnnSetConvolutionMathType(d.cDesc, CUDNN_TF32_TENSOR_OP_MATH_ALLOW_CONVERSION);
+    if (cudnnSetTensor4dDescriptor(
+            d.xDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, Cin, H, W) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnSetTensor4dDescriptor x FAILED"
+                  << " N=" << N << " Cin=" << Cin << " H=" << H << " W=" << W << std::endl;
+        return false;
+    }
 
-    // Heuristic algo selection (no benchmark allocation needed).
-    // cudnnGetConvolutionForwardAlgorithm_v7 is deprecated in cuDNN 9.x but
-    // still present and functional — suppress the deprecation warning.
+    if (cudnnSetTensor4dDescriptor(
+            d.yDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, Cout, H, W) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnSetTensor4dDescriptor y FAILED"
+                  << " N=" << N << " Cout=" << Cout << " H=" << H << " W=" << W << std::endl;
+        return false;
+    }
+
+    if (cudnnSetTensor4dDescriptor(
+            d.bDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, Cout, 1, 1) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnSetTensor4dDescriptor b FAILED"
+                  << " Cout=" << Cout << std::endl;
+        return false;
+    }
+
+    if (cudnnSetFilter4dDescriptor(
+            d.wDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, Cout, Cin, kH, kW) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnSetFilter4dDescriptor FAILED"
+                  << " Cout=" << Cout << " Cin=" << Cin
+                  << " kH=" << kH << " kW=" << kW << std::endl;
+        return false;
+    }
+
+    if (cudnnSetConvolution2dDescriptor(
+            d.cDesc, padH, padW, 1, 1, 1, 1,
+            CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnSetConvolution2dDescriptor FAILED"
+                  << " padH=" << padH << " padW=" << padW << std::endl;
+        return false;
+    }
+
+    if (cudnnSetConvolutionMathType(
+            d.cDesc, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnSetConvolutionMathType FAILED" << std::endl;
+        return false;
+    }
+
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -258,6 +333,7 @@ bool YoloC2fM2Plugin::buildOneDescSet(
     if (cudnnGetConvolutionForwardAlgorithm_v7(
             mCudnn, d.xDesc, d.wDesc, d.cDesc, d.yDesc,
             1, &retCount, &perf) != CUDNN_STATUS_SUCCESS || retCount == 0) {
+        std::cout << "[buildOneDescSet] cudnnGetConvolutionForwardAlgorithm_v7 fallback" << std::endl;
         d.algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
     } else {
         d.algo = perf.algo;
@@ -266,24 +342,50 @@ bool YoloC2fM2Plugin::buildOneDescSet(
 #pragma GCC diagnostic pop
 #endif
 
-    // Query exact workspace bytes for the chosen algorithm
-    cudnnGetConvolutionForwardWorkspaceSize(
-        mCudnn, d.xDesc, d.wDesc, d.cDesc, d.yDesc, d.algo, &d.workspaceBytes);
+    if (cudnnGetConvolutionForwardWorkspaceSize(
+            mCudnn, d.xDesc, d.wDesc, d.cDesc, d.yDesc, d.algo, &d.workspaceBytes) != CUDNN_STATUS_SUCCESS) {
+        std::cout << "[buildOneDescSet] cudnnGetConvolutionForwardWorkspaceSize FAILED" << std::endl;
+        return false;
+    }
+
+    std::cout << "[buildOneDescSet] OK"
+              << " workspaceBytes=" << d.workspaceBytes
+              << std::endl;
 
     return true;
 }
 
 bool YoloC2fM2Plugin::buildDescSets() noexcept {
-    if (!mCudnn || mCin <= 0 || mCout <= 0 || mH <= 0 || mW <= 0) return false;
+    std::cout << "[buildDescSets] enter"
+              << " mN=" << mN
+              << " mCin=" << mCin
+              << " mCout=" << mCout
+              << " mHalfC=" << mHalfC
+              << " mH=" << mH
+              << " mW=" << mW
+              << std::endl;
+
+    if (!mCudnn || mCin <= 0 || mCout <= 0 || mH <= 0 || mW <= 0) {
+        std::cout << "[buildDescSets] invalid state"
+                  << " mCudnn=" << (mCudnn != nullptr)
+                  << " mCin=" << mCin
+                  << " mCout=" << mCout
+                  << " mH=" << mH
+                  << " mW=" << mW
+                  << std::endl;
+        return false;
+    }
+
     destroyDescSets();
 
     bool ok = true;
-    ok &= buildOneDescSet(mCv1Desc,   mN, mCin,    mCout,        mH, mW, 1, 1, 0, 0);
-    ok &= buildOneDescSet(mM0Cv1Desc, mN, mHalfC,  mHalfC,       mH, mW, 3, 3, 1, 1);
-    ok &= buildOneDescSet(mM0Cv2Desc, mN, mHalfC,  mHalfC,       mH, mW, 3, 3, 1, 1);
-    ok &= buildOneDescSet(mCv2Desc,   mN, 3*mHalfC, mCout,       mH, mW, 1, 1, 0, 0);
+    ok &= buildOneDescSet(mCv1Desc,    mN, mCin,      mCout, mH, mW, 1, 1, 0, 0);
+    ok &= buildOneDescSet(mM0Cv1Desc,  mN, mHalfC,    mHalfC, mH, mW, 3, 3, 1, 1);
+    ok &= buildOneDescSet(mM0Cv2Desc,  mN, mHalfC,    mHalfC, mH, mW, 3, 3, 1, 1);
+    ok &= buildOneDescSet(mCv2Desc,    mN, 3*mHalfC,  mCout,  mH, mW, 1, 1, 0, 0);
 
     mDescsCached = ok;
+    std::cout << "[buildDescSets] result=" << ok << std::endl;
     return ok;
 }
 
@@ -302,26 +404,51 @@ bool YoloC2fM2Plugin::runConv(
     float const* w, float const* b,
     void* workspace, cudaStream_t stream) const noexcept
 {
-    if (!mCudnn || !d.xDesc) return false;
+    if (!mCudnn || !d.xDesc) {
+        std::cerr << "[runConv] invalid state"
+                  << " mCudnn=" << (mCudnn != nullptr)
+                  << " d.xDesc=" << (d.xDesc != nullptr)
+                  << std::endl;
+        return false;
+    }
 
-    cudnnSetStream(mCudnn, stream);
+    cudnnStatus_t st = cudnnSetStream(mCudnn, stream);
+    if (st != CUDNN_STATUS_SUCCESS) {
+        std::cerr << "[runConv] cudnnSetStream FAILED: "
+                  << cudnnGetErrorString(st) << std::endl;
+        return false;
+    }
 
     float alpha = 1.f, beta = 0.f;
-    if (cudnnConvolutionForward(
-            mCudnn, &alpha,
-            d.xDesc, x,
-            d.wDesc, w,
-            d.cDesc, d.algo,
-            workspace, d.workspaceBytes,
-            &beta,
-            d.yDesc, y) != CUDNN_STATUS_SUCCESS) return false;
 
-    // Fused bias add
-    if (cudnnAddTensor(
-            mCudnn, &alpha,
-            d.bDesc, b,
-            &alpha,
-            d.yDesc, y) != CUDNN_STATUS_SUCCESS) return false;
+    st = cudnnConvolutionForward(
+        mCudnn, &alpha,
+        d.xDesc, x,
+        d.wDesc, w,
+        d.cDesc, d.algo,
+        workspace, d.workspaceBytes,
+        &beta,
+        d.yDesc, y);
+
+    if (st != CUDNN_STATUS_SUCCESS) {
+        std::cerr << "[runConv] cudnnConvolutionForward FAILED: "
+                  << cudnnGetErrorString(st)
+                  << " workspaceBytes=" << d.workspaceBytes
+                  << std::endl;
+        return false;
+    }
+
+    st = cudnnAddTensor(
+        mCudnn, &alpha,
+        d.bDesc, b,
+        &alpha,
+        d.yDesc, y);
+
+    if (st != CUDNN_STATUS_SUCCESS) {
+        std::cerr << "[runConv] cudnnAddTensor FAILED: "
+                  << cudnnGetErrorString(st) << std::endl;
+        return false;
+    }
 
     return true;
 }
@@ -336,18 +463,41 @@ const char* YoloC2fM2Plugin::getPluginVersion() const noexcept { return kPLUGIN_
 int         YoloC2fM2Plugin::getNbOutputs()     const noexcept { return 1; }
 
 int YoloC2fM2Plugin::initialize() noexcept {
-    // Create our own cuDNN handle if TRT hasn't provided one via attachToContext
+    std::cerr << "[initialize] enter"
+              << " mCin=" << mCin
+              << " mCout=" << mCout
+              << " mHalfC=" << mHalfC
+              << " mN=" << mN
+              << " mH=" << mH
+              << " mW=" << mW
+              << " path=" << mWeightsPath
+              << std::endl;
+
     if (!mCudnn) {
         if (cudnnCreate(&mCudnn) != CUDNN_STATUS_SUCCESS) {
+            std::cerr << "[initialize] cudnnCreate FAILED" << std::endl;
             mCudnn = nullptr;
             return 1;
         }
         mCudnnOwned = true;
     }
 
-    if (!loadWeightsToDevice()) return 1;
-    if (!buildDescSets())        return 1;
+    if (!d_cv1_w || !d_cv1_b || !d_m0_cv1_w || !d_m0_cv1_b ||
+        !d_m0_cv2_w || !d_m0_cv2_b || !d_cv2_w || !d_cv2_b) {
+        if (!loadWeightsToDevice()) {
+            std::cerr << "[initialize] loadWeightsToDevice FAILED" << std::endl;
+            return 1;
+        }
+    }
 
+    if (!mDescsCached) {
+        if (!buildDescSets()) {
+            std::cerr << "[initialize] buildDescSets FAILED" << std::endl;
+            return 1;
+        }
+    }
+
+    std::cerr << "[initialize] OK" << std::endl;
     return 0;
 }
 
@@ -387,6 +537,13 @@ void YoloC2fM2Plugin::serialize(void* buffer) const noexcept {
     writeToBuffer(d, static_cast<int32_t>(mH));
     writeToBuffer(d, static_cast<int32_t>(mW));
     writeToBuffer(d, static_cast<int32_t>(mShortcut ? 1 : 0));
+
+    std::cout << "[serialize] mCin=" << mCin
+          << " mCout=" << mCout
+          << " mHalfC=" << mHalfC
+          << " mH=" << mH
+          << " mW=" << mW
+          << std::endl;
 }
 
 void YoloC2fM2Plugin::destroy() noexcept { delete this; }
@@ -403,14 +560,23 @@ DataType YoloC2fM2Plugin::getOutputDataType(int, DataType const* inputTypes, int
 }
 
 IPluginV2DynamicExt* YoloC2fM2Plugin::clone() const noexcept {
+    std::cerr << "[clone] mCin=" << mCin
+              << " mCout=" << mCout
+              << " mHalfC=" << mHalfC
+              << " mN=" << mN
+              << " mH=" << mH
+              << " mW=" << mW
+              << " path=" << mWeightsPath
+              << std::endl;
+
     auto* p = new YoloC2fM2Plugin(mWeightsPath);
-    p->mCin       = mCin;
-    p->mCout      = mCout;
-    p->mHalfC     = mHalfC;
-    p->mN         = mN;
-    p->mH         = mH;
-    p->mW         = mW;
-    p->mShortcut  = mShortcut;
+    p->mCin      = mCin;
+    p->mCout     = mCout;
+    p->mHalfC    = mHalfC;
+    p->mN        = mN;
+    p->mH        = mH;
+    p->mW        = mW;
+    p->mShortcut = mShortcut;
     p->setPluginNamespace(mNamespace.c_str());
     return p;
 }
@@ -420,17 +586,19 @@ IPluginV2DynamicExt* YoloC2fM2Plugin::clone() const noexcept {
 // If mCout is not yet populated (build-time before weights are loaded),
 // we cannot return the right dims — caller must supply cin/cout via
 // plugin fields or peek the weight file before getOutputDimensions.
-// For a static-batch engine we use mCout set from the weight file header.
 // ---------------------------------------------------------------------------
 DimsExprs YoloC2fM2Plugin::getOutputDimensions(
     int, DimsExprs const* inputs, int, IExprBuilder& eb) noexcept
 {
+    std::cout << "[getOutputDimensions] mCin=" << mCin
+              << " mCout=" << mCout
+              << " mHalfC=" << mHalfC
+              << std::endl;
+
     DimsExprs out = inputs[0];
     if (mCout > 0) {
         out.d[1] = eb.constant(mCout);
     }
-    // If mCout == 0 (pre-weight load), output channel dim is left as input's.
-    // This is resolved after initialize() when the engine is serialised.
     return out;
 }
 
@@ -443,18 +611,81 @@ bool YoloC2fM2Plugin::supportsFormatCombination(
 }
 
 void YoloC2fM2Plugin::configurePlugin(
-    DynamicPluginTensorDesc const* in, int,
-    DynamicPluginTensorDesc const*, int) noexcept
+    DynamicPluginTensorDesc const* in, int nbInputs,
+    DynamicPluginTensorDesc const* out, int nbOutputs) noexcept
 {
-    // Store the optimal-profile spatial dims for descriptor caching
-    auto const& opt = in[0].opt;
-    if (opt.nbDims == 4) {
-        mN = opt.d[0] > 0 ? opt.d[0] : 1;
-        mH = opt.d[2];
-        mW = opt.d[3];
-        // Input channel count from ONNX graph (mCin may already be set by weight loader)
-        if (mCin == 0) mCin = opt.d[1];
+    auto printDims = [](char const* label, Dims const& d) {
+        std::cout << label << " nbDims=" << d.nbDims << " (";
+        for (int i = 0; i < d.nbDims; ++i) {
+            std::cout << d.d[i];
+            if (i + 1 < d.nbDims) std::cout << ", ";
+        }
+        std::cout << ")";
+    };
+
+    if (nbInputs < 1) {
+        std::cout << "[configurePlugin] nbInputs < 1" << std::endl;
+        return;
     }
+
+    auto const& descDims = in[0].desc.dims;
+    auto const& minDims  = in[0].min;
+    auto const& optDims  = in[0].opt;
+    auto const& maxDims  = in[0].max;
+
+    std::cout << "[configurePlugin] ";
+    printDims("desc", descDims);
+    std::cout << " ";
+    printDims("min", minDims);
+    std::cout << " ";
+    printDims("opt", optDims);
+    std::cout << " ";
+    printDims("max", maxDims);
+    std::cout << std::endl;
+
+    auto pickDims = [&]() -> Dims const* {
+        if (descDims.nbDims > 0) return &descDims;
+        if (optDims.nbDims > 0)  return &optDims;
+        if (maxDims.nbDims > 0)  return &maxDims;
+        if (minDims.nbDims > 0)  return &minDims;
+        return nullptr;
+    };
+
+    Dims const* chosen = pickDims();
+    if (!chosen) {
+        std::cout << "[configurePlugin] no valid dims available" << std::endl;
+        return;
+    }
+
+    // For explicit-batch networks, plugins often see CHW here.
+    // If TRT gives NCHW, we handle that too.
+    if (chosen->nbDims == 3) {
+        // [C, H, W]
+        if (mCin == 0 && chosen->d[0] > 0) mCin = chosen->d[0];
+        if (chosen->d[1] > 0) mH = chosen->d[1];
+        if (chosen->d[2] > 0) mW = chosen->d[2];
+        mN = 1;
+    } else if (chosen->nbDims == 4) {
+        // [N, C, H, W]
+        if (chosen->d[0] > 0) mN = chosen->d[0];
+        else mN = 1;
+        if (mCin == 0 && chosen->d[1] > 0) mCin = chosen->d[1];
+        if (chosen->d[2] > 0) mH = chosen->d[2];
+        if (chosen->d[3] > 0) mW = chosen->d[3];
+    } else {
+        std::cout << "[configurePlugin] unsupported chosen->nbDims="
+                  << chosen->nbDims << std::endl;
+        return;
+    }
+
+    std::cout << "[configurePlugin] resolved"
+              << " mN=" << mN
+              << " mCin=" << mCin
+              << " mCout=" << mCout
+              << " mHalfC=" << mHalfC
+              << " mH=" << mH
+              << " mW=" << mW
+              << std::endl;
 }
 
 // ---------------------------------------------------------------------------
@@ -471,29 +702,60 @@ size_t YoloC2fM2Plugin::getWorkspaceSize(
     PluginTensorDesc const* inputs, int nbInputs,
     PluginTensorDesc const*, int) const noexcept
 {
-    if (nbInputs != 1 || inputs[0].dims.nbDims != 4) return 0;
+    if (nbInputs != 1) {
+        std::cout << "[getWorkspaceSize] invalid nbInputs=" << nbInputs << std::endl;
+        return 0;
+    }
 
-    int N = inputs[0].dims.d[0];
-    int H = inputs[0].dims.d[2];
-    int W = inputs[0].dims.d[3];
+    std::cout << "[getWorkspaceSize] input nbDims=" << inputs[0].dims.nbDims << " dims=(";
+    for (int i = 0; i < inputs[0].dims.nbDims; ++i) {
+        std::cout << inputs[0].dims.d[i];
+        if (i + 1 < inputs[0].dims.nbDims) std::cout << ", ";
+    }
+    std::cout << ")"
+              << " mCin=" << mCin
+              << " mCout=" << mCout
+              << " mHalfC=" << mHalfC
+              << " mH=" << mH
+              << " mW=" << mW
+              << std::endl;
+
+    int N = 1, H = 0, W = 0;
+
+    if (inputs[0].dims.nbDims == 3) {
+        H = inputs[0].dims.d[1];
+        W = inputs[0].dims.d[2];
+    } else if (inputs[0].dims.nbDims == 4) {
+        N = inputs[0].dims.d[0];
+        H = inputs[0].dims.d[2];
+        W = inputs[0].dims.d[3];
+    } else {
+        return 0;
+    }
+
     if (N <= 0 || H <= 0 || W <= 0 || mCout <= 0) return 0;
 
-    size_t HW      = static_cast<size_t>(H) * W;
-    size_t cv1Sz   = static_cast<size_t>(N) * mCout    * HW * sizeof(float);
-    size_t halfSz  = static_cast<size_t>(N) * mHalfC   * HW * sizeof(float);
-    size_t concatSz= static_cast<size_t>(N) * 3*mHalfC * HW * sizeof(float);
+    size_t HW       = static_cast<size_t>(H) * W;
+    size_t cv1Sz    = static_cast<size_t>(N) * mCout    * HW * sizeof(float);
+    size_t halfSz   = static_cast<size_t>(N) * mHalfC   * HW * sizeof(float);
+    size_t concatSz = static_cast<size_t>(N) * 3 * mHalfC * HW * sizeof(float);
 
-    // Max cuDNN workspace across all 4 convolutions
     size_t convWs = 0;
     convWs = std::max(convWs, mCv1Desc.workspaceBytes);
     convWs = std::max(convWs, mM0Cv1Desc.workspaceBytes);
     convWs = std::max(convWs, mM0Cv2Desc.workspaceBytes);
     convWs = std::max(convWs, mCv2Desc.workspaceBytes);
 
-    // If descriptors not yet built, use a conservative upper bound
-    if (convWs == 0) convWs = 64ULL << 20;   // 64 MB fallback
+    if (convWs == 0) convWs = 64ULL << 20;
 
-    return cv1Sz + halfSz + concatSz + convWs;
+    size_t total = cv1Sz + halfSz + concatSz + convWs;
+
+    std::cout << "[getWorkspaceSize] total=" << total
+              << " N=" << N << " H=" << H << " W=" << W
+              << " convWs=" << convWs
+              << std::endl;
+
+    return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +791,13 @@ void YoloC2fM2Plugin::detachFromContext() noexcept {
 YoloC2fM2PluginCreator::YoloC2fM2PluginCreator() {
     mPluginAttributes.emplace_back(
         PluginField{"weights_path", nullptr, PluginFieldType::kCHAR, 1});
+    mPluginAttributes.emplace_back(
+        PluginField{"cin", nullptr, PluginFieldType::kINT32, 1});
+    mPluginAttributes.emplace_back(
+        PluginField{"cout", nullptr, PluginFieldType::kINT32, 1});
+    mPluginAttributes.emplace_back(
+        PluginField{"halfc", nullptr, PluginFieldType::kINT32, 1});
+
     mFC.nbFields = static_cast<int>(mPluginAttributes.size());
     mFC.fields   = mPluginAttributes.data();
 }
@@ -541,14 +810,47 @@ IPluginV2* YoloC2fM2PluginCreator::createPlugin(
     const char*, PluginFieldCollection const* fc) noexcept
 {
     std::string weightsPath;
+    int cin = 0, cout = 0, halfc = 0;
+
     if (fc) {
         for (int i = 0; i < fc->nbFields; ++i) {
             auto const& f = fc->fields[i];
-            if (f.data && std::string(f.name) == "weights_path")
+            if (!f.data || !f.name) continue;
+
+            std::string name = f.name;
+
+            if (name == "weights_path") {
                 weightsPath = static_cast<char const*>(f.data);
+            } else if (name == "cin") {
+                if (f.type == PluginFieldType::kINT32) {
+                    cin = *static_cast<int const*>(f.data);
+                } else if (f.type == PluginFieldType::kINT64) {
+                    cin = static_cast<int>(*static_cast<int64_t const*>(f.data));
+                }
+            } else if (name == "cout") {
+                if (f.type == PluginFieldType::kINT32) {
+                    cout = *static_cast<int const*>(f.data);
+                } else if (f.type == PluginFieldType::kINT64) {
+                    cout = static_cast<int>(*static_cast<int64_t const*>(f.data));
+                }
+            } else if (name == "halfc") {
+                if (f.type == PluginFieldType::kINT32) {
+                    halfc = *static_cast<int const*>(f.data);
+                } else if (f.type == PluginFieldType::kINT64) {
+                    halfc = static_cast<int>(*static_cast<int64_t const*>(f.data));
+                }
+            }
         }
     }
+
+    std::cout << "[createPlugin] weightsPath=" << weightsPath
+          << " cin=" << cin
+          << " cout=" << cout
+          << " halfc=" << halfc
+          << std::endl;
+
     auto* p = new YoloC2fM2Plugin(weightsPath);
+    p->setStaticDims(cin, cout, (halfc > 0) ? halfc : (cout / 2));
     p->setPluginNamespace(mNamespace.c_str());
     return p;
 }

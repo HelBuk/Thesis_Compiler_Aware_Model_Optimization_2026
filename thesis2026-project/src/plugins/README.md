@@ -155,10 +155,9 @@ make -j$(nproc)
 trtexec \
   --onnx=./models/quantized_models/onnx/yolov8n_model2_plugin.onnx \
   --plugins=src/plugins/c2f_m2/build/libc2f_m2_plugin.so \
-  --saveEngine=./models/plugin_weights/yolov8_model2_plugin.engine \
+  --saveEngine=./models/plugin_weights/yolov8_model2_plugin_v4.engine \
   --profilingVerbosity=detailed \
-  --dumpLayerInfo \
-  --fp32
+  --dumpLayerInfo 
 ```
 
 #### Verify plugin insertion
@@ -175,14 +174,14 @@ inserted — check the `.so` path and that `weights_path` in the ONNX node is co
 ### 5. Run inference benchmark
 
 ```bash
-python -m optimizer.evaluation.tensorrt_evaluation_indiv \
-  --engine  ./models/plugin_weights/yolov8_model2_plugin.engine \
+python -m src.optimizer.evaluation.tensorrt_evaluation_indiv \
+  --engine  ./models/plugin_weights/yolov8_model2_plugin_v4.engine \
   --name    model2_plugin \
   --device  cuda:0 \
   --imgsz   640 \
   --batch   1 \
-  --bench_runs    20 \
-  --bench_warmup   5 \
+  --bench_runs    2 \
+  --bench_warmup   1 \
   --trt_plugin_so src/plugins/c2f_m2/build/libc2f_m2_plugin.so
 ```
 
@@ -194,16 +193,16 @@ python -m optimizer.evaluation.tensorrt_evaluation_indiv \
 
 ```bash
 nsys profile \
-  --output profiling/trt_fp32_profile_plugin \
+  --output src/profiling/trt_fp32_profile_plugin_v4 \
   --trace  cuda,nvtx,osrt \
-  python -m optimizer.evaluation.tensorrt_evaluation_indiv \
-    --engine  ./models/plugin_weights/yolov8_model2_plugin.engine \
+  python -m src.optimizer.evaluation.tensorrt_evaluation_indiv \
+    --engine  ./models/plugin_weights/yolov8_model2_plugin_v4.engine \
     --name    model2_plugin \
     --device  cuda:0 \
     --imgsz   640 \
     --batch   1 \
-    --bench_runs   3 \
-    --bench_warmup 1 \
+    --bench_runs    2 \
+    --bench_warmup   1 \
     --trt_plugin_so src/plugins/c2f_m2/build/libc2f_m2_plugin.so
 ```
 
@@ -214,7 +213,7 @@ Output: `profiling/trt_fp32_profile_plugin.nsys-rep`
 ```bash
 nsys export \
   --type sqlite \
-  profiling/trt_fp32_profile_plugin.nsys-rep
+  src/profiling/trt_fp32_profile_plugin.nsys-rep
 ```
 
 ### 3. Export statistics
@@ -226,8 +225,8 @@ nsys stats \
   --report cuda_gpu_kern_sum \
   --report cuda_gpu_mem_time_sum \
   --report cuda_gpu_mem_size_sum \
-  profiling/trt_fp32_profile_plugin.sqlite \
-  > profiling/trt_fp32_profile_plugin.txt 2>&1
+  src/profiling/trt_fp32_profile_plugin.sqlite \
+  > src/profiling/trt_fp32_profile_plugin.txt 2>&1
 ```
 
 ### What to look for vs baseline

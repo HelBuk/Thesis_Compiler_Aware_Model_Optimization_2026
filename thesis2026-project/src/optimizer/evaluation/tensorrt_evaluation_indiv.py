@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import torch
 
-from optimizer.evaluation.yolo_metrics import (
+from src.optimizer.evaluation.yolo_metrics import (
     Backend,
     build_backend,
     eval_backend,

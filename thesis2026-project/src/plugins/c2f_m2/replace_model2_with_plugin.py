@@ -15,10 +15,10 @@ import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
 
-IN_ONNX      = "../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"
-OUT_ONNX     = "../models/quantized_models/onnx/yolov8n_model2_plugin.onnx"
-WEIGHTS_PATH = "../models/plugin_weights/model2_c2f_folded.bin"
-NPZ_PATH     = "../models/plugin_weights/model2_c2f_folded.npz"  # for shape inspection
+IN_ONNX      = "./models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"
+OUT_ONNX     = "./models/quantized_models/onnx/yolov8n_model2_plugin.onnx"
+WEIGHTS_PATH = WEIGHTS_PATH = str(Path("./models/plugin_weights/model2_c2f_folded.bin").resolve())
+NPZ_PATH     = "./models/plugin_weights/model2_c2f_folded.npz"  # for shape inspection
 
 # ---------------------------------------------------------------------------
 # Derive Cin / Cout from the exported weights so we can store them in the
@@ -68,13 +68,13 @@ plugin_node = gs.Node(
     inputs=[input_tensor],
     outputs=[output_tensor],
     attrs={
-        "weights_path": WEIGHTS_PATH,
+        "weights_path": str(Path(WEIGHTS_PATH).resolve()),
         "plugin_version": "1",
         "plugin_namespace": "",
-        # Informational — the C++ plugin reads Cin/Cout from the .bin file
-        "cin":  Cin,
+        "cin": Cin,
         "cout": Cout,
-    },
+        "halfc": halfC,
+    }
 )
 
 graph.nodes = [n for n in graph.nodes if id(n) not in selected_ids]

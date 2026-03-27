@@ -22,8 +22,8 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-NPZ_OUT = Path("../models/plugin_weights/model2_c2f_folded.npz")
-BIN_OUT = Path("../models/plugin_weights/model2_c2f_folded.bin")
+NPZ_OUT = Path("./models/plugin_weights/model2_c2f_folded.npz")
+BIN_OUT = Path("./models/plugin_weights/model2_c2f_folded.bin")
 NPZ_OUT.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -71,7 +71,7 @@ def write_bin(path: Path, arrays: dict):
 # ---------------------------------------------------------------------------
 # Main export
 # ---------------------------------------------------------------------------
-y = YOLO("../models/yolov8n.pt")
+y = YOLO("./models/yolov8n.pt")
 m = y.model.model[2]   # model.2  C2f block
 
 arrays = {}

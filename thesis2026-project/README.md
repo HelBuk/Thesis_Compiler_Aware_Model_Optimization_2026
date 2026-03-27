@@ -75,6 +75,12 @@ nsys profile --trace=cuda,nvtx,osrt -o FILE_NAME python -m SCRIPT_NAME
 nsys stats trt_fp32_prof.nsys-rep
 ```
 
+8.2 NSYS Export:
+
+```bash
+nsys export profiling/NAME.nsys-rep --type sqlite -o profiling/NAME
+```
+
 Or with Nsight Systems GUI:
 ```bash
 nsys-ui

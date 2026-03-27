@@ -46,6 +46,12 @@ public:
     void setPluginNamespace(char const* ns) noexcept override;
     char const* getPluginNamespace()    const noexcept override;
 
+    void setStaticDims(int cin, int cout, int halfc) noexcept {
+        mCin = cin;
+        mCout = cout;
+        mHalfC = halfc;
+    }
+
     // IPluginV2Ext
     nvinfer1::DataType getOutputDataType(
         int index,
