@@ -2,8 +2,8 @@
 
 #include <NvInfer.h>
 #include <cuda_runtime.h>
+#include <cudnn.h>
 
-#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -11,11 +11,11 @@ class YoloC2fM2Plugin final : public nvinfer1::IPluginV2DynamicExt {
 public:
     explicit YoloC2fM2Plugin(std::string weightsPath = "");
     YoloC2fM2Plugin(void const* data, size_t length);
-    ~YoloC2fM2Plugin() override = default;
+    ~YoloC2fM2Plugin() override;
 
     // IPluginV2
-    char const* getPluginType() const noexcept override;
-    char const* getPluginVersion() const noexcept override;
+    const char* getPluginType() const noexcept override;
+    const char* getPluginVersion() const noexcept override;
     int getNbOutputs() const noexcept override;
     int initialize() noexcept override;
     void terminate() noexcept override;
@@ -67,36 +67,96 @@ public:
         cudaStream_t stream) noexcept override;
 
     void attachToContext(
-        cudnnContext* cudnnContext,
-        cublasContext* cublasContext,
-        nvinfer1::IGpuAllocator* gpuAllocator) noexcept override;
+        cudnnContext* cudnn,
+        cublasContext* cublas,
+        nvinfer1::IGpuAllocator* allocator) noexcept override;
 
     void detachFromContext() noexcept override;
 
 private:
-    std::string mWeightsPath;
+    void destroyWeights() noexcept;
+    bool loadWeightsToDevice();
+    size_t getMaxConvWorkspaceBytes(int N, int C, int H, int W) const noexcept;
+
+    bool runConv1x1(
+        const float* x,
+        float* y,
+        int N, int Cin, int Cout, int H, int W,
+        const float* w,
+        const float* b,
+        void* workspace,
+        size_t workspaceBytes,
+        cudaStream_t stream) const noexcept;
+
+    bool runConv3x3(
+        const float* x,
+        float* y,
+        int N, int Cin, int Cout, int H, int W,
+        const float* w,
+        const float* b,
+        void* workspace,
+        size_t workspaceBytes,
+        cudaStream_t stream) const noexcept;
+
+private:
     std::string mNamespace;
+    std::string mWeightsPath;
+
+    // C2f(m=2) module-2 assumptions:
+    // input  : [N, C,   H, W]
+    // cv1    : [N, C,   H, W]
+    // split  : x1=[N,C/2,H,W], x2=[N,C/2,H,W]
+    // m0.cv1 : [N,C/2,H,W] -> [N,C/2,H,W]
+    // m0.cv2 : [N,C/2,H,W] -> [N,C/2,H,W]
+    // concat : [N,3C/2,H,W]
+    // cv2    : [N,3C/2,H,W] -> [N,C,H,W]
+
+    cudnnHandle_t mCudnn{nullptr};
+
+    // Device weights
+    float* d_cv1_w{nullptr};
+    float* d_cv1_b{nullptr};
+
+    float* d_m0_cv1_w{nullptr};
+    float* d_m0_cv1_b{nullptr};
+
+    float* d_m0_cv2_w{nullptr};
+    float* d_m0_cv2_b{nullptr};
+
+    float* d_cv2_w{nullptr};
+    float* d_cv2_b{nullptr};
+
+    // Host-side cached raw weights if you want serialization later
+    std::vector<float> h_cv1_w, h_cv1_b;
+    std::vector<float> h_m0_cv1_w, h_m0_cv1_b;
+    std::vector<float> h_m0_cv2_w, h_m0_cv2_b;
+    std::vector<float> h_cv2_w, h_cv2_b;
 };
 
-class YoloC2fM2PluginCreator final : public nvinfer1::IPluginCreator {
+
+// ============================
+// Creator
+// ============================
+
+class YoloC2fM2PluginCreator : public nvinfer1::IPluginCreator {
 public:
     YoloC2fM2PluginCreator();
 
-    char const* getPluginName() const noexcept override;
-    char const* getPluginVersion() const noexcept override;
-    nvinfer1::PluginFieldCollection const* getFieldNames() noexcept override;
+    const char* getPluginName() const noexcept override;
+    const char* getPluginVersion() const noexcept override;
+    const nvinfer1::PluginFieldCollection* getFieldNames() noexcept override;
 
     nvinfer1::IPluginV2* createPlugin(
-        char const* name,
-        nvinfer1::PluginFieldCollection const* fc) noexcept override;
+        const char* name,
+        const nvinfer1::PluginFieldCollection* fc) noexcept override;
 
     nvinfer1::IPluginV2* deserializePlugin(
-        char const* name,
-        void const* serialData,
+        const char* name,
+        const void* serialData,
         size_t serialLength) noexcept override;
 
-    void setPluginNamespace(char const* libNamespace) noexcept override;
-    char const* getPluginNamespace() const noexcept override;
+    void setPluginNamespace(const char* libNamespace) noexcept override;
+    const char* getPluginNamespace() const noexcept override;
 
 private:
     std::string mNamespace;

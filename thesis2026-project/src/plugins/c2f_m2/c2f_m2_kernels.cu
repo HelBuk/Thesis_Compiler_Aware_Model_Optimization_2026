@@ -1,4 +1,3 @@
-// src/plugins/c2f_m2/c2f_m2_kernels.cu
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -17,6 +16,27 @@ void add_inplace_kernel(float* x, const float* y, int n) {
     if (i < n) x[i] += y[i];
 }
 
+// Extract channels [c_start, c_start + Cslice) from x[N,Cin,H,W] into out[N,Cslice,H,W]
+extern "C" __global__
+void slice_ch_kernel(
+    const float* x,
+    float* out,
+    int N, int Cin, int Cslice, int H, int W,
+    int c_start
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int hw = H * W;
+    int total = N * Cslice * hw;
+    if (idx >= total) return;
+
+    int inner = idx % (Cslice * hw);
+    int c = inner / hw;
+    int off = inner % hw;
+    int n = idx / (Cslice * hw);
+
+    out[idx] = x[(n * Cin + (c + c_start)) * hw + off];
+}
+
 extern "C" __global__
 void concat3_ch_kernel(
     const float* a, const float* b, const float* c,
@@ -29,10 +49,10 @@ void concat3_ch_kernel(
     int total = N * c3 * hw;
     if (idx >= total) return;
 
-    int inner = idx % (c3 * hw);    // position inside one batch item
-    int ch = inner / hw;            // output channel index
-    int off = inner % hw;           // flattened (h, w) location
-    int n = idx / (c3 * hw);        // the batch number
+    int inner = idx % (c3 * hw);
+    int ch = inner / hw;
+    int off = inner % hw;
+    int n = idx / (c3 * hw);
 
     const float* src;
     int src_ch;

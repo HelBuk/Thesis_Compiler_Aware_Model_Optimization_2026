@@ -15,6 +15,7 @@ target_include_directories(c2f_m2_plugin PRIVATE
 target_link_libraries(c2f_m2_plugin PRIVATE
     nvinfer
     cudart
+    cudnn
 )
 
 set_target_properties(c2f_m2_plugin PROPERTIES
