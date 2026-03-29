@@ -13,6 +13,20 @@ extern "C" __global__ void add_inplace_kernel(float* x, const float* y, int n);
 extern "C" __global__ void slice_ch_kernel(
     const float* x, float* out,
     int N, int Cin, int Cslice, int H, int W, int c_start);
+extern "C" __global__ void fused_c2f_model2_kernel(
+    const float* x,
+    float* y,
+    const float* cv1_w,
+    const float* cv1_b,
+    const float* m0cv1_w,
+    const float* m0cv1_b,
+    const float* m0cv2_w,
+    const float* m0cv2_b,
+    const float* cv2_w,
+    const float* cv2_b,
+    int H,
+    int W
+);
 
 // ---------------------------------------------------------------------------
 // Convenience macros
@@ -30,6 +44,78 @@ extern "C" __global__ void slice_ch_kernel(
 // ---------------------------------------------------------------------------
 // Launch helpers
 // ---------------------------------------------------------------------------
+static int launchFusedC2FModel2(
+    const float* x,
+    float* y,
+    const float* cv1_w,
+    const float* cv1_b,
+    const float* m0cv1_w,
+    const float* m0cv1_b,
+    const float* m0cv2_w,
+    const float* m0cv2_b,
+    const float* cv2_w,
+    const float* cv2_b,
+    int H,
+    int W,
+    cudaStream_t stream
+) {
+    constexpr int TILE_H = 8;
+    constexpr int TILE_W = 8;
+    constexpr int CIN    = 32;
+    constexpr int COUT   = 32;
+    constexpr int HALFC  = 16;
+    constexpr int CV1_HALO = 2;
+    constexpr int M0CV1_HALO = 1;
+
+    dim3 block(TILE_W, TILE_H);
+    dim3 grid((W + TILE_W - 1) / TILE_W,
+              (H + TILE_H - 1) / TILE_H);
+
+    const int in_h = TILE_H + 2 * CV1_HALO;   // 12
+    const int in_w = TILE_W + 2 * CV1_HALO;   // 12
+    const int m1_h = TILE_H + 2 * M0CV1_HALO; // 10
+    const int m1_w = TILE_W + 2 * M0CV1_HALO; // 10
+
+    size_t smem_bytes =
+        sizeof(float) * (
+            CIN   * in_h * in_w +
+            COUT  * in_h * in_w +
+            HALFC * m1_h * m1_w
+        );
+
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+
+    std::cerr << "[FUSED LAUNCH]"
+            << " grid=(" << grid.x << "," << grid.y << ")"
+            << " block=(" << block.x << "," << block.y << ")"
+            << " smem=" << smem_bytes
+            << std::endl;
+
+    if (smem_bytes > prop.sharedMemPerBlock) {
+        std::cerr << "[ERROR] Shared memory too large: "
+                << smem_bytes << " > " << prop.sharedMemPerBlock << std::endl;
+        return 1;
+    }
+
+    fused_c2f_model2_kernel<<<grid, block, smem_bytes, stream>>>(
+        x, y,
+        cv1_w, cv1_b,
+        m0cv1_w, m0cv1_b,
+        m0cv2_w, m0cv2_b,
+        cv2_w, cv2_b,
+        H, W
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "[launchFusedC2FModel2] kernel launch failed: "
+                  << cudaGetErrorString(err) << std::endl;
+        return 1;
+    }
+    return 0;
+}
+
 static void launchSiLU(float* x, size_t n, cudaStream_t stream) {
     if (n == 0) return;
     // Grid covers (n/4 + n%4) threads — handles both vec body and scalar tail.
@@ -61,7 +147,7 @@ static void launchAddInplace(float* x, const float* y, size_t n, cudaStream_t st
 // ===========================================================================
 // enqueue — C2f(m=1) forward pass
 //
-// Architecture for YOLOv8n model.2 (Cin=32, Cout=32, halfC=32, H=W=160):
+// Architecture for YOLOv8n model.2 (Cin=32, Cout=32, halfC=16, H=W=160):
 //
 //   input [N, Cin, H, W]
 //     └─► cv1 (1×1, Cin→Cout) + SiLU  → cv1_out [N, Cout, H, W]
@@ -91,18 +177,14 @@ int YoloC2fM2Plugin::enqueue(
     PluginTensorDesc const* inputDesc,
     PluginTensorDesc const* outputDesc,
     void const* const* inputs,
-    void* const*       outputs,
-    void*              workspace,
-    cudaStream_t       stream) noexcept
+    void* const* outputs,
+    void* workspace,
+    cudaStream_t stream) noexcept
 {
-    if (!mCudnn || !mDescsCached) {
-        std::cerr << "[enqueue] state not ready, calling initialize()"
-                  << " mCudnn=" << (mCudnn != nullptr)
-                  << " mDescsCached=" << mDescsCached
-                  << std::endl;
-
+    if (!d_cv1_w || !d_cv1_b || !d_m0_cv1_w || !d_m0_cv1_b ||
+        !d_m0_cv2_w || !d_m0_cv2_b || !d_cv2_w || !d_cv2_b) {
         if (initialize() != 0) {
-            std::cerr << "[enqueue] initialize FAILED" << std::endl;
+            std::cerr << "[enqueue] initialize failed" << std::endl;
             return 1;
         }
     }
@@ -111,13 +193,6 @@ int YoloC2fM2Plugin::enqueue(
     int Cin = 0;
     int H = 0;
     int W = 0;
-
-    std::cerr << "[enqueue] input nbDims=" << inputDesc[0].dims.nbDims << " dims=(";
-    for (int i = 0; i < inputDesc[0].dims.nbDims; ++i) {
-        std::cerr << inputDesc[0].dims.d[i];
-        if (i + 1 < inputDesc[0].dims.nbDims) std::cerr << ", ";
-    }
-    std::cerr << ")" << std::endl;
 
     if (inputDesc[0].dims.nbDims == 3) {
         Cin = inputDesc[0].dims.d[0];
@@ -130,27 +205,21 @@ int YoloC2fM2Plugin::enqueue(
         H   = inputDesc[0].dims.d[2];
         W   = inputDesc[0].dims.d[3];
     } else {
-        std::cerr << "[enqueue] unsupported nbDims="
-                  << inputDesc[0].dims.nbDims << std::endl;
+        std::cerr << "[enqueue] unsupported nbDims=" << inputDesc[0].dims.nbDims << std::endl;
         return 1;
     }
 
-    std::cerr << "[enqueue] resolved"
-              << " N=" << N
-              << " Cin=" << Cin
-              << " H=" << H
-              << " W=" << W
-              << " mCin=" << mCin
-              << " mCout=" << mCout
-              << " mHalfC=" << mHalfC
-              << std::endl;
+    if (N != 1) {
+        std::cerr << "[enqueue] fused kernel currently supports N=1 only" << std::endl;
+        return 1;
+    }
 
-    if (N <= 0 || H <= 0 || W <= 0 || Cin <= 0) {
-        std::cerr << "[enqueue] invalid resolved dims"
-                  << " N=" << N
-                  << " Cin=" << Cin
-                  << " H=" << H
-                  << " W=" << W
+    if (Cin != 32 || mCin != 32 || mHalfC != 16 || mCout != 32) {
+        std::cerr << "[enqueue] fused kernel expects Cin=32, halfC=16, Cout=32"
+                  << " but got Cin=" << Cin
+                  << " mCin=" << mCin
+                  << " mHalfC=" << mHalfC
+                  << " mCout=" << mCout
                   << std::endl;
         return 1;
     }
@@ -158,80 +227,12 @@ int YoloC2fM2Plugin::enqueue(
     const float* x = static_cast<const float*>(inputs[0]);
     float* out     = static_cast<float*>(outputs[0]);
 
-    const size_t HW        = static_cast<size_t>(H) * W;
-    const size_t cv1Total  = static_cast<size_t>(N) * mCout  * HW;
-    const size_t halfTotal = static_cast<size_t>(N) * mHalfC * HW;
-
-    char* ws = static_cast<char*>(workspace);
-
-    float* cv1_out = reinterpret_cast<float*>(ws);
-    ws += cv1Total * sizeof(float);
-
-    float* m0cv1_out = reinterpret_cast<float*>(ws);
-    ws += halfTotal * sizeof(float);
-
-    float* concat = reinterpret_cast<float*>(ws);
-    ws += 3 * halfTotal * sizeof(float);
-
-    void* conv_ws = ws;
-
-    float* x1    = concat;
-    float* x2    = concat + halfTotal;
-    float* m0out = concat + 2 * halfTotal;
-
-    std::cerr << "[enqueue] workspace"
-              << " cv1Total=" << cv1Total
-              << " halfTotal=" << halfTotal
-              << " bytes(cv1_out)=" << cv1Total * sizeof(float)
-              << " bytes(m0cv1_out)=" << halfTotal * sizeof(float)
-              << " bytes(concat)=" << 3 * halfTotal * sizeof(float)
-              << std::endl;
-
-    std::cerr << "[enqueue] stage=cv1" << std::endl;
-    if (!runConv(mCv1Desc, x, cv1_out, d_cv1_w, d_cv1_b, conv_ws, stream)) {
-        std::cerr << "[enqueue] runConv cv1 FAILED" << std::endl;
-        return 1;
-    }
-    launchSiLU(cv1_out, cv1Total, stream);
-    CUDA_CHECK_LAST("launchSiLU cv1");
-
-    std::cerr << "[enqueue] stage=split" << std::endl;
-    launchSlice(cv1_out, x1, N, mCout, mHalfC, H, W, 0, stream);
-    CUDA_CHECK_LAST("launchSlice x1");
-
-    launchSlice(cv1_out, x2, N, mCout, mHalfC, H, W, mHalfC, stream);
-    CUDA_CHECK_LAST("launchSlice x2");
-
-    std::cerr << "[enqueue] stage=m0.cv1" << std::endl;
-    if (!runConv(mM0Cv1Desc, x2, m0cv1_out, d_m0_cv1_w, d_m0_cv1_b, conv_ws, stream)) {
-        std::cerr << "[enqueue] runConv m0.cv1 FAILED" << std::endl;
-        return 1;
-    }
-    launchSiLU(m0cv1_out, halfTotal, stream);
-    CUDA_CHECK_LAST("launchSiLU m0cv1");
-
-    std::cerr << "[enqueue] stage=m0.cv2" << std::endl;
-    if (!runConv(mM0Cv2Desc, m0cv1_out, m0out, d_m0_cv2_w, d_m0_cv2_b, conv_ws, stream)) {
-        std::cerr << "[enqueue] runConv m0.cv2 FAILED" << std::endl;
-        return 1;
-    }
-    launchSiLU(m0out, halfTotal, stream);
-    CUDA_CHECK_LAST("launchSiLU m0cv2");
-
-    if (mShortcut) {
-        std::cerr << "[enqueue] stage=shortcut" << std::endl;
-        launchAddInplace(m0out, x2, halfTotal, stream);
-        CUDA_CHECK_LAST("launchAddInplace");
-    }
-
-    std::cerr << "[enqueue] stage=cv2" << std::endl;
-    if (!runConv(mCv2Desc, concat, out, d_cv2_w, d_cv2_b, conv_ws, stream)) {
-        std::cerr << "[enqueue] runConv cv2 FAILED" << std::endl;
-        return 1;
-    }
-    launchSiLU(out, cv1Total, stream);
-    CUDA_CHECK_LAST("launchSiLU cv2");
-
-    std::cerr << "[enqueue] OK" << std::endl;
-    return 0;
+    return launchFusedC2FModel2(
+        x, out,
+        d_cv1_w, d_cv1_b,
+        d_m0_cv1_w, d_m0_cv1_b,
+        d_m0_cv2_w, d_m0_cv2_b,
+        d_cv2_w, d_cv2_b,
+        H, W, stream
+    );
 }

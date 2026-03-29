@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
+import nvtx
 
 from src.optimizer.evaluation.yolo_metrics import (
     Backend,
@@ -65,7 +66,6 @@ def benchmark_backend_latency(
 
     latencies_ms = []
     t0 = time.perf_counter()
-
     for _ in range(runs):
         t_start = time.perf_counter()
         y = backend.infer_batch(x)
@@ -73,7 +73,6 @@ def benchmark_backend_latency(
         t_end = time.perf_counter()
         latencies_ms.append((t_end - t_start) * 1000.0)
         del y
-
     t1 = time.perf_counter()
 
     del x

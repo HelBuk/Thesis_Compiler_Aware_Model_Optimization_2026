@@ -699,63 +699,12 @@ void YoloC2fM2Plugin::configurePlugin(
 //   [conv_ws   : max workspace across all 4 convolutions]
 // ---------------------------------------------------------------------------
 size_t YoloC2fM2Plugin::getWorkspaceSize(
-    PluginTensorDesc const* inputs, int nbInputs,
-    PluginTensorDesc const*, int) const noexcept
+    PluginTensorDesc const*,
+    int,
+    PluginTensorDesc const*,
+    int) const noexcept
 {
-    if (nbInputs != 1) {
-        std::cout << "[getWorkspaceSize] invalid nbInputs=" << nbInputs << std::endl;
-        return 0;
-    }
-
-    std::cout << "[getWorkspaceSize] input nbDims=" << inputs[0].dims.nbDims << " dims=(";
-    for (int i = 0; i < inputs[0].dims.nbDims; ++i) {
-        std::cout << inputs[0].dims.d[i];
-        if (i + 1 < inputs[0].dims.nbDims) std::cout << ", ";
-    }
-    std::cout << ")"
-              << " mCin=" << mCin
-              << " mCout=" << mCout
-              << " mHalfC=" << mHalfC
-              << " mH=" << mH
-              << " mW=" << mW
-              << std::endl;
-
-    int N = 1, H = 0, W = 0;
-
-    if (inputs[0].dims.nbDims == 3) {
-        H = inputs[0].dims.d[1];
-        W = inputs[0].dims.d[2];
-    } else if (inputs[0].dims.nbDims == 4) {
-        N = inputs[0].dims.d[0];
-        H = inputs[0].dims.d[2];
-        W = inputs[0].dims.d[3];
-    } else {
-        return 0;
-    }
-
-    if (N <= 0 || H <= 0 || W <= 0 || mCout <= 0) return 0;
-
-    size_t HW       = static_cast<size_t>(H) * W;
-    size_t cv1Sz    = static_cast<size_t>(N) * mCout    * HW * sizeof(float);
-    size_t halfSz   = static_cast<size_t>(N) * mHalfC   * HW * sizeof(float);
-    size_t concatSz = static_cast<size_t>(N) * 3 * mHalfC * HW * sizeof(float);
-
-    size_t convWs = 0;
-    convWs = std::max(convWs, mCv1Desc.workspaceBytes);
-    convWs = std::max(convWs, mM0Cv1Desc.workspaceBytes);
-    convWs = std::max(convWs, mM0Cv2Desc.workspaceBytes);
-    convWs = std::max(convWs, mCv2Desc.workspaceBytes);
-
-    if (convWs == 0) convWs = 64ULL << 20;
-
-    size_t total = cv1Sz + halfSz + concatSz + convWs;
-
-    std::cout << "[getWorkspaceSize] total=" << total
-              << " N=" << N << " H=" << H << " W=" << W
-              << " convWs=" << convWs
-              << std::endl;
-
-    return total;
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
