@@ -77,26 +77,26 @@ static int launchFusedC2FModel2(
     const int m1_w = TILE_W + 2 * M0CV1_HALO; // 10
 
     size_t smem_bytes =
-        sizeof(float) * (
-            CIN   * in_h * in_w +
-            COUT  * in_h * in_w +
-            HALFC * m1_h * m1_w
-        );
+    sizeof(float) * (
+        CIN   * in_h * in_w +   // 32 × 12 × 12 = 18,432 B  input_s
+        HALFC * in_h * in_w +   //  16 × 12 × 12 =  9,216 B  x2_s
+        HALFC * m1_h * m1_w     //  16 × 10 × 10 =  6,400 B  m0cv1_s
+    );                          //               = 34,048 B total
 
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
+    // cudaDeviceProp prop;
+    // cudaGetDeviceProperties(&prop, 0);
 
-    std::cerr << "[FUSED LAUNCH]"
-            << " grid=(" << grid.x << "," << grid.y << ")"
-            << " block=(" << block.x << "," << block.y << ")"
-            << " smem=" << smem_bytes
-            << std::endl;
+    // std::cerr << "[FUSED LAUNCH]"
+    //         << " grid=(" << grid.x << "," << grid.y << ")"
+    //         << " block=(" << block.x << "," << block.y << ")"
+    //         << " smem=" << smem_bytes
+    //         << std::endl;
 
-    if (smem_bytes > prop.sharedMemPerBlock) {
-        std::cerr << "[ERROR] Shared memory too large: "
-                << smem_bytes << " > " << prop.sharedMemPerBlock << std::endl;
-        return 1;
-    }
+    // if (smem_bytes > prop.sharedMemPerBlock) {
+    //     std::cerr << "[ERROR] Shared memory too large: "
+    //             << smem_bytes << " > " << prop.sharedMemPerBlock << std::endl;
+    //     return 1;
+    // }
 
     fused_c2f_model2_kernel<<<grid, block, smem_bytes, stream>>>(
         x, y,
