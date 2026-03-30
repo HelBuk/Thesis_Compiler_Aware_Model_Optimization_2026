@@ -145,33 +145,35 @@ static void launchAddInplace(float* x, const float* y, size_t n, cudaStream_t st
 }
 
 // ===========================================================================
-// enqueue — C2f(m=1) forward pass
+// enqueue — C2f(m=1) forward pass  (cuDNN TF32 path)
 //
 // Architecture for YOLOv8n model.2 (Cin=32, Cout=32, halfC=16, H=W=160):
 //
-//   input [N, Cin, H, W]
-//     └─► cv1 (1×1, Cin→Cout) + SiLU  → cv1_out [N, Cout, H, W]
-//              ├── x1 = cv1_out[:,  :halfC, :, :]  (slice 0)
-//              └── x2 = cv1_out[:, halfC:, :, :]  (slice 1)
-//                         └─► m0.cv1 (3×3) + SiLU → m0cv1_out [N,halfC,H,W]
-//                               └─► m0.cv2 (3×3) + SiLU → m0out
-//                                     └─► m0out += x2  (shortcut residual)
-//   concat [x1 | x2 | m0out] → [N, 3*halfC, H, W]
-//     └─► cv2 (1×1, 3*halfC→Cout) + SiLU → output [N, Cout, H, W]
+//   input  [N, Cin, H, W]  layout = mInputFormat (kCHW32 preferred / kLINEAR fallback)
+//     └─► cv1 (1×1, Cin→Cout) [cuDNN TF32] + SiLU → cv1_out  NCHW workspace
+//              ├── x1 = cv1_out[:,  :halfC]  → concat seg 0
+//              └── x2 = cv1_out[:, halfC:]   → concat seg 1  (shortcut source)
+//                   └─► m0.cv1 (3×3) [cuDNN TF32] + SiLU
+//                         └─► m0.cv2 (3×3) [cuDNN TF32] + SiLU → concat seg 2
+//                               └─► += x2  (shortcut residual)
+//   concat [x1 | x2 | m0out] → [N, 3*halfC, H, W]  NCHW workspace
+//     └─► cv2 (1×1, 3*halfC→Cout) [cuDNN TF32] + SiLU
+//               → output [N, Cout, H, W]  layout = mInputFormat
 //
-// Workspace layout (no aliasing):
-//   [0]  cv1_out    [N * Cout    * H * W]  — cv1 output
-//   [1]  m0cv1_out  [N * halfC   * H * W]  — bottleneck cv1 output
-//   [2]  concat     [N * 3*halfC * H * W]  — cv2 input; filled in 3 parts:
-//          concat[0..halfC]:       x1 (sliced from cv1_out)
-//          concat[halfC..2*halfC]: x2 (sliced from cv1_out; also shortcut)
-//          concat[2*halfC..:    ]: m0out (m0.cv2 output + x2 residual)
-//   [3]  conv_ws    [max workspace of all 4 convolutions]
+// Why cuDNN instead of the scalar fused kernel:
+//   • cuDNN selects TF32 TensorCore kernels on sm87 (~4× FP32 throughput)
+//   • fused_c2f_model2_kernel profiled at 5.59 ms; cuDNN path ~370 µs
+//   • Accepting kCHW32 in supportsFormatCombination eliminates the
+//     NHWC↔NCHW reformat copy node (~50 µs) inserted by TRT
 //
-// Key correctness fix vs. original code:
-//   — x1 and x2 live in SEPARATE regions of concat[], never aliased with
-//     m0cv1_out.  The original code set x1_buf=m0_out which caused m0.cv1
-//     to silently overwrite x1 before the concat step.
+// Workspace layout (intermediate tensors NCHW, no format conversion needed):
+//   [0] cv1_out   : N * Cout    * H * W  floats
+//   [1] m0cv1_out : N * halfC   * H * W  floats
+//   [2] concat    : N * 3*halfC * H * W  floats
+//         seg 0 [0..halfC):     x1
+//         seg 1 [halfC..2h):    x2 / shortcut
+//         seg 2 [2h..3h):       m0out
+//   [3] conv_ws   : max cuDNN workspace across 4 convolutions
 // ===========================================================================
 int YoloC2fM2Plugin::enqueue(
     PluginTensorDesc const* inputDesc,
@@ -181,58 +183,103 @@ int YoloC2fM2Plugin::enqueue(
     void* workspace,
     cudaStream_t stream) noexcept
 {
-    if (!d_cv1_w || !d_cv1_b || !d_m0_cv1_w || !d_m0_cv1_b ||
-        !d_m0_cv2_w || !d_m0_cv2_b || !d_cv2_w || !d_cv2_b) {
+    // Ensure weights and cuDNN descriptors are ready.
+    if (!mDescsCached || !d_cv1_w) {
         if (initialize() != 0) {
             std::cerr << "[enqueue] initialize failed" << std::endl;
             return 1;
         }
     }
 
-    int N = 1;
-    int Cin = 0;
-    int H = 0;
-    int W = 0;
+    if (!workspace) {
+        std::cerr << "[enqueue] workspace is null — getWorkspaceSize() must return >0" << std::endl;
+        return 1;
+    }
 
+    // TRT always reports logical NCHW shape regardless of memory layout.
+    int N = 1, H = 0, W = 0;
     if (inputDesc[0].dims.nbDims == 3) {
-        Cin = inputDesc[0].dims.d[0];
-        H   = inputDesc[0].dims.d[1];
-        W   = inputDesc[0].dims.d[2];
-        N   = 1;
+        H = inputDesc[0].dims.d[1];
+        W = inputDesc[0].dims.d[2];
     } else if (inputDesc[0].dims.nbDims == 4) {
-        N   = inputDesc[0].dims.d[0];
-        Cin = inputDesc[0].dims.d[1];
-        H   = inputDesc[0].dims.d[2];
-        W   = inputDesc[0].dims.d[3];
+        N = inputDesc[0].dims.d[0];
+        H = inputDesc[0].dims.d[2];
+        W = inputDesc[0].dims.d[3];
     } else {
         std::cerr << "[enqueue] unsupported nbDims=" << inputDesc[0].dims.nbDims << std::endl;
         return 1;
     }
 
     if (N != 1) {
-        std::cerr << "[enqueue] fused kernel currently supports N=1 only" << std::endl;
+        std::cerr << "[enqueue] batch size N>1 not supported" << std::endl;
         return 1;
     }
 
-    if (Cin != 32 || mCin != 32 || mHalfC != 16 || mCout != 32) {
-        std::cerr << "[enqueue] fused kernel expects Cin=32, halfC=16, Cout=32"
-                  << " but got Cin=" << Cin
-                  << " mCin=" << mCin
-                  << " mHalfC=" << mHalfC
-                  << " mCout=" << mCout
-                  << std::endl;
+    const float* x  = static_cast<const float*>(inputs[0]);
+    float*       out = static_cast<float*>(outputs[0]);
+
+    // -----------------------------------------------------------------------
+    // Workspace pointer arithmetic — must match getWorkspaceSize() layout.
+    // -----------------------------------------------------------------------
+    size_t HW      = static_cast<size_t>(H) * W;   // N=1
+    float* cv1_out   = static_cast<float*>(workspace);
+    float* m0cv1_out = cv1_out   + static_cast<size_t>(mCout)       * HW;
+    float* concat    = m0cv1_out + static_cast<size_t>(mHalfC)      * HW;
+    float* x1_buf    = concat;
+    float* x2_buf    = concat    + static_cast<size_t>(mHalfC)      * HW;
+    float* m0_buf    = concat    + static_cast<size_t>(2 * mHalfC)  * HW;
+    float* conv_ws   = concat    + static_cast<size_t>(3 * mHalfC)  * HW;
+
+    // -----------------------------------------------------------------------
+    // Step 1: cv1  (1×1)  —  input [ioFmt] → cv1_out [NCHW]
+    // -----------------------------------------------------------------------
+    if (!runConv(mCv1Desc, x, cv1_out, d_cv1_w, d_cv1_b, conv_ws, stream)) {
+        std::cerr << "[enqueue] cv1 failed" << std::endl;
         return 1;
     }
+    launchSiLU(cv1_out, static_cast<size_t>(mCout) * HW, stream);
 
-    const float* x = static_cast<const float*>(inputs[0]);
-    float* out     = static_cast<float*>(outputs[0]);
+    // -----------------------------------------------------------------------
+    // Step 2: Slice cv1_out into x1_buf (channels 0..halfC-1)
+    //                         and x2_buf (channels halfC..Cout-1).
+    //         Both land directly inside concat[] — no extra allocation.
+    // -----------------------------------------------------------------------
+    launchSlice(cv1_out, x1_buf, N, mCout, mHalfC, H, W, 0,      stream);
+    launchSlice(cv1_out, x2_buf, N, mCout, mHalfC, H, W, mHalfC, stream);
 
-    return launchFusedC2FModel2(
-        x, out,
-        d_cv1_w, d_cv1_b,
-        d_m0_cv1_w, d_m0_cv1_b,
-        d_m0_cv2_w, d_m0_cv2_b,
-        d_cv2_w, d_cv2_b,
-        H, W, stream
-    );
+    // -----------------------------------------------------------------------
+    // Step 3: m0.cv1  (3×3)  —  x2_buf [NCHW] → m0cv1_out [NCHW]
+    // -----------------------------------------------------------------------
+    if (!runConv(mM0Cv1Desc, x2_buf, m0cv1_out, d_m0_cv1_w, d_m0_cv1_b, conv_ws, stream)) {
+        std::cerr << "[enqueue] m0.cv1 failed" << std::endl;
+        return 1;
+    }
+    launchSiLU(m0cv1_out, static_cast<size_t>(mHalfC) * HW, stream);
+
+    // -----------------------------------------------------------------------
+    // Step 4: m0.cv2  (3×3)  —  m0cv1_out [NCHW] → m0_buf [NCHW]
+    // -----------------------------------------------------------------------
+    if (!runConv(mM0Cv2Desc, m0cv1_out, m0_buf, d_m0_cv2_w, d_m0_cv2_b, conv_ws, stream)) {
+        std::cerr << "[enqueue] m0.cv2 failed" << std::endl;
+        return 1;
+    }
+    launchSiLU(m0_buf, static_cast<size_t>(mHalfC) * HW, stream);
+
+    // -----------------------------------------------------------------------
+    // Step 5: Shortcut residual  m0_buf += x2_buf
+    // -----------------------------------------------------------------------
+    if (mShortcut) {
+        launchAddInplace(m0_buf, x2_buf, static_cast<size_t>(mHalfC) * HW, stream);
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 6: cv2  (1×1)  —  concat [NCHW, 3*halfC ch] → output [ioFmt]
+    // -----------------------------------------------------------------------
+    if (!runConv(mCv2Desc, concat, out, d_cv2_w, d_cv2_b, conv_ws, stream)) {
+        std::cerr << "[enqueue] cv2 failed" << std::endl;
+        return 1;
+    }
+    launchSiLU(out, static_cast<size_t>(mCout) * HW, stream);
+
+    return 0;
 }

@@ -120,7 +120,9 @@ private:
     bool buildOneDescSet(
         ConvDescSet& d,
         int N, int Cin, int Cout, int H, int W,
-        int kH, int kW, int padH, int padW) noexcept;
+        int kH, int kW, int padH, int padW,
+        cudnnTensorFormat_t xFmt = CUDNN_TENSOR_NCHW,
+        cudnnTensorFormat_t yFmt = CUDNN_TENSOR_NCHW) noexcept;
 
     bool runConv(
         ConvDescSet const& d,
@@ -160,6 +162,12 @@ private:
     ConvDescSet mM0Cv2Desc;   // m0.cv2: halfC→ halfC,  3×3
     ConvDescSet mCv2Desc;     // cv2   : 3*halfC→Cout,  1×1
     bool        mDescsCached{false};
+
+    // Format negotiated with TRT in supportsFormatCombination / configurePlugin.
+    // kCHW32 (= 5) is TRT's Ampere FP32 NHWC-vectorised format (C padded to 32).
+    // For our tensors (C = 32) kCHW32 is byte-equivalent to plain NHWC.
+    // Accepting kCHW32 avoids the 50–900 µs NCHW↔NHWC reformat copy node.
+    nvinfer1::TensorFormat mInputFormat{nvinfer1::TensorFormat::kLINEAR};
 
     // ---------------------------------------------------------------
     // Device weight pointers

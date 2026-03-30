@@ -137,7 +137,8 @@ YoloC2fM2Plugin::YoloC2fM2Plugin(void const* data, size_t) {
     mN      = readFromBuffer<int32_t>(d);
     mH      = readFromBuffer<int32_t>(d);
     mW      = readFromBuffer<int32_t>(d);
-    mShortcut = readFromBuffer<int32_t>(d) != 0;
+    mShortcut    = readFromBuffer<int32_t>(d) != 0;
+    mInputFormat = static_cast<TensorFormat>(readFromBuffer<int32_t>(d));
 }
 
 YoloC2fM2Plugin::~YoloC2fM2Plugin() { terminate(); }
@@ -248,7 +249,8 @@ bool YoloC2fM2Plugin::loadWeightsToDevice() {
 bool YoloC2fM2Plugin::buildOneDescSet(
     ConvDescSet& d,
     int N, int Cin, int Cout, int H, int W,
-    int kH, int kW, int padH, int padW) noexcept
+    int kH, int kW, int padH, int padW,
+    cudnnTensorFormat_t xFmt, cudnnTensorFormat_t yFmt) noexcept
 {
     std::cout << "[buildOneDescSet] enter"
               << " N=" << N
@@ -282,16 +284,18 @@ bool YoloC2fM2Plugin::buildOneDescSet(
     }
 
     if (cudnnSetTensor4dDescriptor(
-            d.xDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, Cin, H, W) != CUDNN_STATUS_SUCCESS) {
+            d.xDesc, xFmt, CUDNN_DATA_FLOAT, N, Cin, H, W) != CUDNN_STATUS_SUCCESS) {
         std::cout << "[buildOneDescSet] cudnnSetTensor4dDescriptor x FAILED"
-                  << " N=" << N << " Cin=" << Cin << " H=" << H << " W=" << W << std::endl;
+                  << " N=" << N << " Cin=" << Cin << " H=" << H << " W=" << W
+                  << " xFmt=" << xFmt << std::endl;
         return false;
     }
 
     if (cudnnSetTensor4dDescriptor(
-            d.yDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, Cout, H, W) != CUDNN_STATUS_SUCCESS) {
+            d.yDesc, yFmt, CUDNN_DATA_FLOAT, N, Cout, H, W) != CUDNN_STATUS_SUCCESS) {
         std::cout << "[buildOneDescSet] cudnnSetTensor4dDescriptor y FAILED"
-                  << " N=" << N << " Cout=" << Cout << " H=" << H << " W=" << W << std::endl;
+                  << " N=" << N << " Cout=" << Cout << " H=" << H << " W=" << W
+                  << " yFmt=" << yFmt << std::endl;
         return false;
     }
 
@@ -378,11 +382,23 @@ bool YoloC2fM2Plugin::buildDescSets() noexcept {
 
     destroyDescSets();
 
+    // kCHW32 (= 5) is TRT's Ampere FP32 NHWC-vectorised layout.
+    // For our tensors (C = 32 exactly) it is byte-equivalent to NHWC.
+    // Using CUDNN_TENSOR_NHWC for the plugin I/O descriptors lets cuDNN consume
+    // and produce the tensor directly without any format-conversion copy node.
+    // All intermediate (workspace) tensors stay NCHW — slice / add kernels only
+    // work with NCHW, and workspace buffers have no TRT format constraints.
+    cudnnTensorFormat_t ioFmt =
+        (mInputFormat == TensorFormat::kCHW32) ? CUDNN_TENSOR_NHWC : CUDNN_TENSOR_NCHW;
+
     bool ok = true;
-    ok &= buildOneDescSet(mCv1Desc,    mN, mCin,      mCout, mH, mW, 1, 1, 0, 0);
-    ok &= buildOneDescSet(mM0Cv1Desc,  mN, mHalfC,    mHalfC, mH, mW, 3, 3, 1, 1);
-    ok &= buildOneDescSet(mM0Cv2Desc,  mN, mHalfC,    mHalfC, mH, mW, 3, 3, 1, 1);
-    ok &= buildOneDescSet(mCv2Desc,    mN, 3*mHalfC,  mCout,  mH, mW, 1, 1, 0, 0);
+    // cv1: reads plugin input (ioFmt), writes workspace (NCHW)
+    ok &= buildOneDescSet(mCv1Desc,   mN, mCin,     mCout,  mH, mW, 1, 1, 0, 0, ioFmt,             CUDNN_TENSOR_NCHW);
+    // m0.cv1 / m0.cv2: workspace → workspace, always NCHW
+    ok &= buildOneDescSet(mM0Cv1Desc, mN, mHalfC,   mHalfC, mH, mW, 3, 3, 1, 1, CUDNN_TENSOR_NCHW, CUDNN_TENSOR_NCHW);
+    ok &= buildOneDescSet(mM0Cv2Desc, mN, mHalfC,   mHalfC, mH, mW, 3, 3, 1, 1, CUDNN_TENSOR_NCHW, CUDNN_TENSOR_NCHW);
+    // cv2: reads workspace (NCHW), writes plugin output (ioFmt)
+    ok &= buildOneDescSet(mCv2Desc,   mN, 3*mHalfC, mCout,  mH, mW, 1, 1, 0, 0, CUDNN_TENSOR_NCHW, ioFmt);
 
     mDescsCached = ok;
     std::cout << "[buildDescSets] result=" << ok << std::endl;
@@ -516,7 +532,7 @@ void YoloC2fM2Plugin::terminate() noexcept {
 size_t YoloC2fM2Plugin::getSerializationSize() const noexcept {
     return sizeof(int32_t) + mWeightsPath.size()
          + sizeof(int32_t) + mNamespace.size()
-         + sizeof(int32_t) * 7;   // Cin, Cout, halfC, N, H, W, shortcut
+         + sizeof(int32_t) * 8;   // Cin, Cout, halfC, N, H, W, shortcut, inputFormat
 }
 
 void YoloC2fM2Plugin::serialize(void* buffer) const noexcept {
@@ -537,6 +553,7 @@ void YoloC2fM2Plugin::serialize(void* buffer) const noexcept {
     writeToBuffer(d, static_cast<int32_t>(mH));
     writeToBuffer(d, static_cast<int32_t>(mW));
     writeToBuffer(d, static_cast<int32_t>(mShortcut ? 1 : 0));
+    writeToBuffer(d, static_cast<int32_t>(mInputFormat));
 
     std::cout << "[serialize] mCin=" << mCin
           << " mCout=" << mCout
@@ -576,7 +593,8 @@ IPluginV2DynamicExt* YoloC2fM2Plugin::clone() const noexcept {
     p->mN        = mN;
     p->mH        = mH;
     p->mW        = mW;
-    p->mShortcut = mShortcut;
+    p->mShortcut     = mShortcut;
+    p->mInputFormat  = mInputFormat;
     p->setPluginNamespace(mNamespace.c_str());
     return p;
 }
@@ -606,8 +624,16 @@ bool YoloC2fM2Plugin::supportsFormatCombination(
     int pos, PluginTensorDesc const* inOut, int, int) noexcept
 {
     auto const& desc = inOut[pos];
-    return desc.format == TensorFormat::kLINEAR
-        && desc.type   == DataType::kFLOAT;
+    // Only FP32
+    if (desc.type != DataType::kFLOAT) return false;
+    // Accept kCHW32 (Ampere NHWC-vectorised, eliminates the reformat copy node)
+    // and kLINEAR (NCHW, safe fallback on non-Ampere / older cuDNN).
+    if (desc.format != TensorFormat::kCHW32 && desc.format != TensorFormat::kLINEAR)
+        return false;
+    // Require all I/O tensors to share the same format so TRT doesn't insert
+    // an additional inter-tensor reformat between input and output.
+    if (pos > 0) return desc.format == inOut[0].format;
+    return true;
 }
 
 void YoloC2fM2Plugin::configurePlugin(
@@ -686,17 +712,41 @@ void YoloC2fM2Plugin::configurePlugin(
               << " mH=" << mH
               << " mW=" << mW
               << std::endl;
+
+    // Store the format TRT negotiated (kCHW32 or kLINEAR).
+    // This must be done before buildDescSets so the right cuDNN tensor format
+    // (NHWC vs NCHW) is used for the I/O descriptors.
+    mInputFormat = in[0].desc.format;
+    mDescsCached = false;   // force rebuild with the correct format
+
+    std::cout << "[configurePlugin] mInputFormat=" << static_cast<int>(mInputFormat)
+              << " (5=kCHW32/NHWC, 0=kLINEAR/NCHW)" << std::endl;
+
+    // Create cuDNN handle here (if not already present) so that buildDescSets()
+    // can compute accurate cuDNN workspace sizes before getWorkspaceSize() is
+    // called by TRT during engine build.
+    if (!mCudnn) {
+        cudnnStatus_t cs = cudnnCreate(&mCudnn);
+        if (cs != CUDNN_STATUS_SUCCESS) {
+            std::cerr << "[configurePlugin] cudnnCreate FAILED: "
+                      << cudnnGetErrorString(cs) << std::endl;
+            return;
+        }
+        mCudnnOwned = true;
+    }
+    buildDescSets();
 }
 
 // ---------------------------------------------------------------------------
-// Workspace layout:
-//   [cv1_out   : N * Cout     * H * W * sizeof(float)]
-//   [m0cv1_out : N * halfC    * H * W * sizeof(float)]
-//   [concat    : N * 3*halfC  * H * W * sizeof(float)]
-//     concat[0   ..halfC  ]: x1 (first split of cv1_out)
-//     concat[halfC..2*halfC]: x2 (second split, also shortcut source)
-//     concat[2*halfC..3*halfC]: m0.cv2 output + shortcut
-//   [conv_ws   : max workspace across all 4 convolutions]
+// Workspace layout (enqueue cuDNN path — all intermediate buffers NCHW):
+//   [0] cv1_out    : N * Cout     * H * W  floats  (cv1 output, pre-slice)
+//   [1] m0cv1_out  : N * halfC    * H * W  floats  (m0.cv1 output)
+//   [2] concat     : N * 3*halfC  * H * W  floats  (cv2 input, 3 segments)
+//         seg0 [     0 ..  halfC) : x1  — sliced from cv1_out[:,  0:halfC]
+//         seg1 [  halfC.. 2*halfC): x2  — sliced from cv1_out[:,halfC:Cout]
+//                                        also the shortcut source for m0
+//         seg2 [2*halfC.. 3*halfC): m0out — m0.cv2 output + x2 residual
+//   [3] conv_ws    : max cuDNN workspace across the 4 convolutions
 // ---------------------------------------------------------------------------
 size_t YoloC2fM2Plugin::getWorkspaceSize(
     PluginTensorDesc const*,
@@ -704,7 +754,25 @@ size_t YoloC2fM2Plugin::getWorkspaceSize(
     PluginTensorDesc const*,
     int) const noexcept
 {
-    return 0;
+    if (mH <= 0 || mW <= 0 || mCout <= 0 || mHalfC <= 0) return 0;
+
+    size_t HW       = static_cast<size_t>(mN) * mH * mW;
+    // cv1_out + m0cv1_out + concat  = (Cout + halfC + 3*halfC) channels
+    size_t tensorWs = (static_cast<size_t>(mCout) + mHalfC + 3 * mHalfC)
+                      * HW * sizeof(float);
+
+    // cuDNN algorithm workspace — exact if descriptors already built,
+    // conservative 64 MB if called before initialize() (engine-build time).
+    size_t convWs = 0;
+    if (mDescsCached) {
+        convWs = std::max(
+            std::max(mCv1Desc.workspaceBytes,   mM0Cv1Desc.workspaceBytes),
+            std::max(mM0Cv2Desc.workspaceBytes, mCv2Desc.workspaceBytes));
+    } else {
+        convWs = 64ULL * 1024 * 1024;  // 64 MB upper bound for heuristic algo
+    }
+
+    return tensorWs + convWs;
 }
 
 // ---------------------------------------------------------------------------
