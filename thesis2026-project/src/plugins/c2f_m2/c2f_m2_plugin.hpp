@@ -8,6 +8,27 @@
 #include <vector>
 
 // ---------------------------------------------------------------------------
+// Winograd / fused activation runtime helpers (implemented in .cu files)
+// ---------------------------------------------------------------------------
+bool precomputeWinoFilterTransform(
+    float const* hFilter, int outC, int inC, float** dTransformed) noexcept;
+
+bool launchWinogradConv3x3SiLU(
+    float const* x,
+    float* y,
+    float const* winoFilter,
+    float const* bias,
+    int N, int C, int K, int H, int W,
+    cudaStream_t stream) noexcept;
+
+bool launchBiasSiLUInplace(
+    float* x,
+    float const* bias,
+    int N, int C, int H, int W,
+    bool isNHWC,
+    cudaStream_t stream) noexcept;
+
+// ---------------------------------------------------------------------------
 // Per-convolution cached cuDNN state.
 // Created once in initialize(), destroyed in terminate().
 // Re-using descriptors across enqueue() calls avoids ~20 descriptor
@@ -131,7 +152,14 @@ private:
         float const* w,
         float const* b,
         void*        workspace,
-        cudaStream_t stream) const noexcept;
+        cudaStream_t stream,
+        bool         addBias = true) const noexcept;
+
+    bool precomputeWinogradFilters() noexcept;
+    void destroyWinogradFilters() noexcept;
+    bool canUseWinograd(
+        int N, int C, int K, int H, int W,
+        int kH, int kW, int stride, int pad) const noexcept;
 
 private:
     std::string mNamespace;
@@ -180,6 +208,9 @@ private:
     float* d_m0_cv2_b{nullptr};
     float* d_cv2_w{nullptr};
     float* d_cv2_b{nullptr};
+    float* d_m0_cv1_wino{nullptr};  // [K, C, 16] Winograd filter transform
+    float* d_m0_cv2_wino{nullptr};  // [K, C, 16] Winograd filter transform
+    bool   mWinogradReady{false};
 
     // Host-side raw weights for serialisation round-trip
     std::vector<float> h_cv1_w,    h_cv1_b;

@@ -6,6 +6,7 @@ add_library(c2f_m2_plugin SHARED
     c2f_m2_plugin_runtime.cu
     c2f_m2_kernels.cu
     c2f_m2_fused.cu
+    c2f_m2_winograd.cu
 )
 
 target_include_directories(c2f_m2_plugin PRIVATE

@@ -150,11 +150,13 @@ void YoloC2fM2Plugin::destroyWeights() noexcept {
     freePtr(d_m0_cv1_w); freePtr(d_m0_cv1_b);
     freePtr(d_m0_cv2_w); freePtr(d_m0_cv2_b);
     freePtr(d_cv2_w);    freePtr(d_cv2_b);
+    mWinogradReady = false;
 }
 
 // ---------------------------------------------------------------------------
 bool YoloC2fM2Plugin::loadWeightsToDevice() {
     std::cout << "[loadWeightsToDevice] path=" << mWeightsPath << std::endl;
+    destroyWinogradFilters();
 
     if (mWeightsPath.empty()) {
         std::cout << "[loadWeightsToDevice] empty weights path" << std::endl;
@@ -237,7 +239,51 @@ bool YoloC2fM2Plugin::loadWeightsToDevice() {
     ok &= uploadToDevice(&d_cv2_b,    h_cv2_b);
 
     std::cout << "[loadWeightsToDevice] upload ok=" << ok << std::endl;
+    mWinogradReady = false;
     return ok;
+}
+
+void YoloC2fM2Plugin::destroyWinogradFilters() noexcept {
+    auto freePtr = [](float*& p) { if (p) { cudaFree(p); p = nullptr; } };
+    freePtr(d_m0_cv1_wino);
+    freePtr(d_m0_cv2_wino);
+    mWinogradReady = false;
+}
+
+bool YoloC2fM2Plugin::precomputeWinogradFilters() noexcept {
+    destroyWinogradFilters();
+
+    if (h_m0_cv1_w.empty() || h_m0_cv2_w.empty()) {
+        std::cerr << "[precomputeWinogradFilters] missing host weights" << std::endl;
+        return false;
+    }
+
+    bool ok = true;
+    ok &= precomputeWinoFilterTransform(
+        h_m0_cv1_w.data(), mHalfC, mHalfC, &d_m0_cv1_wino);
+    ok &= precomputeWinoFilterTransform(
+        h_m0_cv2_w.data(), mHalfC, mHalfC, &d_m0_cv2_wino);
+
+    if (!ok) {
+        std::cerr << "[precomputeWinogradFilters] transform failed; using cuDNN fallback" << std::endl;
+        destroyWinogradFilters();
+        return false;
+    }
+
+    mWinogradReady = true;
+    return true;
+}
+
+bool YoloC2fM2Plugin::canUseWinograd(
+    int N, int C, int K, int H, int W,
+    int kH, int kW, int stride, int pad) const noexcept
+{
+    if (!mWinogradReady) return false;
+    if (N != 1 || C != 16 || K != 16) return false;
+    if (H <= 0 || W <= 0) return false;
+    if (kH != 3 || kW != 3) return false;
+    if (stride != 1 || pad != 1) return false;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +464,8 @@ bool YoloC2fM2Plugin::runConv(
     ConvDescSet const& d,
     float const* x, float* y,
     float const* w, float const* b,
-    void* workspace, cudaStream_t stream) const noexcept
+    void* workspace, cudaStream_t stream,
+    bool addBias) const noexcept
 {
     if (!mCudnn || !d.xDesc) {
         std::cerr << "[runConv] invalid state"
@@ -454,16 +501,18 @@ bool YoloC2fM2Plugin::runConv(
         return false;
     }
 
-    st = cudnnAddTensor(
-        mCudnn, &alpha,
-        d.bDesc, b,
-        &alpha,
-        d.yDesc, y);
+    if (addBias) {
+        st = cudnnAddTensor(
+            mCudnn, &alpha,
+            d.bDesc, b,
+            &alpha,
+            d.yDesc, y);
 
-    if (st != CUDNN_STATUS_SUCCESS) {
-        std::cerr << "[runConv] cudnnAddTensor FAILED: "
-                  << cudnnGetErrorString(st) << std::endl;
-        return false;
+        if (st != CUDNN_STATUS_SUCCESS) {
+            std::cerr << "[runConv] cudnnAddTensor FAILED: "
+                      << cudnnGetErrorString(st) << std::endl;
+            return false;
+        }
     }
 
     return true;
@@ -513,12 +562,18 @@ int YoloC2fM2Plugin::initialize() noexcept {
         }
     }
 
+    // Optional fast path. If this fails, enqueue() will fall back to cuDNN.
+    if (!mWinogradReady) {
+        precomputeWinogradFilters();
+    }
+
     std::cerr << "[initialize] OK" << std::endl;
     return 0;
 }
 
 void YoloC2fM2Plugin::terminate() noexcept {
     destroyDescSets();
+    destroyWinogradFilters();
     destroyWeights();
 
     if (mCudnn && mCudnnOwned) {
