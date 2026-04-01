@@ -802,6 +802,61 @@ of reading/writing to/from memory or the computational speed overall.
         \label{fig:roofline}
     \end{figure}
 
+    \begin{itemize}
+        \item \textbf{Peak computational performance (in FLOP/s)} is obtained by benchmarking a compute-bound kernel that
+        saturates the floating-point execution units.
+        In practice, this can be achieved using large dense matrix multiplications
+        of size $m \times k$ and $k \times n$, for which the floating-point operation count is given by:
+
+            \begin{equation}
+                \mathrm{FLOPs} = 2 * m * k * n.
+            \end{equation}
+
+        The sustained peak performance is then computed as
+            \begin{equation}
+            P_{\mathrm{peak}} = \frac{\mathrm{FLOPs}}{t_{\mathrm{compute}}},
+            \end{equation}
+        where $t_{\mathrm{compute}}$ denotes the measured execution time.
+        \item \textbf{Peak memory bandwidth (in GB/s)} is determined using a streaming memory
+        benchmark. A large device-to-device copy or STREAM-like triad kernel is executed
+        over a sufficiently large buffer to avoid cache effects. The sustained memory
+        bandwidth is computed as
+        \begin{equation}
+        B_{\mathrm{peak}} = \frac{\mathrm{Bytes\ transferred}}{t_{\mathrm{memory}}}.
+        \end{equation}
+        \item \textbf{Arithmetic intensity (AI)} is defined as the ratio between the number of floating-point
+        operations and the volume of data transferred to and from main memory:
+        \begin{equation}
+        \mathrm{AI} = \frac{\mathrm{FLOPs}}{\mathrm{Bytes}}.
+        \end{equation}
+        Since exact DRAM traffic is generally unavailable without hardware performance counters, a lower-bound
+        estimate of memory traffic is commonly used. For convolutional or linear layers, this lower bound
+        consists of the input tensor, weight parameters, and output tensor:
+        \begin{equation}
+        \mathrm{Bytes}_{\mathrm{LB}} =
+        \mathrm{Bytes}_{\mathrm{input}} +
+        \mathrm{Bytes}_{\mathrm{weights}} +
+        \mathrm{Bytes}_{\mathrm{output}}.
+        \end{equation}
+        This estimate ignores cache reuse and intermediate buffering, thereby providing an upper bound on
+        arithmetic intensity.
+        \item \textbf{The achieved performance of a workload} is computed as
+        \begin{equation}
+        P_{\mathrm{achieved}} = \frac{\mathrm{FLOPs}}{t_{\mathrm{execution}}}.
+        \end{equation}
+        The Roofline bound is then defined as
+        \begin{equation}
+        P_{\mathrm{roof}}(\mathrm{AI}) =
+        \min \left( P_{\mathrm{peak}}, \; B_{\mathrm{peak}} \times \mathrm{AI} \right).
+        \end{equation}
+
+        If $P_{\mathrm{achieved}}$ approaches $B_{\mathrm{peak}} \times \mathrm{AI}$, the workload
+        is memory-bound, if it approaches $P_{\mathrm{peak}}$, the workload is compute-bound.
+        This methodology enables systematic classification of performance bottlenecks and guides
+        optimization strategies such as improving data locality, increasing arithmetic intensity, or enhancing
+        computational parallelism.
+    \end{itemize}
+
 \section{Activation Functions: ReLU and SiLU}
 
 Activation functions play a critical role in introducing non-linearity into neural networks, enabling them to learn
@@ -948,16 +1003,19 @@ via PCIe, enabling efficient neural network inference on the device.
 
 \section{Roofline Model}
 
-Calculating the statistics of a roofline model can be tricky. First, there is a question, how different are
-the documented by manufacturer statistics from the observed ones. Second, how a particular model would be run
-on this hardware, how effective is the use of cache already, would all intermediate vectors be stored
-in the memory or there are some hidden optimizations (fused layers).
+Constructing an accurate Roofline model for real-world workloads presents several challenges.
+First, the performance characteristics reported by hardware manufacturers often differ from
+measured values under practical conditions. Second, the effective behavior of a model depends
+on the execution framework, including factors such as cache utilization, memory reuse, and
+implicit optimizations (e.g., operator fusion), which are typically not visible at the model level.
 
-Official YOLOv8 parameters are shown on a Figure ~\cite{tab:yolov8_models}
+Official YOLOv8 model characteristics are summarized in Table~\ref{tab:yolov8_models}.
+The smallest variant, YOLOv8n, contains 3.2M parameters and requires 8.7B floating-point operations
+for a single forward pass at 640$\times$640 resolution.
 
 \begin{table}[ht]
 \centering
-\caption{Comparison of YOLO models (trained on COCO) at 640×640 resolution. \cite{ultralytics_yolov8_performance}}
+\caption{Comparison of YOLO models (trained on COCO) at 640$\times$640 resolution~\cite{ultralytics_yolov8_performance}.}
 \label{tab:yolov8_models}
 \begin{tabular}{lcccc}
 \toprule
@@ -973,167 +1031,111 @@ v8x & 479.1 & 3.53 & 68.2 & 257.8 \\
 \end{tabular}
 \end{table}
 
+While vendor specifications indicate that the Raspberry Pi 5 provides up to 17\,GB/s of memory bandwidth~\cite{raspberrypi_processors},
+and the Jetson Orin Nano offers up to 102\,GB/s~\cite{nvidia_jetson_orin_datasheet},
+measured performance is often significantly lower in practice.
+Using the methodology described in Chapter~\ref{chap:literature}, the sustained memory bandwidth of the Raspberry Pi 5
+was measured at 9.14\,GB/s, and peak compute throughput at 69.86\,GFLOP/s.
 
-Macbook Pro M3 has declared 150GB/s memory bandwidth ~\cite{apple_memspecs}. Raspberry Pi 5 has up to 17 GB/s of
-memory bandwidth ~\cite{raspberrypi_processors}, NVIDIA's latest software update enhances Jetson Orin Nano's
-AI performance from 40 to 67 AI TOPs and \textit{memory bandwidth from 68 to 102 GB/s}
-~\cite{nvidia_jetson_orin_datasheet}.
+These values define the device Roofline:
+\[
+P(I) = \min\left(69.86,\; 9.14 \cdot I\right),
+\]
+with a ridge point at approximately 7.6 FLOPs/byte, separating memory-bound and compute-bound regimes.
 
-Raspberry Pi 5 processor ~\cite{raspberrypi_processors} is a broadcom BCM2712 2.4GHz quad-core 64-bit Arm Cortex-A76
-CPU, with Cryptographic Extension, 512KB per-core L2 caches, and a 2MB shared
-L3 cache.
+Table~\ref{tab:roofline_pi5_layers} summarizes representative per-layer performance characteristics
+of YOLOv8n executed on the Raspberry Pi 5 CPU.
+
+Layers with low arithmetic intensity (AI $\approx$ 7--8 FLOPs/byte) achieve limited performance
+(3--6\,GFLOP/s), indicating memory-bound behavior. In contrast, deeper convolutional layers
+with high arithmetic intensity (AI $>$ 70 FLOPs/byte) achieve 40--60\,GFLOP/s, reaching
+70--85\% of the measured peak compute throughput and exhibiting compute-bound execution.
+
+The distribution focal loss (DFL) convolution in the detection head has extremely low arithmetic
+intensity (0.47 FLOPs/byte) and achieves only 0.4\,GFLOP/s, confirming strong memory limitation.
+
+\begin{table}[ht]
+\centering
+\caption{Per-layer performance statistics of YOLOv8n on Raspberry Pi 5 (CPU, FP32).}
+\label{tab:roofline_pi5_layers}
+\begin{tabularx}{\textwidth}{l c c c X}
+\toprule
+Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
+\midrule
+0.conv              & 23.79 & 7.71   & 3.7  & Memory-bound \\
+2.cv1.conv          & 8.88  & 7.99   & 5.9  & Memory-bound \\
+4.m.0.cv2.conv      & 2.82  & 70.42  & 41.8 & Compute-bound \\
+6.m.1.cv2.conv      & 2.06  & 122.03 & 57.3 & Compute-bound \\
+18.m.0.cv2.conv     & 1.95  & 122.03 & 60.5 & Compute-bound \\
+22.cv3.0.1.conv     & 13.86 & 170.41 & 53.2 & Compute-bound \\
+22.dfl.conv         & 2.42  & 0.47   & 0.4  & Strongly memory-bound \\
+\midrule
+Full Model          & 358.35 & 157.76 & 12.36 & Mixed / Overhead-dominated \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[!h]
+    \centering
+    \includegraphics[width=0.8\linewidth]{pics/yolov8n_roofline_cpu_raspberrypi5.png}
+    \caption{Roofline model of YOLOv8n on Raspberry Pi 5 (CPU, FP32).}
+    \label{fig:roofline_pi5}
+\end{figure}
+
+Although several convolutional layers approach the peak compute throughput,
+the overall model achieves only 12.36\,GFLOP/s, corresponding to approximately 17\% of peak performance.
+
+This discrepancy indicates that inference performance is not limited solely by memory bandwidth,
+but also by system-level and computational inefficiencies. These include kernel launch overhead,
+framework dispatch costs, synchronization, non-convolutional operations, and inter-layer memory traffic.
+Thus, the Roofline represents an upper theoretical bound rather than an achievable performance target.
+
+From an optimization perspective, these results suggest that further improvements should focus on
+enhancing computational efficiency through techniques such as operator fusion, graph-level optimization,
+kernel tuning, and quantization, rather than exclusively reducing memory traffic.
+
+The observed performance behavior can be further explained by the relationship between
+layer activation sizes and the cache hierarchy:
 
 \begin{itemize}
-    \item \textbf{Peak computational performance (in GFLOP/s)} is obtained by benchmarking a compute-bound kernel that
-    saturates the floating-point execution units.
-    In practice, this can be achieved using large dense matrix multiplications
-    of size $m \times k$ and $k \times n$, for which the floating-point operation count is given by:
-
-        \begin{equation}
-            \mathrm{FLOPs} = 2 * m * k * n.
-        \end{equation}
-
-    The sustained peak performance is then computed as
-        \begin{equation}
-        P_{\mathrm{peak}} = \frac{\mathrm{FLOPs}}{t_{\mathrm{compute}}},
-        \end{equation}
-    where $t_{\mathrm{compute}}$ denotes the measured execution time.
-    \item \textbf{Peak memory bandwidth (in GB/s)} is determined using a streaming memory
-    benchmark. A large device-to-device copy or STREAM-like triad kernel is executed
-    over a sufficiently large buffer to avoid cache effects. The sustained memory
-    bandwidth is computed as
-    \begin{equation}
-    B_{\mathrm{peak}} = \frac{\mathrm{Bytes\ transferred}}{t_{\mathrm{memory}}}.
-    \end{equation}
-    \item \textbf{Arithmetic intensity (AI)} is defined as the ratio between the number of floating-point
-    operations and the volume of data transferred to and from main memory:
-    \begin{equation}
-    \mathrm{AI} = \frac{\mathrm{FLOPs}}{\mathrm{Bytes}}.
-    \end{equation}
-    Since exact DRAM traffic is generally unavailable without hardware performance counters, a lower-bound
-    estimate of memory traffic is commonly used. For convolutional or linear layers, this lower bound
-    consists of the input tensor, weight parameters, and output tensor:
-    \begin{equation}
-    \mathrm{Bytes}_{\mathrm{LB}} =
-    \mathrm{Bytes}_{\mathrm{input}} +
-    \mathrm{Bytes}_{\mathrm{weights}} +
-    \mathrm{Bytes}_{\mathrm{output}}.
-    \end{equation}
-    This estimate ignores cache reuse and intermediate buffering, thereby providing an upper bound on
-    arithmetic intensity.
-    \item \textbf{The achieved performance of a workload} is computed as
-    \begin{equation}
-    P_{\mathrm{achieved}} = \frac{\mathrm{FLOPs}}{t_{\mathrm{execution}}}.
-    \end{equation}
-    The Roofline bound is then defined as
-    \begin{equation}
-    P_{\mathrm{roof}}(\mathrm{AI}) =
-    \min \left( P_{\mathrm{peak}}, \; B_{\mathrm{peak}} \times \mathrm{AI} \right).
-    \end{equation}
-
-    If $P_{\mathrm{achieved}}$ approaches $B_{\mathrm{peak}} \times \mathrm{AI}$, the workload
-    is memory-bound. Conversely, if it approaches $P_{\mathrm{peak}}$, the workload is compute-bound.
-    This methodology enables systematic classification of performance bottlenecks and guides
-    optimization strategies such as improving data locality, increasing arithmetic intensity, or enhancing
-    computational parallelism.
+    \item L1: 64 KB per core (instruction and data)
+    \item L2: 512 KB per core
+    \item L3: 2 MB shared
+    \item DRAM bandwidth: $\approx$ 9 GB/s (measured)
 \end{itemize}
 
-    Table~\ref{tab:roofline_pi5_layers} summarizes representative per-layer performance
-    characteristics of YOLOv8n executed on the Raspberry Pi 5 CPU. The measured sustained
-    memory bandwidth was 9.14\,GB/s and peak compute throughput was 69.86\,GFLOP/s. The roofline
-    knee occurs at approximately 8.1 FLOPs/byte, separating memory-bound from compute-bound regimes.
+In particular, the shared L3 cache of
+the Raspberry Pi 5 is limited to 2\,MB, which constrains the amount of data that can be
+reused without accessing main memory.
 
-    Layers with low arithmetic intensity (AI $\approx$ 7–8) achieve limited performance
-    (3–6\,GFLOP/s), indicating memory-bound behavior. In contrast, deeper convolutional layers
-    with high arithmetic intensity (AI $>$ 70 FLOPs/byte) achieve 40–60\,GFLOP/s, approaching
-    70–85\% of measured peak compute throughput, demonstrating compute-bound execution.
+Early layers of YOLOv8n operate on high-resolution feature maps (e.g., 320$\times$320),
+resulting in activation tensors that significantly exceed the available cache capacity.
+As a consequence, these layers frequently access DRAM, leading to low arithmetic intensity
+and memory-bound execution.
 
-    The detection head's distribution focal loss (DFL) convolution exhibits extremely low
-    arithmetic intensity (0.47 FLOPs/byte) and achieves only 0.4\,GFLOP/s, confirming strong
-    memory limitation.
-
-    Table \ref{tab:roofline_pi5_layers} shows per-layer and overall
-    performance statistics of YOLOv8n on raspberry Pi 5 (CPU, FP32). Although several convolutional layers
-    individually approach peak compute throughput, the full
-    model achieves only 12.36\,GFLOP/s due to additional non-convolutional operations,
-    synchronization overhead, framework dispatch costs, and inter-layer memory traffic. Overall,
-    YOLOv8n inference on Raspberry Pi 5 is predominantly compute-bound for high-intensity
-    convolutional blocks, while early feature extraction and lightweight layers remain memory-bound.
+In contrast, deeper layers operate on progressively smaller feature maps (e.g., 40$\times$40
+or 20$\times$20), allowing their activations to fit within the L3 cache. This improves data
+locality and reuse, enabling higher arithmetic intensity and more efficient utilization of
+compute resources, which is consistent with the observed transition to compute-bound behavior.
 
 
-    \begin{table}[ht]
-    \centering
-    \caption{Per-layer performance statistics of YOLOv8n on Raspberry Pi 5 (CPU, FP32).}
-    \label{tab:roofline_pi5_layers}
-
-    \begin{tabularx}{\textwidth}{l c c c X}
-    \toprule
-    Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
-    \midrule
-    0.conv              & 23.79 & 7.71   & 3.7  & Memory-bound \\
-    2.cv1.conv          & 8.88  & 7.99   & 5.9  & Memory-bound \\
-    4.m.0.cv2.conv      & 2.82  & 70.42  & 41.8 & Compute-bound \\
-    6.m.1.cv2.conv      & 2.06  & 122.03 & 57.3 & Compute-bound \\
-    18.m.0.cv2.conv     & 1.95  & 122.03 & 60.5 & Compute-bound \\
-    22.cv3.0.1.conv     & 13.86 & 170.41 & 53.2 & Compute-bound \\
-    22.dfl.conv         & 2.42  & 0.47   & 0.4  & Strongly memory-bound \\
-    \midrule
-    Full Model          & 358.35 & 157.76 & 12.36 & Mixed / Overhead-dominated \\
-    \bottomrule
-    \end{tabularx}
-
-    \end{table}
-
-    \begin{figure}[!h]
-        \centering
-        \includegraphics[width=0.8\linewidth]{pics/yolov8n_roofline_cpu_raspberrypi5.png}
-        \caption{Roofline model of YOLOv8n on Raspberry Pi 5 (CPU, FP32).}
-        \label{fig:roofline_pi5}
-    \end{figure}
-
-    \begin{figure}[!h]
-        \centering
-        \includegraphics[width=0.8\linewidth]{pics/yolov8n_roofline_cpu_macbook.png}
-        \caption{Roofline model of YOLOv8n on Macbook Pro M3 (CPU, FP32).}
-        \label{fig:roofline_mac_cpu}
-    \end{figure}
-
-    \begin{figure}[!h]
-        \centering
-        \includegraphics[width=0.8\linewidth]{pics/yolov8n_roofline_mps_macbook.png}
-        \caption{Roofline model of YOLOv8n on Macbook Pro M3 (MPS, FP32).}
-        \label{fig:roofline_mac_mps}
-    \end{figure}
+    %Macbook Pro M3 has declared 150GB/s memory bandwidth ~\cite{apple_memspecs}.
 
 
-    The roofline analysis shows that YOLOv8n on the Raspberry Pi 5 operates predominantly in the compute-bound
-    regime for high–arithmetic-intensity convolutional layers, while a few early and lightweight layers remain
-    memory-bound. Although several individual convolutional blocks approach the measured peak compute throughput
-    ($\approx$70 GFLOP/s), the full model achieves only 12.36 GFLOP/s, corresponding to roughly 17\% of peak performance.
+%    \begin{figure}[!h]
+%        \centering
+%        \includegraphics[width=0.8\linewidth]{pics/yolov8n_roofline_cpu_macbook.png}
+%        \caption{Roofline model of YOLOv8n on Macbook Pro M3 (CPU, FP32).}
+%        \label{fig:roofline_mac_cpu}
+%    \end{figure}
+%
+%    \begin{figure}[!h]
+%        \centering
+%        \includegraphics[width=0.8\linewidth]{pics/yolov8n_roofline_mps_macbook.png}
+%        \caption{Roofline model of YOLOv8n on Macbook Pro M3 (MPS, FP32).}
+%        \label{fig:roofline_mac_mps}
+%    \end{figure}
 
-    This gap indicates that overall inference performance is not limited by raw memory bandwidth but rather by
-    computational inefficiencies and system-level overhead, including kernel launch costs, framework dispatch,
-    synchronization, non-convolutional operations, and inter-layer memory traffic. The roofline therefore does
-    not represent an achievable target, but an upper theoretical bound.
-
-    From a research perspective, the results suggest that further optimization should focus on improving computational
-    efficiency through kernel fusion, graph compilation, operator reduction, and quantization, rather than purely
-    reducing memory traffic.
-
-    Raspberry Pi 5 cache hierarchy is:
-
-    \begin{itemize}
-        \item     L1d: 256 KiB (4 instances) = 64 KB per core
-        \item     L1i: 256 KiB (4 instances) = 64 KB per core
-        \item     L2: 2 MiB (4 instances) = 512 KB L2 per core $\rightarrow$ small
-        \item     L3: 2 MiB (1 instance) $\rightarrow$ shared last-level cache
-        \item DRAM bandwidth $\approx$ 9 GB/s (measured)
-    \end{itemize}
-
-    So layers larger than ~2 MB activation footprint will spill to DRAM.
-
-    So, early YOLO layers (e.g., 320×320 feature maps) cannot fit in cache.
-    Later layers (40×40, 20×20) may fit in L3 → more compute-bound behavior.
 
 \section{Apache TVM}
 
