@@ -1035,29 +1035,31 @@ While vendor specifications indicate that the Raspberry Pi 5 provides up to 17\,
 and the Jetson Orin Nano offers up to 102\,GB/s~\cite{nvidia_jetson_orin_datasheet},
 measured performance is often significantly lower in practice.
 
-
 \subsection{Roofline Analysis on Raspberry Pi 5}
 
-
 Using the methodology described in Chapter~\ref{chap:literature}, the sustained memory bandwidth of the Raspberry Pi 5
-was measured at 9.14\,GB/s, and peak compute throughput at 69.86\,GFLOP/s.
+was measured at 5.67\,GB/s, and peak compute throughput at 73.95\,GFLOP/s.
+All measurements were obtained with PyTorch configured to use 4 CPU threads, and layer timings
+were reported as the median over 20 runs after warmup.
 
 These values define the device Roofline:
 \[
-P(I) = \min\left(69.86,\; 9.14 \cdot I\right),
+P(I) = \min\left(73.95,\; 5.67 \cdot I\right),
 \]
-with a ridge point at approximately 7.6 FLOPs/byte, separating memory-bound and compute-bound regimes.
+with a ridge point at approximately 13.04 FLOPs/byte, separating memory-bound and compute-bound regimes.
 
 Table~\ref{tab:roofline_pi5_layers} summarizes representative per-layer performance characteristics
-of YOLOv8n executed on the Raspberry Pi 5 CPU with the use of eager mode of Pytorch Framework.
+of YOLOv8n executed on the Raspberry Pi 5 CPU using eager-mode PyTorch.
 
-Layers with low arithmetic intensity (AI $\approx$ 7--8 FLOPs/byte) achieve limited performance
-(3--6\,GFLOP/s), indicating memory-bound behavior. In contrast, deeper convolutional layers
-with high arithmetic intensity (AI $>$ 70 FLOPs/byte) achieve 40--60\,GFLOP/s, reaching
-70--85\% of the measured peak compute throughput and exhibiting compute-bound execution.
+Layers with relatively low arithmetic intensity (AI $\approx$ 7--10 FLOPs/byte) achieve only modest
+throughput, typically in the range of 4.8--8.0\,GFLOP/s, indicating memory-bound or memory-sensitive
+behavior under the measured Roofline parameters. In contrast, deeper convolutional layers with higher
+arithmetic intensity (AI $>$ 70 FLOPs/byte) achieve substantially higher effective throughput, often in
+the range of 40--60\,GFLOP/s. Some layers with very high arithmetic intensity exceed 50\,GFLOP/s, showing
+that smaller deep feature maps benefit from improved locality and higher compute utilization.
 
 The distribution focal loss (DFL) convolution in the detection head has extremely low arithmetic
-intensity (0.47 FLOPs/byte) and achieves only 0.4\,GFLOP/s, confirming strong memory limitation.
+intensity (0.47 FLOPs/byte) and achieves only 0.6\,GFLOP/s, confirming strong memory limitation.
 
 \begin{table}[ht]
 \centering
@@ -1067,61 +1069,66 @@ intensity (0.47 FLOPs/byte) and achieves only 0.4\,GFLOP/s, confirming strong me
 \toprule
 Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
 \midrule
-0.conv              & 23.79 & 7.71   & 3.7  & Memory-bound \\
-2.cv1.conv          & 8.88  & 7.99   & 5.9  & Memory-bound \\
-4.m.0.cv2.conv      & 2.82  & 70.42  & 41.8 & Compute-bound \\
-6.m.1.cv2.conv      & 2.06  & 122.03 & 57.3 & Compute-bound \\
-18.m.0.cv2.conv     & 1.95  & 122.03 & 60.5 & Compute-bound \\
-22.cv3.0.1.conv     & 13.86 & 170.41 & 53.2 & Compute-bound \\
-22.dfl.conv         & 2.42  & 0.47   & 0.4  & Strongly memory-bound \\
+0.conv              & 18.39 & 7.71   & 4.8  & Memory-bound \\
+2.cv1.conv          & 8.84  & 7.99   & 5.9  & Memory-bound \\
+2.cv2.conv          & 9.84  & 9.59   & 8.0  & Memory-bound \\
+4.m.0.cv2.conv      & 2.74  & 70.42  & 43.1 & Compute-favored \\
+6.m.1.cv2.conv      & 1.93  & 122.03 & 61.1 & Compute-favored \\
+18.m.0.cv2.conv     & 2.02  & 122.03 & 58.5 & Compute-favored \\
+22.cv3.0.1.conv     & 13.53 & 170.41 & 54.5 & Compute-favored \\
+22.dfl.conv         & 1.89  & 0.47   & 0.6  & Strongly memory-bound \\
 \midrule
-Full Model          & 358.35 & 157.76 & 12.36 & Mixed / Overhead-dominated \\
+Full Model          & 327.00 & 157.76 & 13.54 & Mixed / overhead-dominated \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
 \begin{figure}[!h]
     \centering
-    \includegraphics[width=0.8\linewidth]{pics/yolov8n_roofline_cpu_raspberrypi5.png}
+    \includegraphics[width=0.8\linewidth]{pics/roofline_pi5_cpu_20260402_164102.pdf}
     \caption{Roofline model of YOLOv8n on Raspberry Pi 5 (CPU, FP32).}
     \label{fig:roofline_pi5}
 \end{figure}
 
-Although several convolutional layers approach the peak compute throughput,
-the overall model achieves only 12.36\,GFLOP/s, corresponding to approximately 17\% of peak performance.
+Although several individual convolutional layers exhibit relatively high effective throughput,
+the overall model achieves only 13.54\,GFLOP/s, corresponding to approximately 18.3\% of the
+measured device-level peak compute throughput of 73.95\,GFLOP/s.
 
-This discrepancy indicates that inference performance is not limited solely by memory bandwidth,
-but also by system-level and computational inefficiencies. These include kernel launch overhead,
-framework dispatch costs, synchronization, non-convolutional operations, and inter-layer memory traffic.
-Thus, the Roofline represents an upper theoretical bound rather than an achievable performance target.
+This discrepancy indicates that end-to-end inference performance is not determined solely by the
+efficiency of individual convolution kernels. Instead, it is also affected by system-level and
+framework-level overheads, including kernel dispatch overhead, synchronization, non-convolutional
+operations, tensor reshaping and concatenation, inter-layer memory traffic, and limited fusion
+between adjacent operators. Thus, the Roofline serves primarily as an upper bound and an interpretive
+tool rather than a directly attainable end-to-end target.
 
-From an optimization perspective, these results suggest that further improvements should focus on
-enhancing computational efficiency through techniques such as operator fusion, graph-level optimization,
-kernel tuning, and quantization, rather than exclusively reducing memory traffic.
+From an optimization perspective, these results suggest that further improvements should focus not
+only on reducing memory traffic, but also on improving execution efficiency at the graph and kernel
+level. Promising directions include operator fusion, graph-level optimization, backend-specific kernel
+tuning, quantization, and reducing framework overhead through more optimized runtimes.
 
 The observed performance behavior can be further explained by the relationship between
 layer activation sizes and the cache hierarchy:
 
 \begin{itemize}
-    \item L1: 64 KB per core (instruction and data)
+    \item L1: 64 KB per core
     \item L2: 512 KB per core
     \item L3: 2 MB shared
-    \item DRAM bandwidth: $\approx$ 9 GB/s (measured)
+    \item DRAM bandwidth: $\approx$ 5.67 GB/s (measured)
 \end{itemize}
 
-In particular, the shared L3 cache of
-the Raspberry Pi 5 is limited to 2\,MB, which constrains the amount of data that can be
-reused without accessing main memory.
+In particular, the shared L3 cache of the Raspberry Pi 5 is limited to 2\,MB, which constrains
+the amount of feature-map data that can be reused without returning to main memory.
 
 Early layers of YOLOv8n operate on high-resolution feature maps (e.g., 320$\times$320),
-resulting in activation tensors that significantly exceed the available cache capacity.
-As a consequence, these layers frequently access DRAM, leading to low arithmetic intensity
-and memory-bound execution.
+resulting in activation tensors that far exceed the available cache capacity.
+Consequently, these layers experience frequent DRAM accesses and comparatively low effective performance,
+which is consistent with their lower arithmetic intensity and more memory-bound behavior.
 
 In contrast, deeper layers operate on progressively smaller feature maps (e.g., 40$\times$40
-or 20$\times$20), allowing their activations to fit within the L3 cache. This improves data
-locality and reuse, enabling higher arithmetic intensity and more efficient utilization of
-compute resources, which is consistent with the observed transition to compute-bound behavior.
+or 20$\times$20), allowing a larger fraction of their working set to remain in cache.
+This improves locality and data reuse, enabling substantially higher effective throughput.
+Thus, even though the full model remains far below the ideal Roofline bound, the layerwise results
+still reveal a clear transition from memory-bound early layers to more compute-favored deeper layers.
 
 \subsection{Roofline Analysis on Jetson Orin Nano}
 
@@ -1702,7 +1709,7 @@ reformat operations may appear as kernels or device-to-device copies.
 \chapter{Demonstration (Appendix A)}
 
 \begin{longtable}{p{0.44\textwidth} r r r p{0.18\textwidth}}
-\caption{Per-layer performance statistics of YOLOv8n on Raspberry Pi 5 (CPU, FP32). Regime is derived from the roofline knee $\mathrm{AI}_{\mathrm{knee}}\approx 7.64$ FLOPs/byte (using measured BW=9.14\,GB/s and peak=69.86\,GFLOP/s): Memory-bound if AI$<6.88$, Knee/transition if $6.88\le$AI$\le 8.40$, Compute-bound if AI$>8.40$.}
+\caption{Per-layer performance statistics of YOLOv8n on Raspberry Pi 5 (CPU, FP32). Regime is derived from the roofline knee $\mathrm{AI}_{\mathrm{knee}}\approx 4.17$ FLOPs/byte (using measured BW=8.06\,GB/s and peak=33.58\,GFLOP/s): Memory-bound if AI$<3.75$, Knee/transition if $3.75\le$AI$\le 4.58$, Compute-bound if AI$>4.58$.}
 \label{tab:roofline_pi5_layers_all}\\
 
 \toprule
@@ -1722,72 +1729,72 @@ Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
 \bottomrule
 \endlastfoot
 
-model.0.conv                         & 23.79 & 7.713   & 3.7  & Knee / transition \\
-model.1.conv                         & 17.59 & 23.955  & 13.4 & Compute-bound \\
-model.2.cv1.conv                     & 8.88  & 7.995   & 5.9  & Knee / transition \\
-model.2.m.0.cv1.conv                 & 5.17  & 35.899  & 22.8 & Compute-bound \\
-model.2.m.0.cv2.conv                 & 5.53  & 35.899  & 21.3 & Compute-bound \\
-model.2.cv2.conv                     & 21.02 & 9.593   & 3.7  & Compute-bound \\
-model.3.conv                         & 11.98 & 47.291  & 19.7 & Compute-bound \\
-model.4.cv1.conv                     & 7.08  & 15.920  & 7.4  & Compute-bound \\
-model.4.m.0.cv1.conv                 & 3.45  & 70.416  & 34.1 & Compute-bound \\
-model.4.m.0.cv2.conv                 & 2.82  & 70.416  & 41.8 & Compute-bound \\
-model.4.m.1.cv1.conv                 & 3.28  & 70.416  & 36.0 & Compute-bound \\
-model.4.m.1.cv2.conv                 & 3.43  & 70.416  & 34.4 & Compute-bound \\
-model.4.cv2.conv                     & 6.62  & 21.192  & 15.8 & Compute-bound \\
-model.5.conv                         & 7.30  & 85.714  & 32.3 & Compute-bound \\
-model.6.cv1.conv                     & 3.24  & 30.769  & 16.2 & Compute-bound \\
-model.6.m.0.cv1.conv                 & 3.18  & 122.034 & 37.1 & Compute-bound \\
-model.6.m.0.cv2.conv                 & 3.13  & 122.034 & 37.7 & Compute-bound \\
-model.6.m.1.cv1.conv                 & 2.40  & 122.034 & 49.2 & Compute-bound \\
-model.6.m.1.cv2.conv                 & 2.06  & 122.034 & 57.3 & Compute-bound \\
-model.6.cv2.conv                     & 4.91  & 40.506  & 21.4 & Compute-bound \\
-model.7.conv                         & 5.96  & 97.959  & 39.6 & Compute-bound \\
-model.8.cv1.conv                     & 1.98  & 48.485  & 26.5 & Compute-bound \\
-model.8.m.0.cv1.conv                 & 2.92  & 118.033 & 40.4 & Compute-bound \\
-model.8.m.0.cv2.conv                 & 2.27  & 118.033 & 52.0 & Compute-bound \\
-model.8.cv2.conv                     & 2.46  & 55.491  & 31.9 & Compute-bound \\
-model.9.cv1.conv                     & 1.36  & 35.165  & 19.2 & Compute-bound \\
-model.9.cv2.conv                     & 3.42  & 59.813  & 30.7 & Compute-bound \\
-model.12.cv1.conv                    & 5.18  & 45.283  & 30.4 & Compute-bound \\
-model.12.m.0.cv1.conv                & 2.22  & 122.034 & 53.1 & Compute-bound \\
-model.12.m.0.cv2.conv                & 2.01  & 122.034 & 58.6 & Compute-bound \\
-model.12.cv2.conv                    & 3.56  & 36.641  & 22.1 & Compute-bound \\
-model.15.cv1.conv                    & 6.91  & 23.821  & 22.8 & Compute-bound \\
-model.15.m.0.cv1.conv                & 2.90  & 70.416  & 40.6 & Compute-bound \\
-model.15.m.0.cv2.conv                & 2.76  & 70.416  & 42.8 & Compute-bound \\
-model.15.cv2.conv                    & 5.09  & 19.085  & 15.4 & Compute-bound \\
-model.16.conv                        & 3.02  & 53.731  & 39.1 & Compute-bound \\
-model.18.cv1.conv                    & 2.96  & 36.641  & 26.5 & Compute-bound \\
-model.18.m.0.cv1.conv                & 2.19  & 122.034 & 53.9 & Compute-bound \\
-model.18.m.0.cv2.conv                & 1.95  & 122.034 & 60.5 & Compute-bound \\
-model.18.cv2.conv                    & 2.70  & 36.641  & 29.1 & Compute-bound \\
-model.19.conv                        & 2.89  & 73.096  & 40.8 & Compute-bound \\
-model.21.cv1.conv                    & 2.03  & 55.491  & 38.8 & Compute-bound \\
-model.21.m.0.cv1.conv                & 2.35  & 118.033 & 50.2 & Compute-bound \\
-model.21.m.0.cv2.conv                & 2.32  & 118.033 & 50.7 & Compute-bound \\
-model.21.cv2.conv                    & 1.87  & 55.491  & 42.0 & Compute-bound \\
-model.22.cv2.0.0.conv                & 8.48  & 137.799 & 55.7 & Compute-bound \\
-model.22.cv2.0.1.conv                & 8.35  & 137.799 & 56.5 & Compute-bound \\
-model.22.cv2.0.2                     & 3.71  & 15.919  & 14.1 & Compute-bound \\
-model.22.cv2.1.0.conv                & 4.30  & 154.839 & 54.9 & Compute-bound \\
-model.22.cv2.1.1.conv                & 2.14  & 122.034 & 55.2 & Compute-bound \\
-model.22.cv2.1.2                     & 1.08  & 15.681  & 12.1 & Compute-bound \\
-model.22.cv2.2.0.conv                & 2.78  & 107.063 & 42.4 & Compute-bound \\
-model.22.cv2.2.1.conv                & 1.28  & 83.721  & 23.1 & Compute-bound \\
-model.22.cv2.2.2                     & 0.83  & 14.798  & 4.0  & Compute-bound \\
-model.22.cv3.0.0.conv                & 11.92 & 152.381 & 49.5 & Compute-bound \\
-model.22.cv3.0.1.conv                & 13.86 & 170.414 & 53.2 & Compute-bound \\
-model.22.cv3.0.2                     & 5.15  & 19.874  & 15.9 & Compute-bound \\
-model.22.cv3.1.0.conv                & 5.81  & 173.494 & 50.8 & Compute-bound \\
-model.22.cv3.1.1.conv                & 3.65  & 146.939 & 50.4 & Compute-bound \\
-model.22.cv3.1.2                     & 1.27  & 19.506  & 16.2 & Compute-bound \\
-model.22.cv3.2.0.conv                & 3.24  & 115.663 & 45.5 & Compute-bound \\
-model.22.cv3.2.1.conv                & 1.60  & 94.737  & 28.7 & Compute-bound \\
-model.22.cv3.2.2                     & 0.76  & 18.161  & 6.7  & Compute-bound \\
-model.22.dfl.conv                    & 2.42  & 0.471   & 0.4  & Strongly memory-bound \\
+model.0.conv                         & 18.25 & 7.713   & 4.8  & Compute-bound \\
+model.1.conv                         & 17.99 & 23.955  & 13.1 & Compute-bound \\
+model.2.cv1.conv                     & 5.13  & 7.995   & 10.2 & Compute-bound \\
+model.2.m.0.cv1.conv                 & 4.87  & 35.899  & 24.2 & Compute-bound \\
+model.2.m.0.cv2.conv                 & 4.82  & 35.899  & 24.5 & Compute-bound \\
+model.2.cv2.conv                     & 5.90  & 9.593   & 13.3 & Compute-bound \\
+model.3.conv                         & 6.72  & 47.291  & 35.1 & Compute-bound \\
+model.4.cv1.conv                     & 2.54  & 15.920  & 20.6 & Compute-bound \\
+model.4.m.0.cv1.conv                 & 3.01  & 70.416  & 39.2 & Compute-bound \\
+model.4.m.0.cv2.conv                 & 2.67  & 70.416  & 44.1 & Compute-bound \\
+model.4.m.1.cv1.conv                 & 2.71  & 70.416  & 43.6 & Compute-bound \\
+model.4.m.1.cv2.conv                 & 2.59  & 70.416  & 45.6 & Compute-bound \\
+model.4.cv2.conv                     & 5.21  & 21.192  & 20.1 & Compute-bound \\
+model.5.conv                         & 4.65  & 85.714  & 50.7 & Compute-bound \\
+model.6.cv1.conv                     & 1.92  & 30.769  & 27.3 & Compute-bound \\
+model.6.m.0.cv1.conv                 & 1.93  & 122.034 & 61.1 & Compute-bound \\
+model.6.m.0.cv2.conv                 & 1.64  & 122.034 & 71.8 & Compute-bound \\
+model.6.m.1.cv1.conv                 & 1.98  & 122.034 & 59.7 & Compute-bound \\
+model.6.m.1.cv2.conv                 & 1.62  & 122.034 & 72.9 & Compute-bound \\
+model.6.cv2.conv                     & 3.91  & 40.506  & 26.8 & Compute-bound \\
+model.7.conv                         & 3.86  & 97.959  & 61.1 & Compute-bound \\
+model.8.cv1.conv                     & 1.78  & 48.485  & 29.5 & Compute-bound \\
+model.8.m.0.cv1.conv                 & 1.86  & 118.033 & 63.6 & Compute-bound \\
+model.8.m.0.cv2.conv                 & 1.69  & 118.033 & 69.9 & Compute-bound \\
+model.8.cv2.conv                     & 2.69  & 55.491  & 29.3 & Compute-bound \\
+model.9.cv1.conv                     & 1.02  & 35.165  & 25.6 & Compute-bound \\
+model.9.cv2.conv                     & 5.00  & 59.813  & 21.0 & Compute-bound \\
+model.12.cv1.conv                    & 8.21  & 45.283  & 19.2 & Compute-bound \\
+model.12.m.0.cv1.conv                & 2.57  & 122.034 & 46.0 & Compute-bound \\
+model.12.m.0.cv2.conv                & 2.33  & 122.034 & 50.7 & Compute-bound \\
+model.12.cv2.conv                    & 4.31  & 36.641  & 18.3 & Compute-bound \\
+model.15.cv1.conv                    & 10.13 & 23.821  & 15.5 & Compute-bound \\
+model.15.m.0.cv1.conv                & 3.73  & 70.416  & 31.6 & Compute-bound \\
+model.15.m.0.cv2.conv                & 3.67  & 70.416  & 32.2 & Compute-bound \\
+model.15.cv2.conv                    & 5.65  & 19.085  & 13.9 & Compute-bound \\
+model.16.conv                        & 3.50  & 53.731  & 33.7 & Compute-bound \\
+model.18.cv1.conv                    & 4.27  & 36.641  & 18.4 & Compute-bound \\
+model.18.m.0.cv1.conv                & 2.49  & 122.034 & 47.3 & Compute-bound \\
+model.18.m.0.cv2.conv                & 2.38  & 122.034 & 49.6 & Compute-bound \\
+model.18.cv2.conv                    & 4.28  & 36.641  & 18.4 & Compute-bound \\
+model.19.conv                        & 3.02  & 73.096  & 39.1 & Compute-bound \\
+model.21.cv1.conv                    & 3.91  & 55.491  & 20.1 & Compute-bound \\
+model.21.m.0.cv1.conv                & 1.88  & 118.033 & 62.7 & Compute-bound \\
+model.21.m.0.cv2.conv                & 1.70  & 118.033 & 69.5 & Compute-bound \\
+model.21.cv2.conv                    & 2.70  & 55.491  & 29.1 & Compute-bound \\
+model.22.cv2.0.0.conv                & 7.80  & 137.799 & 60.5 & Compute-bound \\
+model.22.cv2.0.1.conv                & 7.39  & 137.799 & 63.9 & Compute-bound \\
+model.22.cv2.0.2                     & 2.81  & 15.919  & 18.7 & Compute-bound \\
+model.22.cv2.1.0.conv                & 3.17  & 154.839 & 74.4 & Compute-bound \\
+model.22.cv2.1.1.conv                & 1.65  & 122.034 & 71.3 & Compute-bound \\
+model.22.cv2.1.2                     & 0.71  & 15.681  & 18.6 & Compute-bound \\
+model.22.cv2.2.0.conv                & 1.68  & 107.063 & 70.1 & Compute-bound \\
+model.22.cv2.2.1.conv                & 0.70  & 83.721  & 42.3 & Compute-bound \\
+model.22.cv2.2.2                     & 0.24  & 14.798  & 13.9 & Compute-bound \\
+model.22.cv3.0.0.conv                & 8.24  & 152.381 & 71.6 & Compute-bound \\
+model.22.cv3.0.1.conv                & 9.80  & 170.414 & 75.3 & Compute-bound \\
+model.22.cv3.0.2                     & 4.01  & 19.874  & 20.4 & Compute-bound \\
+model.22.cv3.1.0.conv                & 3.99  & 173.494 & 73.9 & Compute-bound \\
+model.22.cv3.1.1.conv                & 2.51  & 146.939 & 73.4 & Compute-bound \\
+model.22.cv3.1.2                     & 0.95  & 19.506  & 21.5 & Compute-bound \\
+model.22.cv3.2.0.conv                & 2.03  & 115.663 & 72.8 & Compute-bound \\
+model.22.cv3.2.1.conv                & 0.94  & 94.737  & 48.8 & Compute-bound \\
+model.22.cv3.2.2                     & 0.30  & 18.161  & 16.9 & Compute-bound \\
+model.22.dfl.conv                    & 0.57  & 0.471   & 1.9  & Strongly memory-bound \\
 \midrule
-Full Model (THOP)                     & 358.35 & 157.765 & 12.36 & Mixed / Overhead-dominated \\
+Full Model (THOP)                    & 355.51 & 157.765 & 12.46 & Mixed / Overhead-dominated \\
 
 \end{longtable}
 
