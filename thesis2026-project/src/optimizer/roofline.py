@@ -278,7 +278,7 @@ if __name__ == "__main__":
     from ultralytics import YOLO
 
     PATH_YOLO = "./models/yolov8n.pt"
-    device    = "cuda:0"
+    device    = "cpu"
 
     y   = YOLO(PATH_YOLO)
     net = y.model
@@ -286,7 +286,7 @@ if __name__ == "__main__":
     x = torch.randn(1, 3, 640, 640, dtype=torch.float32)
 
     print("Measuring bandwidth...")
-    bw = measure_bandwidth_gbs(device=device, size_mb=256, iters=100, dtype=torch.float32)
+    bw = measure_bandwidth_gbs(device=device, size_mb=1024, iters=100, dtype=torch.float32)
     print(f"Bandwidth:    {bw:.2f} GB/s")
 
     print("Measuring peak compute...")
@@ -302,7 +302,7 @@ if __name__ == "__main__":
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     plot_roofline(stats, stats_model, peak_gflops=peak, peak_bw_gbs=bw,
                   title=f"Roofline ({device}) — YOLOv8n",
-                  save_path=f"./output/roofline_orin_{device}_{ts}.pdf")
+                  save_path=f"./output/roofline_pi5_{device}_{ts}.pdf")
 
     print(f"\nFull model: {stats_model}\n")
     print(f"{'Layer':<40} {'Type':<8} {'time(ms)':>9} {'AI':>8} {'perf(GF/s)':>12}")
