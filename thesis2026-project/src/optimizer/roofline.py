@@ -147,34 +147,46 @@ def profile_layers(
 
 # ----------------------------
 # 4) Hardware calibration
-#    FIX: use matrix-multiply for bandwidth too so thread count matches
 # ----------------------------
-def measure_bandwidth_gbs(device: str, size_mb: int = 512, iters: int = 100,
+def measure_bandwidth_gbs(device: str, size_mb: int = None, iters: int = 100,
                            dtype=torch.float32) -> float:
     """
-    Estimates effective memory bandwidth using a DAXPY-style op (c = a + b).
-    This uses the same thread pool as the compute benchmark, giving a
-    consistent ridge point for the roofline model.
-    Reads 2 × size_mb, writes 1 × size_mb  →  3 × size_mb total per iter.
+    GPU: y.copy_(x)  — pure memcpy, smaller buffer (GPU VRAM is limited)
+    CPU: c = a + b   — threaded DAXPY to match oneDNN thread count
     """
+    is_gpu = device.startswith("cuda") or device == "mps"
+
+    if size_mb is None:
+        size_mb = 128 if is_gpu else 512
+
     nbytes = size_mb * 1024 * 1024
     n = nbytes // torch.tensor([], dtype=dtype).element_size()
-    a = torch.randn(n, device=device, dtype=dtype)
-    b = torch.randn(n, device=device, dtype=dtype)
 
-    # Warmup
-    for _ in range(5):
-        c = a + b
-    sync(device)
+    if is_gpu:
+        x = torch.empty(n, device=device, dtype=dtype)
+        y = torch.empty(n, device=device, dtype=dtype)
+        for _ in range(5):
+            y.copy_(x)
+        sync(device)
+        t0 = time.perf_counter()
+        for _ in range(iters):
+            y.copy_(x)          # 1 read + 1 write = 2 × nbytes
+        sync(device)
+        t1 = time.perf_counter()
+        total_bytes = iters * 2 * nbytes
+    else:
+        a = torch.randn(n, device=device, dtype=dtype)
+        b = torch.randn(n, device=device, dtype=dtype)
+        for _ in range(5):
+            c = a + b
+        t0 = time.perf_counter()
+        for _ in range(iters):
+            c = a + b           # 2 reads + 1 write = 3 × nbytes
+        t1 = time.perf_counter()
+        total_bytes = iters * 3 * nbytes
 
-    t0 = time.perf_counter()
-    for _ in range(iters):
-        c = a + b          # 2 reads + 1 write = 3 × nbytes
-    sync(device)
-    t1 = time.perf_counter()
-
-    total_bytes = iters * 3 * nbytes
     return (total_bytes / (t1 - t0)) / 1e9
+
 
 
 def measure_peak_gflops(device: str, m: int = 2048, k: int = 2048, n: int = 2048,
@@ -297,32 +309,29 @@ def plot_roofline(stats: List[LayerStat], stats_model: LayerStat,
 # 7) Entry point
 # ----------------------------
 if __name__ == "__main__":
-    # Force PyTorch + oneDNN to use all physical cores
-    # so matmul benchmark and conv2d kernels use the same thread count
-    num_cores = os.cpu_count() or 4
-    torch.set_num_threads(num_cores)
-    torch.set_num_interop_threads(1)
-    os.environ["OMP_NUM_THREADS"] = str(num_cores)
-    os.environ["MKL_NUM_THREADS"] = str(num_cores)
+    from ultralytics import YOLO
 
-    print(f"PyTorch threads: {torch.get_num_threads()}")  # should now print 4
+    PATH_YOLO = "../../models/yolov8n.pt"
+    device    = "cuda:0"
 
-    PATH_YOLO = "./models/yolov8n.pt"
-    device    = "cpu"
-
-    y   = YOLO(PATH_YOLO)
-    net = y.model
-
-    x = torch.randn(1, 3, 640, 640, dtype=torch.float32)
+    if device == "cpu":
+        num_cores = os.cpu_count() or 4
+        torch.set_num_threads(num_cores)         
+        os.environ["OMP_NUM_THREADS"] = str(num_cores)
+        os.environ["MKL_NUM_THREADS"] = str(num_cores)
 
     print(f"PyTorch threads: {torch.get_num_threads()}")
 
+    y   = YOLO(PATH_YOLO)
+    net = y.model
+    x   = torch.randn(1, 3, 640, 640, dtype=torch.float32)
+
     print("Measuring bandwidth...")
-    bw = measure_bandwidth_gbs(device=device, size_mb=512, iters=500, dtype=torch.float32)
+    bw = measure_bandwidth_gbs(device=device, iters=500, dtype=torch.float32)
     print(f"Bandwidth:    {bw:.2f} GB/s")
 
     print("Measuring peak compute...")
-    peak = measure_peak_gflops(device=device, m=2048, k=2048, n=2048, iters=100, dtype=torch.float32)
+    peak = measure_peak_gflops(device=device, m=2048, k=2048, n=2048, iters=500, dtype=torch.float32)
     print(f"Peak compute: {peak:.2f} GFLOP/s")
 
     print("Profiling full model...")
@@ -331,10 +340,13 @@ if __name__ == "__main__":
     print("Profiling layers (with warmup + median over 20 runs)...")
     stats = profile_layers(net, x, device=device, warmup=30, timed_runs=20)
 
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    OUTPUT_DIR = os.path.join(SCRIPT_DIR, "..", "..", "output")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     plot_roofline(stats, stats_model, peak_gflops=peak, peak_bw_gbs=bw,
-                  title=f"Roofline (cpu) — YOLOv8n",
-                  save_path=f"./output/roofline_pi5_cpu_{ts}.pdf")
+                  title=f"Roofline ({device}) — YOLOv8n",
+                  save_path=os.path.join(OUTPUT_DIR, f"roofline_orin_{device}_{ts}.pdf"))
 
     print(f"\nFull model: {stats_model}\n")
     print(f"{'Layer':<40} {'Type':<8} {'time(ms)':>9} {'AI':>8} {'perf(GF/s)':>12}")
