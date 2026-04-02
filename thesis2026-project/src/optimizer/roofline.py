@@ -238,28 +238,29 @@ def plot_roofline(stats: List[LayerStat], stats_model: LayerStat,
 
     ridge = peak_gflops / peak_bw_gbs
 
-    plt.figure(figsize=(10, 6))
-    plt.loglog(xs, mem_roof,  linestyle="--", label=f"Memory roof  {peak_bw_gbs:.1f} GB/s")
-    plt.loglog(xs, comp_roof, linestyle="--", label=f"Compute roof {peak_gflops:.1f} GFLOP/s")
-    plt.loglog(xs, roof, "k-", linewidth=2, label="Roofline")
-    plt.axvline(ridge, color="gray", linestyle=":", linewidth=1, label=f"Ridge point {ridge:.1f}")
+    plt.figure(figsize=(12, 7))
+    plt.loglog(xs, mem_roof,  linestyle="--", linewidth=2, label=f"Memory roof  {peak_bw_gbs:.1f} GB/s")
+    plt.loglog(xs, comp_roof, linestyle="--", linewidth=2, label=f"Compute roof {peak_gflops:.1f} GFLOP/s")
+    plt.loglog(xs, roof, "k-", linewidth=2.5, label="Roofline")
+    plt.axvline(ridge, color="gray", linestyle=":", linewidth=1.5, label=f"Ridge point {ridge:.1f}")
 
-    plt.scatter(ai, perf, color="blue", zorder=5, label="Layers")
+    plt.scatter(ai, perf, color="blue", zorder=5, s=60, label="Layers")
     plt.scatter(stats_model.ai, stats_model.perf_gflops, color="green",
-                zorder=6, s=100, marker="*", label="Full model (THOP)")
+                zorder=6, s=200, marker="*", label="Full model (THOP)")
 
     total_flops = sum(s.flops for s in stats)
     total_bytes = sum(s.bytes_lb for s in stats)
     ai_agg   = total_flops / total_bytes
     perf_agg = (total_flops / stats_model.time_s) / 1e9
-    plt.scatter(ai_agg, perf_agg, color="red", zorder=6, s=100, marker="D",
+    plt.scatter(ai_agg, perf_agg, color="red", zorder=6, s=200, marker="D",
                 label="Conv+Linear aggregate")
 
-    plt.xlabel("Arithmetic Intensity (FLOP/byte)  [lower-bound bytes]")
-    plt.ylabel("Achieved Performance (GFLOP/s)")
-    plt.title(title)
+    plt.xlabel("Arithmetic Intensity (FLOP/byte)  [lower-bound bytes]", fontsize=16)
+    plt.ylabel("Achieved Performance (GFLOP/s)", fontsize=16)
+    plt.title(title, fontsize=18, fontweight="bold")
+    plt.tick_params(axis="both", labelsize=13)
     plt.grid(True, which="both", linestyle="--", linewidth=0.5)
-    plt.legend()
+    plt.legend(fontsize=13, framealpha=0.9)
     plt.tight_layout()
 
     if save_path:
@@ -269,13 +270,14 @@ def plot_roofline(stats: List[LayerStat], stats_model: LayerStat,
     plt.show()
 
 
+
 # ----------------------------
 # 7) Entry point
 # ----------------------------
 if __name__ == "__main__":
     from ultralytics import YOLO
 
-    PATH_YOLO = "../../models/yolov8n.pt"
+    PATH_YOLO = "./models/yolov8n.pt"
     device    = "cuda:0"
 
     y   = YOLO(PATH_YOLO)
@@ -300,7 +302,7 @@ if __name__ == "__main__":
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     plot_roofline(stats, stats_model, peak_gflops=peak, peak_bw_gbs=bw,
                   title=f"Roofline ({device}) — YOLOv8n",
-                  save_path=f"roofline_{ts}.pdf")
+                  save_path=f"./output/roofline_orin_{device}_{ts}.pdf")
 
     print(f"\nFull model: {stats_model}\n")
     print(f"{'Layer':<40} {'Type':<8} {'time(ms)':>9} {'AI':>8} {'perf(GF/s)':>12}")
