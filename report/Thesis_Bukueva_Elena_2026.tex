@@ -1133,22 +1133,24 @@ still reveal a clear transition from memory-bound early layers to more compute-f
 \subsection{Roofline Analysis on Jetson Orin Nano}
 
 The same analysis was performed on the NVIDIA Jetson Orin Nano GPU.
-Measured sustained memory bandwidth was 25.42\,GB/s, and peak compute
-throughput reached 810.69\,GFLOP/s.
+With PyTorch configured to use a single host thread and using median timings
+after warmup, the measured sustained memory bandwidth was 55.68\,GB/s,
+while peak compute throughput reached 810.68\,GFLOP/s.
 
 The resulting Roofline model is defined as:
 \[
-P(I) = \min\left(810.69,\; 25.42 \cdot I\right),
+P(I) = \min\left(810.68,\; 55.68 \cdot I\right),
 \]
 with a ridge point at:
 \[
-I^* = \frac{810.69}{25.42} \approx 31.9 \text{ FLOPs/byte}.
+I^* = \frac{810.68}{55.68} \approx 14.56 \text{ FLOPs/byte}.
 \]
 
-Compared to the Raspberry Pi 5, the Orin Nano exhibits both significantly
-higher compute throughput and higher memory bandwidth, shifting the ridge
-point to higher arithmetic intensity. As a result, a larger fraction of
-YOLOv8n layers operates in the compute-bound regime.
+Compared to the Raspberry Pi 5, the Orin Nano exhibits both substantially
+higher compute throughput and much higher memory bandwidth. At the same time,
+the ridge point remains in a moderate arithmetic-intensity range, which means
+that many YOLOv8n convolution layers lie to the right of the knee and can
+benefit from the GPU's high compute capability.
 
 \begin{table}[ht]
 \centering
@@ -1159,50 +1161,60 @@ YOLOv8n layers operates in the compute-bound regime.
 \toprule
 Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
 \midrule
-model.0.conv              & 0.85 & 7.71   & 104.1 & Memory-bound \\
-model.2.cv1.conv          & 0.26 & 7.99   & 200.8 & Memory-bound \\
-model.4.m.0.cv2.conv      & 0.56 & 70.42  & 212.3 & Compute-bound \\
-model.6.m.1.cv2.conv      & 0.24 & 122.03 & 486.9 & Compute-bound \\
-model.12.m.0.cv2.conv     & 0.24 & 122.03 & 497.5 & Compute-bound \\
-model.22.cv2.0.1.conv     & 0.56 & 137.80 & 843.7 & Compute-bound \\
-model.22.cv3.0.1.conv     & 0.83 & 170.41 & 887.9 & Compute-bound \\
-model.22.dfl.conv         & 0.28 & 0.47   & 3.9   & Strongly memory-bound \\
+model.0.conv              & 0.78 & 7.71   & 114.1 & Memory-bound \\
+model.2.cv1.conv          & 0.26 & 7.99   & 204.2 & Memory-bound \\
+model.4.m.0.cv2.conv      & 0.56 & 70.42  & 211.8 & Compute-bound \\
+model.6.m.1.cv2.conv      & 0.23 & 122.03 & 502.4 & Compute-bound \\
+model.12.m.0.cv2.conv     & 0.24 & 122.03 & 499.3 & Compute-bound \\
+model.22.cv2.0.1.conv     & 0.56 & 137.80 & 842.6 & Compute-bound \\
+model.22.cv3.0.1.conv     & 0.83 & 170.41 & 892.5 & Compute-bound \\
+model.22.dfl.conv         & 0.27 & 0.47   & 3.9   & Strongly memory-bound \\
 \midrule
-Full Model                & 25.77 & 157.76 & 171.86 & Mixed / Overhead-dominated \\
+Full Model                & 26.02 & 157.76 & 170.22 & Mixed / Overhead-dominated \\
 \bottomrule
 \end{tabularx}
 
 \end{table}
 
-The full model achieves 171.86\,GFLOP/s, corresponding to approximately
-21\% of peak compute throughput, which is higher than the Raspberry Pi 5
-but still far from the theoretical limit.
+The full model achieves 170.22\,GFLOP/s, corresponding to approximately
+21.0\% of the measured peak compute throughput. This is substantially higher
+than on the Raspberry Pi 5, but still far below the theoretical device peak.
 
-Per-layer analysis shows that many convolutional layers achieve
-200–600\,GFLOP/s, with several layers approaching or exceeding
-800\,GFLOP/s. These high-intensity layers (AI $>$ 100 FLOPs/byte)
-clearly operate in the compute-bound regime.
+Per-layer analysis shows that many convolutional layers achieve several hundred
+GFLOP/s, with some layers approaching or even exceeding 800\,GFLOP/s.
+In particular, layers with high arithmetic intensity (AI $>$ 70 FLOPs/byte)
+clearly operate in the compute-bound regime and make effective use of the GPU's
+compute resources.
 
-However, low-intensity layers, such as the DFL convolution
-(AI $\approx$ 0.47), remain strongly memory-bound, achieving only
-3.9\,GFLOP/s.
+However, low-intensity layers remain limited by memory behavior. The DFL
+convolution in the detection head, with AI $\approx$ 0.47 FLOPs/byte,
+achieves only 3.9\,GFLOP/s and remains strongly memory-bound even on this
+more capable platform.
 
 \begin{figure}[!h]
     \centering
-    \includegraphics[width=1\linewidth]{pics/roofline_orin_cuda:0_20260402_134606.pdf}
+    \includegraphics[width=1\linewidth]{pics/roofline_orin_cuda:0_20260402_173102.pdf}
     \caption{Roofline model of YOLOv8n on Jetson Orin Nano (GPU, FP32).}
     \label{fig:roofline_orin}
 \end{figure}
 
 Table~\ref{tab:roofline_orin_layers} highlights that, compared to the Raspberry Pi 5,
 the majority of convolutional layers on the Orin Nano operate in the compute-bound
-regime, achieving substantially higher performance due to the increased compute capacity
-and memory bandwidth of the GPU.
+regime and achieve substantially higher throughput due to the GPU's much larger
+compute capacity and memory bandwidth.
 
-However, low–arithmetic-intensity layers, such as the DFL convolution, remain strongly
-memory-bound even on this more capable platform. Additionally, despite high per-layer
-performance, the overall model achieves only 171.86\,GFLOP/s, indicating the presence
-of system-level overhead and non-compute-dominated operations.
+At the same time, the results also show that high per-layer kernel efficiency does
+not directly translate into equally high end-to-end model efficiency. Although several
+layers approach the measured peak throughput, the overall model reaches only
+170.22\,GFLOP/s. This indicates the continued presence of system-level overhead,
+including kernel launch overhead, intermediate tensor movement, non-convolutional
+operations, and synchronization costs between layers.
+
+Thus, the Orin Nano provides a much more favorable platform for YOLOv8n inference
+than the Raspberry Pi 5, but the Roofline analysis still reveals that end-to-end
+performance remains constrained by factors beyond raw compute throughput alone.
+
+Detailed per-layer benchmarking results are provided in Appendix~\ref{chap:appendix}.
 
 
     %Macbook Pro M3 has declared 150GB/s memory bandwidth ~\cite{apple_memspecs}.
@@ -1707,10 +1719,15 @@ reformat operations may appear as kernels or device-to-device copies.
 \appendix
 
 \chapter{Demonstration (Appendix A)}
+\label{chap:appendix}
 
-\begin{longtable}{p{0.44\textwidth} r r r p{0.18\textwidth}}
-\caption{Per-layer performance statistics of YOLOv8n on Raspberry Pi 5 (CPU, FP32). Regime is derived from the roofline knee $\mathrm{AI}_{\mathrm{knee}}\approx 4.17$ FLOPs/byte (using measured BW=8.06\,GB/s and peak=33.58\,GFLOP/s): Memory-bound if AI$<3.75$, Knee/transition if $3.75\le$AI$\le 4.58$, Compute-bound if AI$>4.58$.}
-\label{tab:roofline_pi5_layers_all}\\
+\begingroup
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+
+\begin{longtable}{p{0.34\textwidth} r r r p{0.16\textwidth}}
+\caption{Per-layer performance statistics of YOLOv8n on Jetson Orin Nano (GPU, FP32). Regime is derived from the roofline knee $\mathrm{AI}_{\mathrm{knee}}\approx 14.56$ FLOPs/byte (using measured BW=55.68\,GB/s and peak=810.68\,GFLOP/s): Memory-bound if AI$<13.10$, Knee/transition if $13.10\le$AI$\le 16.02$, Compute-bound if AI$>16.02$.}
+\label{tab:roofline_orin_layers_all}\\
 
 \toprule
 Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
@@ -1729,80 +1746,169 @@ Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
 \bottomrule
 \endlastfoot
 
-model.0.conv                         & 18.25 & 7.713   & 4.8  & Compute-bound \\
-model.1.conv                         & 17.99 & 23.955  & 13.1 & Compute-bound \\
-model.2.cv1.conv                     & 5.13  & 7.995   & 10.2 & Compute-bound \\
-model.2.m.0.cv1.conv                 & 4.87  & 35.899  & 24.2 & Compute-bound \\
-model.2.m.0.cv2.conv                 & 4.82  & 35.899  & 24.5 & Compute-bound \\
-model.2.cv2.conv                     & 5.90  & 9.593   & 13.3 & Compute-bound \\
-model.3.conv                         & 6.72  & 47.291  & 35.1 & Compute-bound \\
-model.4.cv1.conv                     & 2.54  & 15.920  & 20.6 & Compute-bound \\
-model.4.m.0.cv1.conv                 & 3.01  & 70.416  & 39.2 & Compute-bound \\
-model.4.m.0.cv2.conv                 & 2.67  & 70.416  & 44.1 & Compute-bound \\
-model.4.m.1.cv1.conv                 & 2.71  & 70.416  & 43.6 & Compute-bound \\
-model.4.m.1.cv2.conv                 & 2.59  & 70.416  & 45.6 & Compute-bound \\
-model.4.cv2.conv                     & 5.21  & 21.192  & 20.1 & Compute-bound \\
-model.5.conv                         & 4.65  & 85.714  & 50.7 & Compute-bound \\
-model.6.cv1.conv                     & 1.92  & 30.769  & 27.3 & Compute-bound \\
-model.6.m.0.cv1.conv                 & 1.93  & 122.034 & 61.1 & Compute-bound \\
-model.6.m.0.cv2.conv                 & 1.64  & 122.034 & 71.8 & Compute-bound \\
-model.6.m.1.cv1.conv                 & 1.98  & 122.034 & 59.7 & Compute-bound \\
-model.6.m.1.cv2.conv                 & 1.62  & 122.034 & 72.9 & Compute-bound \\
-model.6.cv2.conv                     & 3.91  & 40.506  & 26.8 & Compute-bound \\
-model.7.conv                         & 3.86  & 97.959  & 61.1 & Compute-bound \\
-model.8.cv1.conv                     & 1.78  & 48.485  & 29.5 & Compute-bound \\
-model.8.m.0.cv1.conv                 & 1.86  & 118.033 & 63.6 & Compute-bound \\
-model.8.m.0.cv2.conv                 & 1.69  & 118.033 & 69.9 & Compute-bound \\
-model.8.cv2.conv                     & 2.69  & 55.491  & 29.3 & Compute-bound \\
-model.9.cv1.conv                     & 1.02  & 35.165  & 25.6 & Compute-bound \\
-model.9.cv2.conv                     & 5.00  & 59.813  & 21.0 & Compute-bound \\
-model.12.cv1.conv                    & 8.21  & 45.283  & 19.2 & Compute-bound \\
-model.12.m.0.cv1.conv                & 2.57  & 122.034 & 46.0 & Compute-bound \\
-model.12.m.0.cv2.conv                & 2.33  & 122.034 & 50.7 & Compute-bound \\
-model.12.cv2.conv                    & 4.31  & 36.641  & 18.3 & Compute-bound \\
-model.15.cv1.conv                    & 10.13 & 23.821  & 15.5 & Compute-bound \\
-model.15.m.0.cv1.conv                & 3.73  & 70.416  & 31.6 & Compute-bound \\
-model.15.m.0.cv2.conv                & 3.67  & 70.416  & 32.2 & Compute-bound \\
-model.15.cv2.conv                    & 5.65  & 19.085  & 13.9 & Compute-bound \\
-model.16.conv                        & 3.50  & 53.731  & 33.7 & Compute-bound \\
-model.18.cv1.conv                    & 4.27  & 36.641  & 18.4 & Compute-bound \\
-model.18.m.0.cv1.conv                & 2.49  & 122.034 & 47.3 & Compute-bound \\
-model.18.m.0.cv2.conv                & 2.38  & 122.034 & 49.6 & Compute-bound \\
-model.18.cv2.conv                    & 4.28  & 36.641  & 18.4 & Compute-bound \\
-model.19.conv                        & 3.02  & 73.096  & 39.1 & Compute-bound \\
-model.21.cv1.conv                    & 3.91  & 55.491  & 20.1 & Compute-bound \\
-model.21.m.0.cv1.conv                & 1.88  & 118.033 & 62.7 & Compute-bound \\
-model.21.m.0.cv2.conv                & 1.70  & 118.033 & 69.5 & Compute-bound \\
-model.21.cv2.conv                    & 2.70  & 55.491  & 29.1 & Compute-bound \\
-model.22.cv2.0.0.conv                & 7.80  & 137.799 & 60.5 & Compute-bound \\
-model.22.cv2.0.1.conv                & 7.39  & 137.799 & 63.9 & Compute-bound \\
-model.22.cv2.0.2                     & 2.81  & 15.919  & 18.7 & Compute-bound \\
-model.22.cv2.1.0.conv                & 3.17  & 154.839 & 74.4 & Compute-bound \\
-model.22.cv2.1.1.conv                & 1.65  & 122.034 & 71.3 & Compute-bound \\
-model.22.cv2.1.2                     & 0.71  & 15.681  & 18.6 & Compute-bound \\
-model.22.cv2.2.0.conv                & 1.68  & 107.063 & 70.1 & Compute-bound \\
-model.22.cv2.2.1.conv                & 0.70  & 83.721  & 42.3 & Compute-bound \\
-model.22.cv2.2.2                     & 0.24  & 14.798  & 13.9 & Compute-bound \\
-model.22.cv3.0.0.conv                & 8.24  & 152.381 & 71.6 & Compute-bound \\
-model.22.cv3.0.1.conv                & 9.80  & 170.414 & 75.3 & Compute-bound \\
-model.22.cv3.0.2                     & 4.01  & 19.874  & 20.4 & Compute-bound \\
-model.22.cv3.1.0.conv                & 3.99  & 173.494 & 73.9 & Compute-bound \\
-model.22.cv3.1.1.conv                & 2.51  & 146.939 & 73.4 & Compute-bound \\
-model.22.cv3.1.2                     & 0.95  & 19.506  & 21.5 & Compute-bound \\
-model.22.cv3.2.0.conv                & 2.03  & 115.663 & 72.8 & Compute-bound \\
-model.22.cv3.2.1.conv                & 0.94  & 94.737  & 48.8 & Compute-bound \\
-model.22.cv3.2.2                     & 0.30  & 18.161  & 16.9 & Compute-bound \\
-model.22.dfl.conv                    & 0.57  & 0.471   & 1.9  & Strongly memory-bound \\
+model.0.conv                         & 18.39 & 7.713   & 4.8  & Memory-bound \\
+model.1.conv                         & 12.74 & 23.955  & 18.5 & Compute-bound \\
+model.2.cv1.conv                     & 8.84  & 7.995   & 5.9  & Memory-bound \\
+model.2.m.0.cv1.conv                 & 4.81  & 35.899  & 24.5 & Compute-bound \\
+model.2.m.0.cv2.conv                 & 4.72  & 35.899  & 25.0 & Compute-bound \\
+model.2.cv2.conv                     & 9.84  & 9.593   & 8.0  & Memory-bound \\
+model.3.conv                         & 6.93  & 47.291  & 34.1 & Compute-bound \\
+model.4.cv1.conv                     & 3.94  & 15.920  & 13.3 & Knee / transition \\
+model.4.m.0.cv1.conv                 & 2.93  & 70.416  & 40.2 & Compute-bound \\
+model.4.m.0.cv2.conv                 & 2.74  & 70.416  & 43.1 & Compute-bound \\
+model.4.m.1.cv1.conv                 & 2.77  & 70.416  & 42.6 & Compute-bound \\
+model.4.m.1.cv2.conv                 & 2.69  & 70.416  & 43.8 & Compute-bound \\
+model.4.cv2.conv                     & 5.36  & 21.192  & 19.6 & Compute-bound \\
+model.5.conv                         & 5.37  & 85.714  & 43.9 & Compute-bound \\
+model.6.cv1.conv                     & 2.13  & 30.769  & 24.6 & Compute-bound \\
+model.6.m.0.cv1.conv                 & 2.15  & 122.034 & 54.9 & Compute-bound \\
+model.6.m.0.cv2.conv                 & 2.00  & 122.034 & 58.9 & Compute-bound \\
+model.6.m.1.cv1.conv                 & 2.01  & 122.034 & 58.6 & Compute-bound \\
+model.6.m.1.cv2.conv                 & 1.93  & 122.034 & 61.1 & Compute-bound \\
+model.6.cv2.conv                     & 3.48  & 40.506  & 30.1 & Compute-bound \\
+model.7.conv                         & 4.60  & 97.959  & 51.3 & Compute-bound \\
+model.8.cv1.conv                     & 1.46  & 48.485  & 35.9 & Compute-bound \\
+model.8.m.0.cv1.conv                 & 2.38  & 118.033 & 49.5 & Compute-bound \\
+model.8.m.0.cv2.conv                 & 2.32  & 118.033 & 50.7 & Compute-bound \\
+model.8.cv2.conv                     & 1.92  & 55.491  & 41.1 & Compute-bound \\
+model.9.cv1.conv                     & 1.07  & 35.165  & 24.5 & Compute-bound \\
+model.9.cv2.conv                     & 2.66  & 59.813  & 39.4 & Compute-bound \\
+model.12.cv1.conv                    & 4.62  & 45.283  & 34.1 & Compute-bound \\
+model.12.m.0.cv1.conv                & 2.13  & 122.034 & 55.5 & Compute-bound \\
+model.12.m.0.cv2.conv                & 2.00  & 122.034 & 59.1 & Compute-bound \\
+model.12.cv2.conv                    & 3.01  & 36.641  & 26.1 & Compute-bound \\
+model.15.cv1.conv                    & 6.76  & 23.821  & 23.3 & Compute-bound \\
+model.15.m.0.cv1.conv                & 2.93  & 70.416  & 40.3 & Compute-bound \\
+model.15.m.0.cv2.conv                & 2.69  & 70.416  & 43.8 & Compute-bound \\
+model.15.cv2.conv                    & 4.67  & 19.085  & 16.8 & Compute-bound \\
+model.16.conv                        & 2.87  & 53.731  & 41.1 & Compute-bound \\
+model.18.cv1.conv                    & 3.01  & 36.641  & 26.1 & Compute-bound \\
+model.18.m.0.cv1.conv                & 2.18  & 122.034 & 54.2 & Compute-bound \\
+model.18.m.0.cv2.conv                & 2.02  & 122.034 & 58.5 & Compute-bound \\
+model.18.cv2.conv                    & 2.98  & 36.641  & 26.4 & Compute-bound \\
+model.19.conv                        & 2.75  & 73.096  & 42.9 & Compute-bound \\
+model.21.cv1.conv                    & 1.95  & 55.491  & 40.4 & Compute-bound \\
+model.21.m.0.cv1.conv                & 2.42  & 118.033 & 48.8 & Compute-bound \\
+model.21.m.0.cv2.conv                & 2.27  & 118.033 & 51.9 & Compute-bound \\
+model.21.cv2.conv                    & 1.94  & 55.491  & 40.5 & Compute-bound \\
+model.22.cv2.0.0.conv                & 8.39  & 137.799 & 56.2 & Compute-bound \\
+model.22.cv2.0.1.conv                & 8.27  & 137.799 & 57.1 & Compute-bound \\
+model.22.cv2.0.2                     & 3.95  & 15.919  & 13.3 & Knee / transition \\
+model.22.cv2.1.0.conv                & 3.94  & 154.839 & 59.9 & Compute-bound \\
+model.22.cv2.1.1.conv                & 2.06  & 122.034 & 57.4 & Compute-bound \\
+model.22.cv2.1.2                     & 0.84  & 15.681  & 15.6 & Compute-bound \\
+model.22.cv2.2.0.conv                & 2.30  & 107.063 & 51.2 & Compute-bound \\
+model.22.cv2.2.1.conv                & 0.92  & 83.721  & 32.2 & Compute-bound \\
+model.22.cv2.2.2                     & 0.51  & 14.798  & 6.4  & Compute-bound \\
+model.22.cv3.0.0.conv                & 11.51 & 152.381 & 51.3 & Compute-bound \\
+model.22.cv3.0.1.conv                & 13.53 & 170.414 & 54.5 & Compute-bound \\
+model.22.cv3.0.2                     & 4.97  & 19.874  & 16.5 & Compute-bound \\
+model.22.cv3.1.0.conv                & 5.35  & 173.494 & 55.1 & Compute-bound \\
+model.22.cv3.1.1.conv                & 3.30  & 146.939 & 55.8 & Compute-bound \\
+model.22.cv3.1.2                     & 1.09  & 19.506  & 18.9 & Compute-bound \\
+model.22.cv3.2.0.conv                & 2.83  & 115.663 & 52.0 & Compute-bound \\
+model.22.cv3.2.1.conv                & 1.25  & 94.737  & 37.0 & Compute-bound \\
+model.22.cv3.2.2                     & 0.56  & 18.161  & 9.1  & Compute-bound \\
+model.22.dfl.conv                    & 1.89  & 0.471   & 0.6  & Strongly memory-bound \\
 \midrule
-Full Model (THOP)                    & 355.51 & 157.765 & 12.46 & Mixed / Overhead-dominated \\
+Full Model (THOP)                    & 327.00 & 157.765 & 13.54 & Mixed / Overhead-dominated \\
 
 \end{longtable}
+
+\begin{longtable}{p{0.44\textwidth} r r r p{0.18\textwidth}}
+\caption{Per-layer performance statistics of YOLOv8n on Jetson Orin Nano (GPU, FP32). Regime is derived from the roofline knee $\mathrm{AI}_{\mathrm{knee}}\approx 14.56$ FLOPs/byte (using measured BW=55.68\,GB/s and peak=810.68\,GFLOP/s): Memory-bound if AI$<13.10$, Knee/transition if $13.10\le$AI$\le 16.02$, Compute-bound if AI$>16.02$.}
+\label{tab:roofline_orin_layers_all}\\
+
+\toprule
+Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
+\midrule
+\endfirsthead
+
+\toprule
+Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
+\midrule
+\endhead
+
+\midrule
+\multicolumn{5}{r}{\small Continued on next page} \\
+\endfoot
+
+\bottomrule
+\endlastfoot
+
+model.0.conv                         & 0.78 & 7.713   & 114.1 & Memory-bound \\
+model.1.conv                         & 0.81 & 23.955  & 292.6 & Compute-bound \\
+model.2.cv1.conv                     & 0.26 & 7.995   & 204.2 & Memory-bound \\
+model.2.m.0.cv1.conv                 & 0.45 & 35.899  & 259.8 & Compute-bound \\
+model.2.m.0.cv2.conv                 & 0.44 & 35.899  & 267.2 & Compute-bound \\
+model.2.cv2.conv                     & 0.30 & 9.593   & 263.5 & Memory-bound \\
+model.3.conv                         & 0.46 & 47.291  & 508.0 & Compute-bound \\
+model.4.cv1.conv                     & 0.20 & 15.920  & 262.0 & Knee / transition \\
+model.4.m.0.cv1.conv                 & 0.57 & 70.416  & 208.7 & Compute-bound \\
+model.4.m.0.cv2.conv                 & 0.56 & 70.416  & 211.8 & Compute-bound \\
+model.4.m.1.cv1.conv                 & 0.56 & 70.416  & 211.6 & Compute-bound \\
+model.4.m.1.cv2.conv                 & 0.55 & 70.416  & 213.3 & Compute-bound \\
+model.4.cv2.conv                     & 0.23 & 21.192  & 446.4 & Compute-bound \\
+model.5.conv                         & 0.40 & 85.714  & 593.7 & Compute-bound \\
+model.6.cv1.conv                     & 0.18 & 30.769  & 296.6 & Compute-bound \\
+model.6.m.0.cv1.conv                 & 0.24 & 122.034 & 494.4 & Compute-bound \\
+model.6.m.0.cv2.conv                 & 0.23 & 122.034 & 502.4 & Compute-bound \\
+model.6.m.1.cv1.conv                 & 0.24 & 122.034 & 501.2 & Compute-bound \\
+model.6.m.1.cv2.conv                 & 0.23 & 122.034 & 502.4 & Compute-bound \\
+model.6.cv2.conv                     & 0.23 & 40.506  & 462.6 & Compute-bound \\
+model.7.conv                         & 0.52 & 97.959  & 455.0 & Compute-bound \\
+model.8.cv1.conv                     & 0.18 & 48.485  & 284.6 & Compute-bound \\
+model.8.m.0.cv1.conv                 & 0.34 & 118.033 & 351.1 & Compute-bound \\
+model.8.m.0.cv2.conv                 & 0.33 & 118.033 & 358.1 & Compute-bound \\
+model.8.cv2.conv                     & 0.19 & 55.491  & 424.5 & Compute-bound \\
+model.9.cv1.conv                     & 0.19 & 35.165  & 136.6 & Compute-bound \\
+model.9.cv2.conv                     & 0.18 & 59.813  & 577.3 & Compute-bound \\
+model.12.cv1.conv                    & 0.24 & 45.283  & 647.4 & Compute-bound \\
+model.12.m.0.cv1.conv                & 0.25 & 122.034 & 480.6 & Compute-bound \\
+model.12.m.0.cv2.conv                & 0.24 & 122.034 & 499.3 & Compute-bound \\
+model.12.cv2.conv                    & 0.20 & 36.641  & 396.8 & Compute-bound \\
+model.15.cv1.conv                    & 0.26 & 23.821  & 601.7 & Compute-bound \\
+model.15.m.0.cv1.conv                & 0.56 & 70.416  & 209.2 & Compute-bound \\
+model.15.m.0.cv2.conv                & 0.55 & 70.416  & 213.2 & Compute-bound \\
+model.15.cv2.conv                    & 0.21 & 19.085  & 372.1 & Compute-bound \\
+model.16.conv                        & 0.28 & 53.731  & 417.4 & Compute-bound \\
+model.18.cv1.conv                    & 0.20 & 36.641  & 402.2 & Compute-bound \\
+model.18.m.0.cv1.conv                & 0.24 & 122.034 & 488.6 & Compute-bound \\
+model.18.m.0.cv2.conv                & 0.24 & 122.034 & 498.5 & Compute-bound \\
+model.18.cv2.conv                    & 0.20 & 36.641  & 402.5 & Compute-bound \\
+model.19.conv                        & 0.36 & 73.096  & 327.2 & Compute-bound \\
+model.21.cv1.conv                    & 0.18 & 55.491  & 426.3 & Compute-bound \\
+model.21.m.0.cv1.conv                & 0.34 & 118.033 & 351.7 & Compute-bound \\
+model.21.m.0.cv2.conv                & 0.33 & 118.033 & 361.8 & Compute-bound \\
+model.21.cv2.conv                    & 0.18 & 55.491  & 429.7 & Compute-bound \\
+model.22.cv2.0.0.conv                & 0.57 & 137.799 & 830.1 & Compute-bound \\
+model.22.cv2.0.1.conv                & 0.56 & 137.799 & 842.6 & Compute-bound \\
+model.22.cv2.0.2                     & 0.26 & 15.919  & 205.0 & Knee / transition \\
+model.22.cv2.1.0.conv                & 0.45 & 154.839 & 524.0 & Compute-bound \\
+model.22.cv2.1.1.conv                & 0.24 & 122.034 & 493.1 & Compute-bound \\
+model.22.cv2.1.2                     & 0.22 & 15.681  & 58.7  & Knee / transition \\
+model.22.cv2.2.0.conv                & 0.41 & 107.063 & 288.2 & Compute-bound \\
+model.22.cv2.2.1.conv                & 0.21 & 83.721  & 139.2 & Compute-bound \\
+model.22.cv2.2.2                     & 0.22 & 14.798  & 14.9  & Knee / transition \\
+model.22.cv3.0.0.conv                & 0.66 & 152.381 & 891.4 & Compute-bound \\
+model.22.cv3.0.1.conv                & 0.83 & 170.414 & 892.5 & Compute-bound \\
+model.22.cv3.0.2                     & 0.29 & 19.874  & 284.8 & Compute-bound \\
+model.22.cv3.1.0.conv                & 0.42 & 173.494 & 707.2 & Compute-bound \\
+model.22.cv3.1.1.conv                & 0.39 & 146.939 & 471.0 & Compute-bound \\
+model.22.cv3.1.2                     & 0.22 & 19.506  & 91.9  & Compute-bound \\
+model.22.cv3.2.0.conv                & 0.38 & 115.663 & 385.9 & Compute-bound \\
+model.22.cv3.2.1.conv                & 0.25 & 94.737  & 184.1 & Compute-bound \\
+model.22.cv3.2.2                     & 0.22 & 18.161  & 22.8  & Compute-bound \\
+model.22.dfl.conv                    & 0.27 & 0.471   & 3.9   & Strongly memory-bound \\
+\midrule
+Full Model (THOP)                    & 26.02 & 157.765 & 170.22 & Mixed / Overhead-dominated \\
+
+\end{longtable}
+\endgroup
 
 \chapter{Demonstration (Appendix B)}
 
     YOLOv8n summary: 129 layers, 3,157,200 parameters, 0 gradients, 8.9 GFLOPs.
-
-
 
 
     \begin{figure}[h]
