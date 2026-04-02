@@ -1034,6 +1034,11 @@ v8x & 479.1 & 3.53 & 68.2 & 257.8 \\
 While vendor specifications indicate that the Raspberry Pi 5 provides up to 17\,GB/s of memory bandwidth~\cite{raspberrypi_processors},
 and the Jetson Orin Nano offers up to 102\,GB/s~\cite{nvidia_jetson_orin_datasheet},
 measured performance is often significantly lower in practice.
+
+
+\subsection{Roofline Analysis on Raspberry Pi 5}
+
+
 Using the methodology described in Chapter~\ref{chap:literature}, the sustained memory bandwidth of the Raspberry Pi 5
 was measured at 9.14\,GB/s, and peak compute throughput at 69.86\,GFLOP/s.
 
@@ -1044,7 +1049,7 @@ P(I) = \min\left(69.86,\; 9.14 \cdot I\right),
 with a ridge point at approximately 7.6 FLOPs/byte, separating memory-bound and compute-bound regimes.
 
 Table~\ref{tab:roofline_pi5_layers} summarizes representative per-layer performance characteristics
-of YOLOv8n executed on the Raspberry Pi 5 CPU.
+of YOLOv8n executed on the Raspberry Pi 5 CPU with the use of eager mode of Pytorch Framework.
 
 Layers with low arithmetic intensity (AI $\approx$ 7--8 FLOPs/byte) achieve limited performance
 (3--6\,GFLOP/s), indicating memory-bound behavior. In contrast, deeper convolutional layers
@@ -1117,6 +1122,80 @@ In contrast, deeper layers operate on progressively smaller feature maps (e.g., 
 or 20$\times$20), allowing their activations to fit within the L3 cache. This improves data
 locality and reuse, enabling higher arithmetic intensity and more efficient utilization of
 compute resources, which is consistent with the observed transition to compute-bound behavior.
+
+\subsection{Roofline Analysis on Jetson Orin Nano}
+
+The same analysis was performed on the NVIDIA Jetson Orin Nano GPU.
+Measured sustained memory bandwidth was 25.42\,GB/s, and peak compute
+throughput reached 810.69\,GFLOP/s.
+
+The resulting Roofline model is defined as:
+\[
+P(I) = \min\left(810.69,\; 25.42 \cdot I\right),
+\]
+with a ridge point at:
+\[
+I^* = \frac{810.69}{25.42} \approx 31.9 \text{ FLOPs/byte}.
+\]
+
+Compared to the Raspberry Pi 5, the Orin Nano exhibits both significantly
+higher compute throughput and higher memory bandwidth, shifting the ridge
+point to higher arithmetic intensity. As a result, a larger fraction of
+YOLOv8n layers operates in the compute-bound regime.
+
+\begin{table}[ht]
+\centering
+\caption{Representative per-layer performance statistics of YOLOv8n on Jetson Orin Nano (GPU, FP32).}
+\label{tab:roofline_orin_layers}
+
+\begin{tabularx}{\textwidth}{l c c c X}
+\toprule
+Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
+\midrule
+model.0.conv              & 0.85 & 7.71   & 104.1 & Memory-bound \\
+model.2.cv1.conv          & 0.26 & 7.99   & 200.8 & Memory-bound \\
+model.4.m.0.cv2.conv      & 0.56 & 70.42  & 212.3 & Compute-bound \\
+model.6.m.1.cv2.conv      & 0.24 & 122.03 & 486.9 & Compute-bound \\
+model.12.m.0.cv2.conv     & 0.24 & 122.03 & 497.5 & Compute-bound \\
+model.22.cv2.0.1.conv     & 0.56 & 137.80 & 843.7 & Compute-bound \\
+model.22.cv3.0.1.conv     & 0.83 & 170.41 & 887.9 & Compute-bound \\
+model.22.dfl.conv         & 0.28 & 0.47   & 3.9   & Strongly memory-bound \\
+\midrule
+Full Model                & 25.77 & 157.76 & 171.86 & Mixed / Overhead-dominated \\
+\bottomrule
+\end{tabularx}
+
+\end{table}
+
+The full model achieves 171.86\,GFLOP/s, corresponding to approximately
+21\% of peak compute throughput, which is higher than the Raspberry Pi 5
+but still far from the theoretical limit.
+
+Per-layer analysis shows that many convolutional layers achieve
+200–600\,GFLOP/s, with several layers approaching or exceeding
+800\,GFLOP/s. These high-intensity layers (AI $>$ 100 FLOPs/byte)
+clearly operate in the compute-bound regime.
+
+However, low-intensity layers, such as the DFL convolution
+(AI $\approx$ 0.47), remain strongly memory-bound, achieving only
+3.9\,GFLOP/s.
+
+\begin{figure}[!h]
+    \centering
+    \includegraphics[width=1\linewidth]{pics/roofline_orin_cuda:0_20260402_134606.pdf}
+    \caption{Roofline model of YOLOv8n on Jetson Orin Nano (GPU, FP32).}
+    \label{fig:roofline_orin}
+\end{figure}
+
+Table~\ref{tab:roofline_orin_layers} highlights that, compared to the Raspberry Pi 5,
+the majority of convolutional layers on the Orin Nano operate in the compute-bound
+regime, achieving substantially higher performance due to the increased compute capacity
+and memory bandwidth of the GPU.
+
+However, low–arithmetic-intensity layers, such as the DFL convolution, remain strongly
+memory-bound even on this more capable platform. Additionally, despite high per-layer
+performance, the overall model achieves only 171.86\,GFLOP/s, indicating the presence
+of system-level overhead and non-compute-dominated operations.
 
 
     %Macbook Pro M3 has declared 150GB/s memory bandwidth ~\cite{apple_memspecs}.
