@@ -1,10 +1,10 @@
 run:
-  name: "yolov8n_orin_gpu_fp32"
+  name: "yolov8n_orin_gpu_fp16"
   out_dir: "./optimizer/tvm_runner/out/experiments"
   seed: 0
 
 model:
-  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"
+  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_fp16.onnx"
   pt_path: "../models/yolov8n.pt"
   imgsz: 640
   batch: 1
@@ -24,17 +24,17 @@ device:
     #num_cores: 6
 
 precision:
-  name: "fp32"            # "fp32" | "fp16"
+  name: "fp16"            # "fp32" | "fp16"
 
 tvm:
-  log_dir: "./optimizer/tvm_runner/out/tvm_tuning_logs/tuning_yolov8n_orin_gpu_03"
+  log_dir: "./optimizer/tvm_runner/out/tvm_tuning_logs/yolov8n_orin_gpu_fp16_v1"
   use_existing_db: true   # compile can reuse DB without tuning
-  max_trials_global: 10000
-  max_trials_per_task: 150
-  num_trials_per_iter: 64
+  max_trials_global: 1
+  max_trials_per_task: 2
+  num_trials_per_iter: 5
   timeout_builder_s: 300
   timeout_runner_s: 300
-  export_path: "tvm_yolov8n_gpu_one_round_66_tasks_v6.so" #"./out/tvm_compiled_models/yolov8n_orin_gpu_fp32_v2.so"
+  export_path: "../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_float16_v7.so" #"./out/tvm_compiled_models/yolov8n_orin_gpu_fp32_v2.so"
 
 tvm_targeted_tuning:
   enable: false
@@ -50,5 +50,5 @@ onnxruntime:
   trt:
     enable_engine_cache: true
     engine_cache_path: "./optimizer/tvm_runner/out/experiments/trt_cache/trt_current"
-    fp16_enable: false
+    fp16_enable: true
   use_arena: true # Default: True; if None: True; Otherwise: val; 
