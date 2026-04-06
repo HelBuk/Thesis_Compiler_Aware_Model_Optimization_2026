@@ -1,0 +1,558 @@
+Run1:
+2026-02-27 13:00:07 [INFO] Logging directory: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03/logs
+ONNX_MODEL_PATH = "../../models/yolov8n.onnx"
+LOG_DIR = "../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03"
+RUN_TUNING = True  
+RUN_COMPILATION = True
+EXPORT_MODEL = True
+try_device = 'gpu' 
+max_trials_global=132
+max_trials_per_task=2
+num_trials_per_iter=1
+timeout_sec_builder=300
+timeout_sec_runner=180
+PATH_TO_COMPILED_MODEL = export_path
+BENCH_RUNS = 10
+ex = None
+target = tvm.target.Target({
+                "kind": "cuda",
+                "arch": f"sm_{cc_major}{cc_minor}",
+                "max_num_threads": 1024,
+                "max_threads_per_block": 1024,
+                "thread_warp_size": 32,
+                "max_shared_memory_per_block": 49152,
+                "registers_per_block": 65536,
+                "host": {
+                    "kind": "llvm",
+                    "mtriple": "aarch64-linux-gnu",
+                    "mcpu": "cortex-a78",
+                },
+            })
+
+2026-02-27 15:09:49 [INFO] [task_scheduler.cc:332] 
+ ID |                                                                                                                                                                 Name |      FLOP | Weight | Speed (GFLOPS) | Latency (us) | Weighted Latency (us) | Trials | Done 
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  0 |                                                                                                                                                             conv2d40 |   1075200 |      1 |        27.8836 |      38.5603 |               38.5603 |      2 |    Y 
+  1 |                                                                                                                                                           transpose1 |         1 |      1 |         0.0000 |     312.7851 |              312.7851 |      1 |    Y 
+  2 |                                                                                                                                                              softmax |   2150400 |      1 |         1.1051 |    1945.9633 |             1945.9633 |      2 |    Y 
+  3 |                                                                                                                                                 fused_conv2d39_add16 |   5152000 |      1 |        61.7097 |      83.4876 |               83.4876 |      2 |    Y 
+  4 |                                                                                                                                                 fused_conv2d38_add15 |   3302400 |      1 |        60.1162 |      54.9336 |               54.9336 |      2 |    Y 
+  5 |                                                                                                                    fused_conv2d15_add11_tir_sigmoid8_multiply8_add12 | 118118400 |      1 |       240.3076 |     491.5300 |              491.5300 |      2 |    Y 
+  6 |                                                                                                   fused_reshape6_reshape7_reshape8_concatenate11_reshape12_transpose |         1 |      1 |         0.0000 |     902.5634 |              902.5634 |      1 |    Y 
+  7 |                                                                                                                      fused_conv2d11_add8_tir_sigmoid6_multiply6_add9 | 118272000 |      2 |       311.3780 |     379.8342 |              759.6683 |      2 |    Y 
+  8 |                                                                                                                          fused_conv2d15_add11_tir_sigmoid8_multiply8 | 118067200 |      3 |       106.8000 |    1105.4977 |             3316.4931 |      2 |    Y 
+  9 |                                                                                                                                    fused_strided_slice5_concatenate2 |         1 |      1 |         0.0000 |     107.9574 |              107.9574 |      1 |    Y 
+ 10 |                                                                                                                                                   fused_conv2d6_add4 |  52838400 |      1 |        42.2471 |    1250.6992 |             1250.6992 |      2 |    Y 
+ 11 |                                                                                                                                                         concatenate9 |         1 |      1 |         0.0000 |      89.7639 |               89.7639 |      1 |    Y 
+ 12 |                                                                                                                          fused_conv2d16_add10_tir_sigmoid7_multiply7 |  78848000 |      3 |       278.0741 |     283.5504 |              850.6511 |      2 |    Y 
+ 13 |                                                                                                                            fused_conv2d6_add4_tir_sigmoid3_multiply3 |  53248000 |      1 |        81.5240 |     653.1576 |              653.1576 |      2 |    Y 
+ 14 |                                                                                                                            fused_conv2d8_add4_tir_sigmoid3_multiply3 | 105676800 |      1 |       159.5692 |     662.2632 |              662.2632 |      2 |    Y 
+ 15 |                                                                                                                                    fused_strided_slice7_concatenate3 |         1 |      2 |         0.0001 |      19.6051 |               39.2102 |      2 |    Y 
+ 16 |                                                                                                                                                 fused_conv2d27_add13 |  82432000 |      1 |       120.9996 |     681.2583 |              681.2583 |      2 |    Y 
+ 17 |                                                                                                                           fused_conv2d11_add8_tir_sigmoid6_multiply6 | 118169600 |      7 |       380.4037 |     310.6427 |             2174.4986 |      2 |    Y 
+ 18 |                                                                                                                            fused_conv2d9_add7_tir_sigmoid5_multiply5 | 236339200 |      1 |        10.4373 |   22643.6858 |            22643.6858 |      2 |    Y 
+ 19 |                                                                                                                            fused_conv2d5_add4_tir_sigmoid3_multiply3 | 236748800 |      1 |        65.5217 |    3613.2885 |             3613.2885 |      2 |    Y 
+ 20 |                                                                                                                           fused_conv2d21_add4_tir_sigmoid3_multiply3 | 158105600 |      1 |       139.6076 |    1132.4998 |             1132.4998 |      2 |    Y 
+ 21 |                                                                                                                          fused_conv2d13_add10_tir_sigmoid7_multiply7 | 236134400 |      1 |       249.7529 |     945.4720 |              945.4720 |      2 |    Y 
+ 22 |                                                                                                                                                       strided_slice6 |         1 |      2 |         0.0001 |      10.0055 |               20.0110 |      2 |    Y 
+ 23 |                                                                                                                            fused_conv2d7_add5_tir_sigmoid4_multiply4 | 118374400 |      4 |        74.9814 |    1578.7169 |             6314.8677 |      2 |    Y 
+ 24 |                                                                                                                            fused_conv2d1_add1_tir_sigmoid1_multiply1 | 237568000 |      1 |       266.8287 |     890.3392 |              890.3392 |      2 |    Y 
+ 25 |                                                                                                                                                        strided_slice |         1 |      1 |         0.0000 |     104.5670 |              104.5670 |      1 |    Y 
+ 26 |                                                                                                                                                         concatenate4 |         1 |      1 |         0.0000 |      26.7593 |               26.7593 |      2 |    Y 
+ 27 |                                                                                                                                    fused_strided_slice3_concatenate1 |         1 |      1 |         0.0000 |     186.0093 |              186.0093 |      1 |    Y 
+ 28 | fused_reshape9_reshape10_reshape11_concatenate12_reshape13_multiply13_strided_slice8_strided_slice9_subtract_add17_add17_divide_subtract_tir_sigmoid13_concatenate13 |    117600 |      1 |         0.4711 |     249.6094 |              249.6094 |      1 |    Y 
+ 29 |                                                                                                                           fused_conv2d12_add7_tir_sigmoid5_multiply5 | 105267200 |      1 |       305.8729 |     344.1534 |              344.1534 |      2 |    Y 
+ 30 |                                                                                                                                    fused_strided_slice5_concatenate6 |         1 |      2 |         0.0000 |      87.9236 |              175.8473 |      1 |    Y 
+ 31 |                                                                                                                            fused_conv2d2_add1_tir_sigmoid1_multiply1 |  54067200 |      1 |        21.5106 |    2513.5176 |             2513.5176 |      2 |    Y 
+ 32 |                                                                                                                                     fused_strided_slice1_concatenate |         1 |      1 |         0.0000 |     256.8303 |              256.8303 |      1 |    Y 
+ 33 |                                                                                                                          fused_conv2d18_add10_tir_sigmoid7_multiply7 | 105062400 |      1 |       237.1047 |     443.1056 |              443.1056 |      2 |    Y 
+ 34 |                                                                                                                            fused_conv2d4_add1_tir_sigmoid1_multiply1 |  80281600 |      1 |        95.2145 |     843.1655 |              843.1655 |      2 |    Y 
+ 35 |                                                                                                                          fused_conv2d14_add10_tir_sigmoid7_multiply7 |  52633600 |      1 |       276.4022 |     190.4240 |              190.4240 |      2 |    Y 
+ 36 |                                                                                                                                fused_conv2d_add_tir_sigmoid_multiply |  91750400 |      1 |       118.4145 |     774.8238 |              774.8238 |      2 |    Y 
+ 37 |                                                                                                                        fused_conv2d35_add16_tir_sigmoid12_multiply12 | 147520000 |      1 |       210.8807 |     699.5426 |              699.5426 |      2 |    Y 
+ 38 |                                                                                                                                                       strided_slice4 |         1 |      3 |         0.0001 |      13.7205 |               41.1616 |      2 |    Y 
+ 39 |                                                                                                                           fused_conv2d20_add7_tir_sigmoid5_multiply5 |  79052800 |      3 |        80.2542 |     985.0298 |             2955.0894 |      2 |    Y 
+ 40 |                                                                                                                                                       strided_slice2 |         1 |      2 |         0.0000 |      22.4030 |               44.8060 |      2 |    Y 
+ 41 |                                                                                                                       fused_conv2d3_add2_tir_sigmoid2_multiply2_add3 | 119193600 |      1 |       182.9574 |     651.4828 |              651.4828 |      2 |    Y 
+ 42 |                                                                                                                       fused_conv2d7_add5_tir_sigmoid4_multiply4_add6 | 118579200 |      2 |       250.4596 |     473.4465 |              946.8929 |      2 |    Y 
+ 43 |                                                                                                                          fused_conv2d17_add11_tir_sigmoid8_multiply8 |  26316800 |      1 |       124.3205 |     211.6851 |              211.6851 |      2 |    Y 
+ 44 |                                                                                                                                                           max_pool2d |   1280000 |      3 |        30.0315 |      42.6219 |              127.8658 |      2 |    Y 
+ 45 |                                                                                                                                          fused_resize2d_concatenate5 |         1 |      1 |         0.0000 |     151.6034 |              151.6034 |      1 |    Y 
+ 46 |                                                                                                                           fused_conv2d10_add7_tir_sigmoid5_multiply5 |  52838400 |      1 |        82.8587 |     637.6930 |              637.6930 |      2 |    Y 
+ 47 |                                                                                                                           fused_conv2d23_add8_tir_sigmoid6_multiply6 | 118169600 |      1 |        31.0350 |    3807.6233 |             3807.6233 |      2 |    Y 
+ 48 |                                                                                                                           fused_conv2d19_add7_tir_sigmoid5_multiply5 | 157696000 |      1 |       288.9322 |     545.7889 |              545.7889 |      2 |    Y 
+ 49 |                                                                                                                                         fused_resize2d1_concatenate7 |         1 |      1 |         0.0000 |     269.6194 |              269.6194 |      1 |    Y 
+ 50 |                                                                                                                                    fused_strided_slice3_concatenate8 |         1 |      1 |         0.0000 |     145.0751 |              145.0751 |      1 |    Y 
+ 51 |                                                                                                                           fused_conv2d22_add4_tir_sigmoid3_multiply3 |  79462400 |      1 |       162.0613 |     490.3232 |              490.3232 |      2 |    Y 
+ 52 |                                                                                                                           fused_conv2d24_add4_tir_sigmoid3_multiply3 | 472678400 |      2 |       395.8235 |    1194.1645 |             2388.3290 |      2 |    Y 
+ 53 |                                                                                                                        fused_conv2d36_add15_tir_sigmoid11_multiply11 |  29542400 |      1 |       102.3885 |     288.5323 |              288.5323 |      2 |    Y 
+ 54 |                                                                                                                          fused_conv2d25_add13_tir_sigmoid9_multiply9 | 590848000 |      1 |       173.0070 |    3415.1672 |             3415.1672 |      2 |    Y 
+ 55 |                                                                                                                          fused_conv2d26_add13_tir_sigmoid9_multiply9 | 738304000 |      1 |        26.2154 |   28163.0325 |            28163.0325 |      2 |    Y 
+ 56 |                                                                                                                            fused_conv2d3_add2_tir_sigmoid2_multiply2 | 118784000 |      1 |        30.5219 |    3891.7679 |             3891.7679 |      2 |    Y 
+ 57 |                                                                                                                          fused_conv2d28_add11_tir_sigmoid8_multiply8 | 118067200 |      1 |        15.6775 |    7531.0036 |             7531.0036 |      2 |    Y 
+ 58 |                                                                                                                           fused_conv2d29_add8_tir_sigmoid6_multiply6 | 236134400 |      1 |        16.4923 |   14317.8373 |            14317.8373 |      2 |    Y 
+ 59 |                                                                                                                                                        concatenate10 |         1 |      1 |         0.0001 |      19.5172 |               19.5172 |      2 |    Y 
+ 60 |                                                                                                                        fused_conv2d30_add14_tir_sigmoid10_multiply10 | 295168000 |      1 |        18.3438 |   16090.9270 |            16090.9270 |      2 |    Y 
+ 61 |                                                                                                                        fused_conv2d31_add14_tir_sigmoid10_multiply10 | 184576000 |      1 |       302.9073 |     609.3481 |              609.3481 |      2 |    Y 
+ 62 |                                                                                                                                                  fused_conv2d32_add8 |  13209600 |      1 |        33.7202 |     391.7416 |              391.7416 |      2 |    Y 
+ 63 |                                                                                                                        fused_conv2d37_add16_tir_sigmoid12_multiply12 |  46144000 |      1 |       108.1672 |     426.5986 |              426.5986 |      2 |    Y 
+ 64 |                                                                                                                                                 fused_conv2d33_add14 |  20608000 |      1 |       155.8202 |     132.2550 |              132.2550 |      2 |    Y 
+ 65 |                                                                                                                        fused_conv2d34_add15_tir_sigmoid11_multiply11 | 118016000 |      1 |       169.4033 |     696.6570 |              696.6570 |      2 |    Y 
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Total trials: 120
+Total latency (us): 146173
+
+[15:09:49] [INFO] Start compilation
+[15:09:49] [INFO] Applying MetaSchedule from ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03
+[15:09:49] /home/helbuk/Documents/tvm/src/relax/transform/meta_schedule.cc:93: Warning: Creating JSONDatabase. Workload at: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03/database_workload.json, Tuning records at: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03/database_tuning_record.json
+[15:12:12] [INFO] Using ../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v2.so to run inference
+[15:12:12] [INFO] Starting to benchmark
+TVM 145.96828219946474 6.85080337270467
+PyTorch 24.039186097797938 41.5987461443881
+ONNX Runtime 146.82474799919873 6.8108409081380294
+ORT providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+TVM CUDA: True
+TensorRT (ORT EP) 11.21451559884008 89.17014660030704
+(tvm) helbuk@nvidia:~/Documents/Thesis_Compiler_Aware_Model_Optimization_2026/thesis2026-project/src/thesis2026_project$ 
+
+
+Run2:
+2026-02-27 15:39:43 [INFO] Logging directory: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03/logs
+    ONNX_MODEL_PATH = "../../models/yolov8n.onnx"
+    LOG_DIR = "../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03"
+    RUN_TARGETED_TUNING = True 
+    MISSING_OP = [
+        'fused_conv2d7_add5_tir_sigmoid4_multiply4',
+        'fused_conv2d5_add4_tir_sigmoid3_multiply3',
+        'fused_conv2d39_add16',
+        'fused_conv2d38_add15',
+        'fused_conv2d6_add4',
+        'fused_conv2d32_add8',
+        'fused_conv2d23_add8_tir_sigmoid6_multiply6',
+        'max_pool2d',
+        'fused_conv2d3_add2_tir_sigmoid2_multiply2',
+        'conv2d40', 'fused_conv2d26_add13_tir_sigmoid9_multiply9',
+                    'fused_conv2d2_add1_tir_sigmoid1_multiply1', 
+                    'fused_conv2d30_add14_tir_sigmoid10_multiply10',
+                    'fused_conv2d29_add8_tir_sigmoid6_multiply6',
+                    'fused_conv2d28_add11_tir_sigmoid8_multiply8',
+                    'fused_conv2d9_add7_tir_sigmoid5_multiply5',
+                    'fused_reshape9_reshape10_reshape11_concatenate12_reshape13_multiply13_strided_slice8_strided_slice9_subtract_add17_add17_divide_subtract_tir_sigmoid13_concatenate13'
+    ]
+    RUN_COMPILATION = True  
+    EXPORT_MODEL = True
+    try_device = 'gpu' 
+    export_path = "../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v3.so"
+    max_trials_global=1500
+    max_trials_per_task=64
+    num_trials_per_iter=64
+    timeout_sec_builder=300
+    timeout_sec_runner=300
+    PATH_TO_COMPILED_MODEL = export_path
+    BENCH_RUNS = 10
+    ex = None
+    target = tvm.target.Target({
+                "kind": "cuda",
+                "arch": f"sm_{cc_major}{cc_minor}",
+                "max_num_threads": 1024,
+                "max_threads_per_block": 1024,
+                "thread_warp_size": 32,
+                "max_shared_memory_per_block": 49152,
+                "registers_per_block": 65536,
+                "host": {
+                    "kind": "llvm",
+                    "mtriple": "aarch64-linux-gnu",
+                    "mcpu": "cortex-a78",
+                },
+            })
+
+2026-02-27 16:48:04 [INFO] [task_scheduler.cc:192] TaskScheduler picks Task #2: "fused_conv2d38_add15"
+2026-02-27 16:48:04 [INFO] [task_scheduler.cc:272] Task #2 has finished. Remaining task(s): 0
+2026-02-27 16:48:04 [INFO] [task_scheduler.cc:332] 
+ ID |                                                                                                                                                                 Name |      FLOP | Weight | Speed (GFLOPS) | Latency (us) | Weighted Latency (us) | Trials | Done 
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  0 |                                                                                                                                                             conv2d40 |   1075200 |      1 |        31.3227 |      34.3266 |               34.3266 |     64 |    Y 
+  1 |                                                                                                                                                 fused_conv2d39_add16 |   5152000 |      1 |       201.5933 |      25.5564 |               25.5564 |     64 |    Y 
+  2 |                                                                                                                                                 fused_conv2d38_add15 |   3302400 |      1 |       182.5590 |      18.0895 |               18.0895 |     64 |    Y 
+  3 |                                                                                                                                                   fused_conv2d6_add4 |  52838400 |      1 |       365.6547 |     144.5035 |              144.5035 |     64 |    Y 
+  4 |                                                                                                                            fused_conv2d6_add4_tir_sigmoid3_multiply3 |  53248000 |      1 |       203.1668 |     262.0901 |              262.0901 |     64 |    Y 
+  5 |                                                                                                                            fused_conv2d6_add4_tir_sigmoid3_multiply3 |  53248000 |      1 |       224.1050 |     237.6030 |              237.6030 |     64 |    Y 
+  6 |                                                                                                                            fused_conv2d9_add7_tir_sigmoid5_multiply5 | 236339200 |      1 |       276.1814 |     855.7390 |              855.7390 |     64 |    Y 
+  7 |                                                                                                                            fused_conv2d5_add4_tir_sigmoid3_multiply3 | 236748800 |      1 |       252.5570 |     937.4073 |              937.4073 |     64 |    Y 
+  8 |                                                                                                                            fused_conv2d7_add5_tir_sigmoid4_multiply4 | 118374400 |      4 |       353.9344 |     334.4530 |             1337.8119 |     64 |    Y 
+  9 | fused_reshape9_reshape10_reshape11_concatenate12_reshape13_multiply13_strided_slice8_strided_slice9_subtract_add17_add17_divide_subtract_tir_sigmoid13_concatenate13 |    117600 |      1 |         0.4727 |     248.8082 |              248.8082 |      1 |    Y 
+ 10 |                                                                                                                            fused_conv2d2_add1_tir_sigmoid1_multiply1 |  54067200 |      1 |       122.2344 |     442.3240 |              442.3240 |     64 |    Y 
+ 11 |                                                                                                                       fused_conv2d3_add2_tir_sigmoid2_multiply2_add3 | 119193600 |      1 |       346.0419 |     344.4484 |              344.4484 |     64 |    Y 
+ 12 |                                                                                                                       fused_conv2d3_add2_tir_sigmoid2_multiply2_add3 | 119193600 |      1 |       308.7011 |     386.1133 |              386.1133 |     64 |    Y 
+ 13 |                                                                                                                       fused_conv2d7_add5_tir_sigmoid4_multiply4_add6 | 118579200 |      2 |       391.4305 |     302.9381 |              605.8762 |     64 |    Y 
+ 14 |                                                                                                                       fused_conv2d7_add5_tir_sigmoid4_multiply4_add6 | 118579200 |      2 |       277.1000 |     427.9292 |              855.8584 |     64 |    Y 
+ 15 |                                                                                                                                                           max_pool2d |   1280000 |      3 |        62.5748 |      20.4555 |               61.3665 |     64 |    Y 
+ 16 |                                                                                                                           fused_conv2d23_add8_tir_sigmoid6_multiply6 | 118169600 |      1 |       347.2271 |     340.3237 |              340.3237 |     64 |    Y 
+ 17 |                                                                                                                          fused_conv2d26_add13_tir_sigmoid9_multiply9 | 738304000 |      1 |       445.3509 |    1657.8030 |             1657.8030 |     64 |    Y 
+ 18 |                                                                                                                            fused_conv2d3_add2_tir_sigmoid2_multiply2 | 118784000 |      1 |       265.2666 |     447.7910 |              447.7910 |     64 |    Y 
+ 19 |                                                                                                                          fused_conv2d28_add11_tir_sigmoid8_multiply8 | 118067200 |      1 |       301.8994 |     391.0813 |              391.0813 |     64 |    Y 
+ 20 |                                                                                                                           fused_conv2d29_add8_tir_sigmoid6_multiply6 | 236134400 |      1 |       389.6147 |     606.0716 |              606.0716 |     64 |    Y 
+ 21 |                                                                                                                        fused_conv2d30_add14_tir_sigmoid10_multiply10 | 295168000 |      1 |       448.4770 |     658.1563 |              658.1563 |     64 |    Y 
+ 22 |                                                                                                                                                  fused_conv2d32_add8 |  13209600 |      1 |       288.3609 |      45.8093 |               45.8093 |     64 |    Y 
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Total trials: 1409
+Total latency (us): 10945
+
+[16:48:09] [INFO] Start compilation
+[16:48:09] [INFO] Applying MetaSchedule from ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03
+[16:48:09] /home/helbuk/Documents/tvm/src/relax/transform/meta_schedule.cc:93: Warning: Creating JSONDatabase. Workload at: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03/database_workload.json, Tuning records at: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03/database_tuning_record.json
+[16:50:21] [INFO] Using ../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v3.so to run inference
+[16:50:21] [INFO] Starting to benchmark
+TVM 42.71172800217755 23.412773183726433
+PyTorch 24.736756601487286 40.42567164766764
+ONNX Runtime 145.36579120031092 6.879197586604276
+ORT providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+TVM CUDA: True
+TensorRT (ORT EP) 14.006798499030992 71.39390204472359
+
+Ex3:
+
+    print("script started")
+    ONNX_MODEL_PATH = "../../models/yolov8n.onnx"
+    LOG_DIR = "../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03"
+    RUN_TUNING = False  # set False after this op gets non-N/A
+    RUN_TARGETED_TUNING = True  # set False after this op gets non-N/A
+    MISSING_OP = [
+        'conv2d40'
+    ] #['fused_conv2d13_add10_tir_sigmoid7_multiply7',
+                    #'fused_conv2d_add_tir_sigmoid_multiply'] 
+    #None #"fused_conv2d34_add15_tir_sigmoid11_multiply11"
+    RUN_COMPILATION = True  # set False after this op gets non-N/A # Has to be set for RUN_DEFAULT_INFERENCE
+    RUN_DEFAULT_INFERENCE = False
+    EXPORT_MODEL = True
+    try_device = 'gpu' # 'cpu'
+    # export_path = get_next_versioned_path(
+    #     "../../models/compiled_tvm_models/tvm_yolov8n.so"
+    # )
+    export_path = "../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v4.so"
+    max_trials_global=64
+    max_trials_per_task=64
+    num_trials_per_iter=16
+    timeout_sec_builder=30
+    timeout_sec_runner=30
+
+    PATH_TO_COMPILED_MODEL = export_path
+    BENCH_RUNS = 200
+    ex = None
+
+2026-02-27 17:15:37 [INFO] [task_scheduler.cc:272] Task #0 has finished. Remaining task(s): 0
+2026-02-27 17:15:37 [INFO] [task_scheduler.cc:332] 
+ ID |     Name |    FLOP | Weight | Speed (GFLOPS) | Latency (us) | Weighted Latency (us) | Trials | Done 
+----------------------------------------------------------------------------------------------------------
+  0 | conv2d40 | 1075200 |      1 |        30.0759 |      35.7495 |               35.7495 |     64 |    Y 
+----------------------------------------------------------------------------------------------------------
+Total trials: 64
+Total latency (us): 35.7495
+
+[17:15:40] [INFO] Start compilation
+[17:15:40] [INFO] Applying MetaSchedule from ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03
+[17:15:40] /home/helbuk/Documents/tvm/src/relax/transform/meta_schedule.cc:93: Warning: Creating JSONDatabase. Workload at: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03/database_workload.json, Tuning records at: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03/database_tuning_record.json
+[17:17:53] [INFO] Using ../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v4.so to run inference
+[17:17:53] [INFO] Starting to benchmark
+TVM 42.61040657002013 23.468445398584414
+PyTorch 24.182650430011563 41.35196027805799
+ONNX Runtime 145.79667581492686 6.85886694199662
+ORT providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+TVM CUDA: True
+TensorRT (ORT EP) 9.57214207504876 104.46982422112724
+
+
+Ex4:
+
+2026-02-28 01:09:34 [INFO] Logging directory: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03/logs
+ONNX_MODEL_PATH = "../../models/yolov8n.onnx"
+    LOG_DIR = "../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_03"
+    RUN_TUNING = True 
+    MISSING_OP = None 
+    RUN_COMPILATION = True 
+    EXPORT_MODEL = True
+    try_device = 'gpu'
+    export_path = "../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v5.so"
+    max_trials_global=10000
+    max_trials_per_task=160
+    num_trials_per_iter=16
+    timeout_sec_builder=300
+    timeout_sec_runner=300
+
+    PATH_TO_COMPILED_MODEL = export_path
+    BENCH_RUNS = 200
+    ex = None
+
+    !!! Died
+
+    2026-02-28 07:38:05 [INFO] [task_scheduler.cc:332] 
+    ID |                                                                                                                                                                 Name |      FLOP | Weight | Speed (GFLOPS) | Latency (us) | Weighted Latency (us) | Trials | Done 
+    ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    0 |                                                                                                                                                             conv2d40 |   1075200 |      1 |        26.2274 |      40.9952 |               40.9952 |     16 |      
+    1 |                                                                                                                                                           transpose1 |         1 |      1 |         0.0000 |     324.3845 |              324.3845 |      1 |      
+    2 |                                                                                                                                                              softmax |   2150400 |      1 |         7.6951 |     279.4496 |              279.4496 |     16 |      
+    3 |                                                                                                                                                 fused_conv2d39_add16 |   5152000 |      1 |       138.8931 |      37.0933 |               37.0933 |     16 |      
+    4 |                                                                                                                                                 fused_conv2d38_add15 |   3302400 |      1 |       140.3417 |      23.5311 |               23.5311 |     16 |      
+    5 |                                                                                                                    fused_conv2d15_add11_tir_sigmoid8_multiply8_add12 | 118118400 |      1 |       357.9571 |     329.9792 |              329.9792 |     16 |      
+    6 |                                                                                                   fused_reshape6_reshape7_reshape8_concatenate11_reshape12_transpose |         1 |      1 |         0.0000 |     909.4968 |              909.4968 |      1 |      
+    7 |                                                                                                                      fused_conv2d11_add8_tir_sigmoid6_multiply6_add9 | 118272000 |      2 |       423.4047 |     279.3356 |              558.6712 |     32 |      
+    8 |                                                                                                                          fused_conv2d15_add11_tir_sigmoid8_multiply8 | 118067200 |      3 |       410.8903 |     287.3448 |              862.0345 |     32 |      
+    9 |                                                                                                                                    fused_strided_slice5_concatenate2 |         1 |      1 |         0.0000 |     109.8524 |              109.8524 |      1 |      
+    10 |                                                                                                                                                   fused_conv2d6_add4 |  52838400 |      1 |       237.6518 |     222.3354 |              222.3354 |     16 |      
+    11 |                                                                                                                                                         concatenate9 |         1 |      1 |         0.0000 |      91.3374 |               91.3374 |      1 |      
+    12 |                                                                                                                          fused_conv2d16_add10_tir_sigmoid7_multiply7 |  78848000 |      3 |       383.9251 |     205.3734 |              616.1201 |     32 |      
+    13 |                                                                                                                            fused_conv2d6_add4_tir_sigmoid3_multiply3 |  53248000 |      1 |       124.6269 |     427.2593 |              427.2593 |     16 |      
+    14 |                                                                                                                            fused_conv2d8_add4_tir_sigmoid3_multiply3 | 105676800 |      1 |       225.5989 |     468.4278 |              468.4278 |     16 |      
+    15 |                                                                                                                                    fused_strided_slice7_concatenate3 |         1 |      2 |         0.0001 |      19.6594 |               39.3189 |      6 |      
+    16 |                                                                                                                                                 fused_conv2d27_add13 |  82432000 |      1 |       366.4238 |     224.9636 |              224.9636 |     16 |      
+    17 |                                                                                                                           fused_conv2d11_add8_tir_sigmoid6_multiply6 | 118169600 |      7 |       492.7854 |     239.7993 |             1678.5952 |     48 |      
+    18 |                                                                                                                            fused_conv2d9_add7_tir_sigmoid5_multiply5 | 236339200 |      1 |       395.2946 |     597.8812 |              597.8812 |     32 |      
+    19 |                                                                                                                            fused_conv2d5_add4_tir_sigmoid3_multiply3 | 236748800 |      1 |       374.2588 |     632.5805 |              632.5805 |     32 |      
+    20 |                                                                                                                           fused_conv2d21_add4_tir_sigmoid3_multiply3 | 158105600 |      1 |       311.8985 |     506.9136 |              506.9136 |     32 |      
+    21 |                                                                                                                          fused_conv2d13_add10_tir_sigmoid7_multiply7 | 236134400 |      1 |       298.2842 |     791.6422 |              791.6422 |     32 |      
+    22 |                                                                                                                                                       strided_slice6 |         1 |      2 |         0.0001 |      10.0898 |               20.1795 |      6 |      
+    23 |                                                                                                                            fused_conv2d7_add5_tir_sigmoid4_multiply4 | 118374400 |      4 |       378.5385 |     312.7143 |             1250.8572 |     32 |      
+    24 |                                                                                                                            fused_conv2d1_add1_tir_sigmoid1_multiply1 | 237568000 |      1 |       186.3339 |    1274.9589 |             1274.9589 |     32 |      
+    25 |                                                                                                                                                        strided_slice |         1 |      1 |         0.0000 |     103.0132 |              103.0132 |      1 |      
+    26 |                                                                                                                                                         concatenate4 |         1 |      1 |         0.0000 |      24.6291 |               24.6291 |      6 |      
+    27 |                                                                                                                                    fused_strided_slice3_concatenate1 |         1 |      1 |         0.0000 |     185.9423 |              185.9423 |      1 |      
+    28 | fused_reshape9_reshape10_reshape11_concatenate12_reshape13_multiply13_strided_slice8_strided_slice9_subtract_add17_add17_divide_subtract_tir_sigmoid13_concatenate13 |    117600 |      1 |         0.4741 |     248.0296 |              248.0296 |      1 |      
+    29 |                                                                                                                           fused_conv2d12_add7_tir_sigmoid5_multiply5 | 105267200 |      1 |       184.8354 |     569.5185 |              569.5185 |     16 |      
+    30 |                                                                                                                                    fused_strided_slice5_concatenate6 |         1 |      2 |         0.0000 |      72.0164 |              144.0329 |      1 |      
+    31 |                                                                                                                            fused_conv2d2_add1_tir_sigmoid1_multiply1 |  54067200 |      1 |       122.5284 |     441.2626 |              441.2626 |     16 |      
+    32 |                                                                                                                                     fused_strided_slice1_concatenate |         1 |      1 |         0.0000 |     255.7957 |              255.7957 |      1 |      
+    33 |                                                                                                                          fused_conv2d18_add10_tir_sigmoid7_multiply7 | 105062400 |      1 |       260.9469 |     402.6199 |              402.6199 |     16 |      
+    34 |                                                                                                                            fused_conv2d4_add1_tir_sigmoid1_multiply1 |  80281600 |      1 |       163.6696 |     490.5102 |              490.5102 |     32 |      
+    35 |                                                                                                                          fused_conv2d14_add10_tir_sigmoid7_multiply7 |  52633600 |      1 |       279.9724 |     187.9957 |              187.9957 |     16 |      
+    36 |                                                                                                                                fused_conv2d_add_tir_sigmoid_multiply |  91750400 |      1 |       139.0906 |     659.6446 |              659.6446 |     32 |      
+    37 |                                                                                                                        fused_conv2d35_add16_tir_sigmoid12_multiply12 | 147520000 |      1 |       221.0897 |     667.2406 |              667.2406 |     16 |      
+    38 |                                                                                                                                                       strided_slice4 |         1 |      3 |         0.0001 |      13.7014 |               41.1041 |      6 |      
+    39 |                                                                                                                           fused_conv2d20_add7_tir_sigmoid5_multiply5 |  79052800 |      3 |       258.3822 |     305.9529 |              917.8588 |     32 |      
+    40 |                                                                                                                                                       strided_slice2 |         1 |      2 |         0.0000 |      22.0543 |               44.1085 |      6 |      
+    41 |                                                                                                                       fused_conv2d3_add2_tir_sigmoid2_multiply2_add3 | 119193600 |      1 |       243.1683 |     490.1692 |              490.1692 |     16 |      
+    42 |                                                                                                                       fused_conv2d7_add5_tir_sigmoid4_multiply4_add6 | 118579200 |      2 |       410.4600 |     288.8934 |              577.7869 |     32 |      
+    43 |                                                                                                                          fused_conv2d17_add11_tir_sigmoid8_multiply8 |  26316800 |      1 |       205.2472 |     128.2200 |              128.2200 |     16 |      
+    44 |                                                                                                                                                           max_pool2d |   1280000 |      3 |        62.4644 |      20.4917 |               61.4750 |     16 |      
+    45 |                                                                                                                                          fused_resize2d_concatenate5 |         1 |      1 |         0.0000 |     153.9627 |              153.9627 |      1 |      
+    46 |                                                                                                                           fused_conv2d10_add7_tir_sigmoid5_multiply5 |  52838400 |      1 |       235.8298 |     224.0531 |              224.0531 |     16 |      
+    47 |                                                                                                                           fused_conv2d23_add8_tir_sigmoid6_multiply6 | 118169600 |      1 |       256.5074 |     460.6869 |              460.6869 |     16 |      
+    48 |                                                                                                                           fused_conv2d19_add7_tir_sigmoid5_multiply5 | 157696000 |      1 |       267.4888 |     589.5425 |              589.5425 |     16 |      
+    49 |                                                                                                                                         fused_resize2d1_concatenate7 |         1 |      1 |         0.0000 |     270.5911 |              270.5911 |      1 |      
+    50 |                                                                                                                                    fused_strided_slice3_concatenate8 |         1 |      1 |         0.0000 |     145.3403 |              145.3403 |      1 |      
+    51 |                                                                                                                           fused_conv2d22_add4_tir_sigmoid3_multiply3 |  79462400 |      1 |       224.3971 |     354.1150 |              354.1150 |     16 |      
+    52 |                                                                                                                           fused_conv2d24_add4_tir_sigmoid3_multiply3 | 472678400 |      2 |       477.8783 |     989.1188 |             1978.2376 |     48 |      
+    53 |                                                                                                                        fused_conv2d36_add15_tir_sigmoid11_multiply11 |  29542400 |      1 |       246.7663 |     119.7181 |              119.7181 |     16 |      
+    54 |                                                                                                                          fused_conv2d25_add13_tir_sigmoid9_multiply9 | 590848000 |      1 |       540.8751 |    1092.3927 |             1092.3927 |     32 |      
+    55 |                                                                                                                          fused_conv2d26_add13_tir_sigmoid9_multiply9 | 738304000 |      1 |       531.8481 |    1388.1859 |             1388.1859 |     48 |      
+    56 |                                                                                                                            fused_conv2d3_add2_tir_sigmoid2_multiply2 | 118784000 |      1 |       274.2224 |     433.1666 |              433.1666 |     16 |      
+    57 |                                                                                                                          fused_conv2d28_add11_tir_sigmoid8_multiply8 | 118067200 |      1 |       179.1648 |     658.9866 |              658.9866 |     16 |      
+    58 |                                                                                                                           fused_conv2d29_add8_tir_sigmoid6_multiply6 | 236134400 |      1 |       355.8760 |     663.5300 |              663.5300 |     16 |      
+    59 |                                                                                                                                                        concatenate10 |         1 |      1 |         0.0001 |      19.5648 |               19.5648 |      6 |      
+    60 |                                                                                                                        fused_conv2d30_add14_tir_sigmoid10_multiply10 | 295168000 |      1 |       448.1357 |     658.6576 |              658.6576 |     32 |      
+    61 |                                                                                                                        fused_conv2d31_add14_tir_sigmoid10_multiply10 | 184576000 |      1 |       284.4424 |     648.9047 |              648.9047 |     16 |      
+    62 |                                                                                                                                                  fused_conv2d32_add8 |  13209600 |      1 |       207.7192 |      63.5936 |               63.5936 |     16 |      
+    63 |                                                                                                                        fused_conv2d37_add16_tir_sigmoid12_multiply12 |  46144000 |      1 |       264.5947 |     174.3950 |              174.3950 |     16 |      
+    64 |                                                                                                                                                 fused_conv2d33_add14 |  20608000 |      1 |       247.9249 |      83.1220 |               83.1220 |     16 |      
+    65 |                                                                                                                        fused_conv2d34_add15_tir_sigmoid11_multiply11 | 118016000 |      1 |       181.7372 |     649.3772 |              649.3772 |     16 |      
+    ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    Total trials: 1152
+    Total latency (us): 29789.9
+
+    [13:32:09] [INFO] Using ../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v5.so to run inference
+    [13:32:09] [INFO] Starting to benchmark
+    TVM 28.646094400028232 34.908772764465034
+    PyTorch 24.728252244967734 40.439574543870265
+    ONNX Runtime 146.44801646500127 6.82836151788361
+    ORT providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+    TVM CUDA: True
+    TensorRT (ORT EP) 9.884967934922315 101.16370701286031
+    THIS tensorRT is measuring with FP16
+
+
+Ex5:
+
+2026-03-02 13:55:16 [INFO] Logging directory: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_float16_04/logs
+num extracted tasks: 66
+
+print("script started")
+    TYPE = "float16"
+    ONNX_MODEL_PATH = "../../models/yolov8n_fp16_fixed.onnx"
+    LOG_DIR = f"../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_float16_04"
+    RUN_TUNING = True 
+    RUN_COMPILATION = True  # set False after this op gets non-N/A # Has to be set for 
+    EXPORT_MODEL = True
+    try_device = 'gpu'
+    export_path = f"../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_float16_v6.so"
+    max_trials_global=100
+    max_trials_per_task=1
+    num_trials_per_iter=1
+    timeout_sec_builder=300
+    timeout_sec_runner=300
+
+    PATH_TO_COMPILED_MODEL = export_path
+    BENCH_RUNS = 200
+    ex = None
+
+    2026-03-02 15:55:31 [INFO] [task_scheduler.cc:192] TaskScheduler picks Task #0: "fused_conv2d39_add16"
+2026-03-02 15:55:31 [INFO] [task_scheduler.cc:272] Task #0 has finished. Remaining task(s): 0
+2026-03-02 15:55:31 [INFO] [task_scheduler.cc:332] 
+ ID |                                              Name |      FLOP | Weight | Speed (GFLOPS) | Latency (us) | Weighted Latency (us) | Trials | Done 
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+  0 |                              fused_conv2d39_add16 |   5152000 |      1 |       273.3514 |      18.8475 |               18.8475 |     10 |    Y 
+  1 |       fused_conv2d15_add11_tir_sigmoid8_multiply8 | 118067200 |      3 |       688.7046 |     171.4337 |              514.3012 |     10 |    Y 
+  2 | fused_conv2d15_add11_tir_sigmoid8_multiply8_add12 | 118118400 |      1 |       739.0276 |     159.8295 |              159.8295 |     10 |    Y 
+  3 |        fused_conv2d20_add7_tir_sigmoid5_multiply5 |  79052800 |      3 |       419.1670 |     188.5950 |              565.7850 |     10 |    Y 
+  4 |        fused_conv2d21_add4_tir_sigmoid3_multiply3 | 158105600 |      1 |       444.7611 |     355.4844 |              355.4844 |     10 |    Y 
+  5 |       fused_conv2d16_add10_tir_sigmoid7_multiply7 |  78848000 |      3 |       579.4817 |     136.0664 |              408.1992 |     10 |    Y 
+  6 |     fused_conv2d34_add15_tir_sigmoid11_multiply11 | 118016000 |      1 |       650.5971 |     181.3964 |              181.3964 |     10 |    Y 
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+Total trials: 70
+Total latency (us): 2203.84
+
+[21:12:42] [INFO] Using default compiled model:../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_float16_v6.so to run inference
+[21:12:42] [INFO] Starting to benchmark
+TVM 58.538777554931585 17.082693588222277
+PyTorch 26.997635025181808 37.040281456774224
+2026-03-02 21:13:02.487687585 [W:onnxruntime:, transformer_memcpy.cc:85 ApplyImpl] 4 Memcpy nodes are added to the graph main_graph for CUDAExecutionProvider. It might have negative impact on performance (including unable to run CUDA graph). Set session_options.log_severity_level=1 to see the detail logs before this message.
+2026-03-02 21:13:02.489782610 [W:onnxruntime:, session_state.cc:1280 VerifyEachNodeIsAssignedToAnEp] Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance. e.g. ORT explicitly assigns shape related ops to CPU to improve perf.
+2026-03-02 21:13:02.489822195 [W:onnxruntime:, session_state.cc:1282 VerifyEachNodeIsAssignedToAnEp] Rerunning with verbose output on a non-minimal build will show node assignments.
+ONNX Runtime 19.162755934812594 52.184560686457424
+ORT providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+TVM CUDA: True
+TensorRT (ORT EP) 9.938202975026798 100.62181286826691
+(tvm) helbuk@nvidia:~/Documents/Thesis_Compiler_Aware_Model_Optimization_2026/thesis2026-project/src/thesis2026_project$ python3 tvm_bench_latency_increase_nvidia.py 
+[job] 0:bash*                                                                     "nvidia" 21:34 02-mars-26
+
+
+Ex6:
+
+    2026-03-02 21:37:17 [INFO] Logging directory: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_float16_04/logs
+
+    TYPE = "float16"
+    NP_DTYPE = np.float16 if TYPE == "float16" else np.float32
+    TORCH_DTYPE = torch.float16 if TYPE == "float16" else torch.float32
+    TVM_INPUT_DTYPE = np.float32
+    if TYPE == "float16":
+        ONNX_MODEL_PATH = "../../models/yolov8n_fp16_fixed.onnx"
+    else: 
+        ONNX_MODEL_PATH = "../../models/yolov8n_fp32.onnx"
+    LOG_DIR = f"../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_{TYPE}_04"
+    RUN_TUNING = True  # set False after this op gets non-N/A
+    RUN_TARGETED_TUNING = False  # set False after this op gets non-N/A
+    MISSING_OP = None
+    RUN_COMPILATION = True  # set False after this op gets non-N/A # Has to be set for RUN_DEFAULT_INFERENCE
+    RUN_DEFAULT_INFERENCE = False
+    EXPORT_MODEL = True
+    try_device = 'gpu' # 'cpu'
+    # export_path = get_next_versioned_path(
+    #     "../../models/compiled_tvm_models/tvm_yolov8n.so"
+    # )
+    export_path = f"../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_{TYPE}_v7.so"
+    max_trials_global=10000
+    max_trials_per_task=150
+    num_trials_per_iter=64
+    timeout_sec_builder=300
+    timeout_sec_runner=300
+
+    2026-03-03 07:09:47 [INFO] [task_scheduler.cc:192] TaskScheduler picks Task #32: "concatenate10"
+2026-03-03 07:09:53 [INFO] [task_scheduler.cc:272] Task #32 has finished. Remaining task(s): 0
+2026-03-03 07:09:53 [INFO] [task_scheduler.cc:332] 
+ ID |                                                                                                                                                                                    Name |      FLOP | Weight | Speed (GFLOPS) | Latency (us) | Weighted Latency (us) | Trials | Done 
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  0 | fused_reshape9_reshape10_reshape11_concatenate12_reshape13_strided_slice_strided_slice1_add17_subtract_add17_divide_subtract_concatenate13_multiply13_tir_sigmoid13_concatenate14_cast1 |    117600 |      1 |         0.5262 |     223.4726 |              223.4726 |      1 |    Y 
+  1 |                                                                                                                                                                                conv2d40 |   1075200 |      1 |        31.3396 |      34.3080 |               34.3080 |    150 |    Y 
+  2 |                                                                                                                                                                                 softmax |   2150400 |      1 |        16.9658 |     126.7490 |              126.7490 |    150 |    Y 
+  3 |                                                                                                                      fused_reshape6_reshape7_reshape8_concatenate11_reshape12_transpose |         1 |      1 |         0.0000 |     130.4640 |              130.4640 |      1 |    Y 
+  4 |                                                                                                                                                                    fused_conv2d39_add16 |   5152000 |      1 |       358.6320 |      14.3657 |               14.3657 |    150 |    Y 
+  5 |                                                                                                                                             fused_conv2d15_add11_tir_sigmoid8_multiply8 | 118067200 |      3 |      1125.4086 |     104.9105 |              314.7316 |    150 |    Y 
+  6 |                                                                                                                                             fused_conv2d14_add10_tir_sigmoid7_multiply7 |  52633600 |      1 |       683.9739 |      76.9526 |               76.9526 |    150 |    Y 
+  7 |                                                                                                                                               fused_conv2d5_add4_tir_sigmoid3_multiply3 | 236748800 |      1 |       994.9431 |     237.9521 |              237.9521 |    150 |    Y 
+  8 |                                                                                                                                             fused_conv2d13_add10_tir_sigmoid7_multiply7 | 236134400 |      1 |      1347.2150 |     175.2760 |              175.2760 |    150 |    Y 
+  9 |                                                                                                                                               fused_conv2d7_add5_tir_sigmoid4_multiply4 | 118374400 |      4 |       794.7355 |     148.9482 |              595.7927 |    150 |    Y 
+ 10 |                                                                                                                                                            fused_resize2d1_concatenate7 |         1 |      1 |         0.0000 |     244.4238 |              244.4238 |      1 |    Y 
+ 11 |                                                                                                                                         fused_conv2d11_add8_tir_sigmoid6_multiply6_add9 | 118272000 |      2 |      1056.0259 |     111.9973 |              223.9945 |    150 |    Y 
+ 12 |                                                                                                                                               fused_conv2d9_add7_tir_sigmoid5_multiply5 | 236339200 |      1 |      1236.5440 |     191.1288 |              191.1288 |    150 |    Y 
+ 13 |                                                                                                                                                                              max_pool2d |   1280000 |      3 |        37.3351 |      34.2841 |              102.8523 |     70 |    Y 
+ 14 |                                                                                                                                                                                  split2 |         1 |      3 |         0.0000 |      26.5589 |               79.6767 |     36 |    Y 
+ 15 |                                                                                                                                               fused_conv2d8_add4_tir_sigmoid3_multiply3 | 105676800 |      1 |       641.8777 |     164.6370 |              164.6370 |    150 |    Y 
+ 16 |                                                                                                                                       fused_conv2d15_add11_tir_sigmoid8_multiply8_add12 | 118118400 |      1 |      1236.1946 |      95.5500 |               95.5500 |    150 |    Y 
+ 17 |                                                                                                                                                                      fused_concatenate2 |         1 |      1 |         0.0000 |      49.7578 |               49.7578 |      1 |    Y 
+ 18 |                                                                                                                                             fused_conv2d18_add10_tir_sigmoid7_multiply7 | 105062400 |      1 |      1162.7078 |      90.3601 |               90.3601 |    150 |    Y 
+ 19 |                                                                                                                                                                      fused_concatenate1 |         1 |      1 |         0.0000 |     163.0866 |              163.0866 |      1 |    Y 
+ 20 |                                                                                                                                                                                    cast |         1 |      1 |         0.0000 |     142.2721 |              142.2721 |      1 |    Y 
+ 21 |                                                                                                                                                                                  split3 |         1 |      2 |         0.0001 |      19.3944 |               38.7887 |     36 |    Y 
+ 22 |                                                                                                                                          fused_conv2d7_add5_tir_sigmoid4_multiply4_add6 | 118579200 |      2 |       746.4607 |     158.8552 |              317.7105 |    150 |    Y 
+ 23 |                                                                                                                                                   fused_conv2d_add_tir_sigmoid_multiply |  91750400 |      1 |       155.5432 |     589.8710 |              589.8710 |    150 |    Y 
+ 24 |                                                                                                                                                                    fused_conv2d38_add15 |   3302400 |      1 |       260.6923 |      12.6678 |               12.6678 |    150 |    Y 
+ 25 |                                                                                                                                              fused_conv2d25_add4_tir_sigmoid3_multiply3 | 472678400 |      2 |      1549.0378 |     305.1432 |              610.2865 |    150 |    Y 
+ 26 |                                                                                                                                           fused_conv2d36_add15_tir_sigmoid11_multiply11 |  29542400 |      1 |       682.4034 |      43.2917 |               43.2917 |    150 |    Y 
+ 27 |                                                                                                                                               fused_conv2d4_add1_tir_sigmoid1_multiply1 |  80281600 |      1 |       253.3994 |     316.8184 |              316.8184 |    150 |    Y 
+ 28 |                                                                                                                                               fused_conv2d6_add4_tir_sigmoid3_multiply3 |  53248000 |      1 |       387.4377 |     137.4363 |              137.4363 |    150 |    Y 
+ 29 |                                                                                                                                             fused_conv2d17_add11_tir_sigmoid8_multiply8 |  26316800 |      1 |       551.4802 |      47.7203 |               47.7203 |    150 |    Y 
+ 30 |                                                                                                                                          fused_conv2d3_add2_tir_sigmoid2_multiply2_add3 | 119193600 |      1 |       407.2884 |     292.6516 |              292.6516 |    150 |    Y 
+ 31 |                                                                                                                                                                      fused_concatenate3 |         1 |      2 |         0.0001 |      18.9469 |               37.8938 |      6 |    Y 
+ 32 |                                                                                                                                                                           concatenate10 |         1 |      1 |         0.0001 |      18.2196 |               18.2196 |      6 |    Y 
+ 33 |                                                                                                                                               fused_conv2d2_add1_tir_sigmoid1_multiply1 |  54067200 |      1 |       185.2578 |     291.8485 |              291.8485 |    150 |    Y 
+ 34 |                                                                                                                                              fused_conv2d20_add7_tir_sigmoid5_multiply5 |  79052800 |      3 |       826.7182 |      95.6224 |              286.8673 |    150 |    Y 
+ 35 |                                                                                                                                                                                   split |         1 |      1 |         0.0000 |     181.3424 |              181.3424 |      1 |    Y 
+ 36 |                                                                                                                                                                      fused_conv2d6_add4 |  52838400 |      1 |       812.2280 |      65.0537 |               65.0537 |    150 |    Y 
+ 37 |                                                                                                                                              fused_conv2d11_add8_tir_sigmoid6_multiply6 | 118169600 |      7 |       997.5626 |     118.4583 |              829.2083 |    150 |    Y 
+ 38 |                                                                                                                                           fused_conv2d37_add16_tir_sigmoid12_multiply12 |  46144000 |      1 |       723.1130 |      63.8130 |               63.8130 |    150 |    Y 
+ 39 |                                                                                                                                                                    fused_conv2d33_add14 |  20608000 |      1 |       730.6295 |      28.2058 |               28.2058 |    150 |    Y 
+ 40 |                                                                                                                                               fused_conv2d1_add1_tir_sigmoid1_multiply1 | 237568000 |      1 |       545.9438 |     435.1510 |              435.1510 |    150 |    Y 
+ 41 |                                                                                                                                                                                  split1 |         1 |      2 |         0.0000 |      41.6972 |               83.3945 |     36 |    Y 
+ 42 |                                                                                                                                                             fused_resize2d_concatenate5 |         1 |      1 |         0.0000 |      79.5156 |               79.5156 |      1 |    Y 
+ 43 |                                                                                                                                              fused_conv2d21_add4_tir_sigmoid3_multiply3 | 158105600 |      1 |       870.4351 |     181.6397 |              181.6397 |    150 |    Y 
+ 44 |                                                                                                                                              fused_conv2d23_add8_tir_sigmoid6_multiply6 | 118169600 |      1 |      1118.6097 |     105.6397 |              105.6397 |    150 |    Y 
+ 45 |                                                                                                                                              fused_conv2d12_add7_tir_sigmoid5_multiply5 | 105267200 |      1 |      1063.1610 |      99.0134 |               99.0134 |    150 |    Y 
+ 46 |                                                                                                                                               fused_conv2d3_add2_tir_sigmoid2_multiply2 | 118784000 |      1 |       457.0355 |     259.9010 |              259.9010 |    150 |    Y 
+ 47 |                                                                                                                                                                      fused_concatenate6 |         1 |      2 |         0.0000 |      46.7537 |               93.5075 |      1 |    Y 
+ 48 |                                                                                                                                              fused_conv2d19_add7_tir_sigmoid5_multiply5 | 157696000 |      1 |      1197.7486 |     131.6604 |              131.6604 |    150 |    Y 
+ 49 |                                                                                                                                                                       fused_concatenate |         1 |      1 |         0.0000 |     224.1598 |              224.1598 |      1 |    Y 
+ 50 |                                                                                                                                             fused_conv2d24_add13_tir_sigmoid9_multiply9 | 590848000 |      1 |      1345.0582 |     439.2732 |              439.2732 |    150 |    Y 
+ 51 |                                                                                                                                                                            concatenate4 |         1 |      1 |         0.0000 |      23.7211 |               23.7211 |      6 |    Y 
+ 52 |                                                                                                                                              fused_conv2d22_add4_tir_sigmoid3_multiply3 |  79462400 |      1 |       557.8238 |     142.4507 |              142.4507 |    150 |    Y 
+ 53 |                                                                                                                                             fused_conv2d29_add11_tir_sigmoid8_multiply8 | 118067200 |      1 |      1060.1188 |     111.3717 |              111.3717 |    150 |    Y 
+ 54 |                                                                                                                                                                      fused_concatenate8 |         1 |      1 |         0.0000 |     128.8384 |              128.8384 |      1 |    Y 
+ 55 |                                                                                                                                             fused_conv2d26_add13_tir_sigmoid9_multiply9 | 738304000 |      1 |      1872.7322 |     394.2390 |              394.2390 |    150 |    Y 
+ 56 |                                                                                                                                             fused_conv2d16_add10_tir_sigmoid7_multiply7 |  78848000 |      3 |       877.3912 |      89.8664 |              269.5992 |    150 |    Y 
+ 57 |                                                                                                                                                                            concatenate9 |         1 |      1 |         0.0000 |      44.7286 |               44.7286 |      1 |    Y 
+ 58 |                                                                                                                                                                    fused_conv2d27_add13 |  82432000 |      1 |       942.9184 |      87.4222 |               87.4222 |    150 |    Y 
+ 59 |                                                                                                                                              fused_conv2d10_add7_tir_sigmoid5_multiply5 |  52838400 |      1 |       713.2567 |      74.0805 |               74.0805 |    150 |    Y 
+ 60 |                                                                                                                                              fused_conv2d28_add8_tir_sigmoid6_multiply6 | 236134400 |      1 |      1301.4302 |     181.4422 |              181.4422 |    150 |    Y 
+ 61 |                                                                                                                                           fused_conv2d30_add14_tir_sigmoid10_multiply10 | 295168000 |      1 |      1368.0734 |     215.7545 |              215.7545 |    150 |    Y 
+ 62 |                                                                                                                                           fused_conv2d31_add14_tir_sigmoid10_multiply10 | 184576000 |      1 |      1241.8192 |     148.6336 |              148.6336 |    150 |    Y 
+ 63 |                                                                                                                                                                     fused_conv2d32_add8 |  13209600 |      1 |       572.4891 |      23.0740 |               23.0740 |    150 |    Y 
+ 64 |                                                                                                                                           fused_conv2d34_add15_tir_sigmoid11_multiply11 | 118016000 |      1 |       906.7749 |     130.1492 |              130.1492 |    150 |    Y 
+ 65 |                                                                                                                                           fused_conv2d35_add16_tir_sigmoid12_multiply12 | 147520000 |      1 |      1041.2723 |     141.6728 |              141.6728 |    150 |    Y 
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Total trials: 7258
+Total latency (us): 11937.5
+
+
+[07:10:34] [INFO] Start compilation
+[07:10:34] [INFO] Applying MetaSchedule from ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_float16_04
+[07:10:59] /home/helbuk/Documents/tvm/src/relax/transform/meta_schedule.cc:93: Warning: Creating JSONDatabase. Workload at: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_float16_04/database_workload.json, Tuning records at: ../../tvm_tuning_logs/tuning_yolov8n_orin_gpu_float16_04/database_tuning_record.json
+[07:15:03] [INFO] Using ../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_float16_v7.so to run inference
+[07:15:04] [INFO] Starting to benchmark
+TVM 12.331788905012218 81.09123564331799
+PyTorch 26.934898945000896 37.12655473636368
+2026-03-03 07:15:20.696638576 [W:onnxruntime:, transformer_memcpy.cc:85 ApplyImpl] 4 Memcpy nodes are added to the graph main_graph for CUDAExecutionProvider. It might have negative impact on performance (including unable to run CUDA graph). Set session_options.log_severity_level=1 to see the detail logs before this message.
+2026-03-03 07:15:20.699548409 [W:onnxruntime:, session_state.cc:1280 VerifyEachNodeIsAssignedToAnEp] Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance. e.g. ORT explicitly assigns shape related ops to CPU to improve perf.
+2026-03-03 07:15:20.699599866 [W:onnxruntime:, session_state.cc:1282 VerifyEachNodeIsAssignedToAnEp] Rerunning with verbose output on a non-minimal build will show node assignments.
+ONNX Runtime 18.99904351499572 52.63422862370476
+ORT providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+TVM CUDA: True
+2026-03-03 07:15:43.198062551 [W:onnxruntime:Default, tensorrt_execution_provider.h:92 log] [2026-03-03 06:15:43 WARNING] Using an engine plan file across different models of devices is not recommended and is likely to affect performance or even cause errors.
+TensorRT (ORT EP) 9.957570099995792 100.42610696764491
+(tvm) helbuk@nvidia:~/Documents/Thesis_Compiler_Aware_Model_Optimization_2026/thesis2026-project/src/thesis2026_project$ 
+
+Ex7:
+
+{"ts": "2026-04-06 14:22:13", "level": "INFO", "msg": "Run started", "cmd": "tune", "run_dir": "optimizer/tvm_runner/out/experiments/yolov8n_orin_gpu_fp32__20260406_142213__e5536f3b2c"}
+{"ts": "2026-04-06 14:22:13", "level": "INFO", "msg": "Config summary", "config": {"run": {"name": "yolov8n_orin_gpu_fp32", "out_dir": "./optimizer/tvm_runner/out/experiments", "seed": 0}, "model": {"onnx_path": "../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx", "pt_path": "../models/yolov8n.pt", "imgsz": 640, "batch": 1}, "device": {"kind": "cuda", "arch": null, "max_num_threads": 1024, "max_threads_per_block": 1024, "thread_warp_size": 32, "max_shared_memory_per_block": 49152, "registers_per_block": 65536, "host": {"kind": "llvm", "mtriple": "aarch64-linux-gnu", "mcpu": "cortex-a78"}}, "precision": {"name": "fp32"}, "tvm": {"log_dir": "./optimizer/tvm_runner/out/tvm_tuning_logs/tuning_yolov8n_orin_gpu_03", "use_existing_db": true, "max_trials_global": 10000, "max_trials_per_task": 150, "num_trials_per_iter": 64, "timeout_builder_s": 300, "timeout_runner_s": 300, "export_path": "tvm_yolov8n_gpu_one_round_66_tasks_v6.so"}, "tvm_targeted_tuning": {"enable": false, "operations": null}, "benchmark": {"runs": 200, "warmup": 20}, "onnxruntime": {"threads": 1, "trt": {"enable_engine_cache": true, "engine_cache_path": "./optimizer/tvm_runner/out/experiments/trt_cache/trt_current", "fp16_enable": false}, "use_arena": true}}}
+{"ts": "2026-04-06 14:22:13", "level": "INFO", "msg": "Using CUDA target", "arch": "sm_87"}
+{"ts": "2026-04-06 14:22:13", "level": "INFO", "msg": "Loading ONNX", "path": "../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"}
+{"ts": "2026-04-06 14:22:33", "level": "INFO", "msg": "Extracted tasks", "count": 65}
+{"ts": "2026-04-06 14:22:33", "level": "INFO", "msg": "Starting tuning", "tasks": 65, "log_dir": "./optimizer/tvm_runner/out/tvm_tuning_logs/tuning_yolov8n_orin_gpu_03"}
+NEED TO MOVE MODEL TO export_path = f"../../models/compiled_tvm_models/" AFTER tuning
