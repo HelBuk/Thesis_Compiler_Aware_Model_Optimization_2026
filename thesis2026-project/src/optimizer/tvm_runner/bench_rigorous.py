@@ -150,6 +150,93 @@ def cooldown(target_c: float = 55.0, max_wait_s: float = 90.0, verbose: bool = T
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Power measurement helpers
+# ─────────────────────────────────────────────────────────────────────────────
+# Module-level cache — each subprocess gets fresh globals, discovers once.
+_POWER_SOURCE: str      = ""   # "ina3221" | "vcgencmd" | "none"
+_POWER_PATHS:  List[str] = []  # sysfs paths for INA3221 rails
+
+
+def _discover_power_source() -> tuple:
+    """Find the first available power sensor on this platform."""
+    import glob
+    # Jetson INA3221 (Orin Nano, Xavier, AGX …) — values in µW
+    for pattern in (
+        "/sys/bus/i2c/drivers/ina3221x/*/iio:device*/in_power*_input",
+        "/sys/bus/i2c/drivers/ina3221/*/hwmon/hwmon*/power*_input",
+        "/sys/devices/platform/*/i2c-*/*/hwmon/hwmon*/power*_input",
+    ):
+        paths = sorted(glob.glob(pattern))
+        if paths:
+            return "ina3221", paths
+    # Raspberry Pi 5 PMIC via vcgencmd pmic_read_adc
+    try:
+        r = subprocess.run(["vcgencmd", "pmic_read_adc"],
+                           capture_output=True, text=True, timeout=2)
+        if r.returncode == 0 and "EXT5V_V" in r.stdout:
+            return "vcgencmd", []
+    except Exception:
+        pass
+    return "none", []
+
+
+def _sample_power_mw() -> Optional[float]:
+    """Instantaneous board power in mW, or None if no sensor found."""
+    global _POWER_SOURCE, _POWER_PATHS
+    if not _POWER_SOURCE:
+        _POWER_SOURCE, _POWER_PATHS = _discover_power_source()
+
+    if _POWER_SOURCE == "ina3221":
+        total = 0.0
+        for p in _POWER_PATHS:
+            raw = _read_file(p)
+            if raw:
+                try:
+                    total += int(raw)       # µW
+                except ValueError:
+                    pass
+        return total / 1000.0 if total > 0 else None   # µW → mW
+
+    if _POWER_SOURCE == "vcgencmd":
+        try:
+            r = subprocess.run(["vcgencmd", "pmic_read_adc"],
+                               capture_output=True, text=True, timeout=2)
+            if r.returncode == 0:
+                voltage = current = None
+                for line in r.stdout.splitlines():
+                    if "EXT5V_V" in line:
+                        try:
+                            voltage = float(line.split("=")[1].strip().rstrip("V").strip())
+                        except Exception:
+                            pass
+                    elif "EXT5V_A" in line:
+                        try:
+                            current = float(line.split("=")[1].strip().rstrip("A").strip())
+                        except Exception:
+                            pass
+                if voltage is not None and current is not None:
+                    return voltage * current * 1000.0   # W → mW
+        except Exception:
+            pass
+
+    return None
+
+
+def _power_stats(samples: List[float]) -> Optional[Dict]:
+    if not samples:
+        return None
+    return {
+        "mean_mw": statistics.mean(samples),
+        "max_mw" : max(samples),
+        "min_mw" : min(samples),
+        "n"      : len(samples),
+    }
+
+
+_PWR_EVERY = 10   # sample power every N inference runs (keeps overhead negligible)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Statistics
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -220,22 +307,32 @@ def _worker_tvm(cfg_raw: dict, runs: int, warmup: int) -> None:
     if is_cuda:
         tvm.cuda(0).sync()  # ensure GPU kernels finish before timing
 
+    pwr: List[float] = []
     times: List[float] = []
     if is_cuda:
-        for _ in range(runs):
+        for i in range(runs):
+            if i % _PWR_EVERY == 0:
+                p = _sample_power_mw()
+                if p is not None:
+                    pwr.append(p)
             t0 = time.perf_counter()
             vm["main"](x_tvm)
             tvm.cuda(0).sync()
             t1 = time.perf_counter()
             times.append((t1 - t0) * 1000.0)
     else:
-        for _ in range(runs):
+        for i in range(runs):
+            if i % _PWR_EVERY == 0:
+                p = _sample_power_mw()
+                if p is not None:
+                    pwr.append(p)
             t0 = time.perf_counter()
             vm["main"](x_tvm)
             t1 = time.perf_counter()
             times.append((t1 - t0) * 1000.0)
 
-    print(json.dumps({"backend": "TVM", "device": device_kind, "times_ms": times}))
+    print(json.dumps({"backend": "TVM", "device": device_kind,
+                      "times_ms": times, "power": _power_stats(pwr)}))
 
 
 def _worker_ort(cfg_raw: dict, runs: int, warmup: int) -> None:
@@ -310,17 +407,21 @@ def _worker_ort(cfg_raw: dict, runs: int, warmup: int) -> None:
     for _ in range(warmup):
         sess.run(None, feed)
 
+    pwr: List[float] = []
     times: List[float] = []
-    for _ in range(runs):
+    for i in range(runs):
+        if i % _PWR_EVERY == 0:
+            p = _sample_power_mw()
+            if p is not None:
+                pwr.append(p)
         t0 = time.perf_counter()
         sess.run(None, feed)
         t1 = time.perf_counter()
         times.append((t1 - t0) * 1000.0)
 
     actual_providers = sess.get_providers()
-    print(json.dumps({"backend": "ONNXRuntime",
-                      "times_ms": times,
-                      "providers": actual_providers}))
+    print(json.dumps({"backend": "ONNXRuntime", "times_ms": times,
+                      "providers": actual_providers, "power": _power_stats(pwr)}))
 
 
 def _worker_pytorch(cfg_raw: dict, runs: int, warmup: int) -> None:
@@ -348,22 +449,32 @@ def _worker_pytorch(cfg_raw: dict, runs: int, warmup: int) -> None:
         if use_cuda:
             torch.cuda.synchronize()
 
+        pwr: List[float] = []
         times: List[float] = []
         if use_cuda:
-            for _ in range(runs):
+            for i in range(runs):
+                if i % _PWR_EVERY == 0:
+                    p = _sample_power_mw()
+                    if p is not None:
+                        pwr.append(p)
                 t0 = time.perf_counter()
                 model(x)
                 torch.cuda.synchronize()
                 t1 = time.perf_counter()
                 times.append((t1 - t0) * 1000.0)
         else:
-            for _ in range(runs):
+            for i in range(runs):
+                if i % _PWR_EVERY == 0:
+                    p = _sample_power_mw()
+                    if p is not None:
+                        pwr.append(p)
                 t0 = time.perf_counter()
                 model(x)
                 t1 = time.perf_counter()
                 times.append((t1 - t0) * 1000.0)
 
-    print(json.dumps({"backend": "PyTorch", "device": str(device), "times_ms": times}))
+    print(json.dumps({"backend": "PyTorch", "device": str(device),
+                      "times_ms": times, "power": _power_stats(pwr)}))
 
 
 def _worker_tflite(cfg_raw: dict, runs: int, warmup: int) -> None:
@@ -411,8 +522,13 @@ def _worker_tflite(cfg_raw: dict, runs: int, warmup: int) -> None:
         interp.set_tensor(inp_detail["index"], x_feed)
         interp.invoke()
 
+    pwr: List[float] = []
     times: List[float] = []
-    for _ in range(runs):
+    for i in range(runs):
+        if i % _PWR_EVERY == 0:
+            p = _sample_power_mw()
+            if p is not None:
+                pwr.append(p)
         t0 = time.perf_counter()
         interp.set_tensor(inp_detail["index"], x_feed)
         interp.invoke()
@@ -420,11 +536,12 @@ def _worker_tflite(cfg_raw: dict, runs: int, warmup: int) -> None:
         times.append((t1 - t0) * 1000.0)
 
     print(json.dumps({
-        "backend"   : "TFLite",
-        "model"     : model_path,
-        "in_dtype"  : str(in_dtype),
-        "threads"   : threads,
-        "times_ms"  : times,
+        "backend"  : "TFLite",
+        "model"    : model_path,
+        "in_dtype" : str(in_dtype),
+        "threads"  : threads,
+        "times_ms" : times,
+        "power"    : _power_stats(pwr),
     }))
 
 
@@ -502,8 +619,13 @@ def _worker_trt(cfg_raw: dict, runs: int, warmup: int) -> None:
     torch.cuda.synchronize()
 
     # ── Timed runs ────────────────────────────────────────────────────────────
+    pwr: List[float] = []
     times: List[float] = []
-    for _ in range(runs):
+    for i in range(runs):
+        if i % _PWR_EVERY == 0:
+            p = _sample_power_mw()
+            if p is not None:
+                pwr.append(p)
         t0 = time.perf_counter()
         _run()
         torch.cuda.synchronize()
@@ -515,6 +637,7 @@ def _worker_trt(cfg_raw: dict, runs: int, warmup: int) -> None:
         "trt_version": trt.__version__,
         "engine_path": engine_path,
         "times_ms"   : times,
+        "power"      : _power_stats(pwr),
     }))
 
 
@@ -589,12 +712,14 @@ def run_isolated(backend: str, cfg_raw: dict, runs: int, warmup: int) -> Optiona
 # ─────────────────────────────────────────────────────────────────────────────
 
 def print_rep(rep: int, total: int, mean_ms: float, std_ms: float,
-              temp: Optional[float], freq: Optional[float]) -> None:
-    temp_s = f"{temp:.1f}°C" if temp is not None else "?"
-    freq_s = f"{freq:.0f}MHz" if freq is not None else "?"
+              temp: Optional[float], freq: Optional[float],
+              power_mw: Optional[float] = None) -> None:
+    temp_s  = f"{temp:.1f}°C"    if temp     is not None else "?"
+    freq_s  = f"{freq:.0f}MHz"   if freq     is not None else "?"
+    power_s = f"{power_mw:.0f}mW" if power_mw is not None else "n/a"
     print(f"    rep {rep:>2}/{total}  "
           f"mean={mean_ms:>8.2f}ms  ±{std_ms:>6.2f}ms  "
-          f"temp={temp_s}  freq={freq_s}")
+          f"temp={temp_s}  freq={freq_s}  pwr={power_s}")
 
 
 def print_stats_block(label: str, s: Dict) -> None:
@@ -607,22 +732,42 @@ def print_stats_block(label: str, s: Dict) -> None:
     print(f"  │  max    : {s['max_ms']:.2f} ms")
     print(f"  │  FPS    : {s['fps_mean']:.2f}  "
           f"(best: {s['fps_best']:.2f}, worst: {s['fps_worst']:.2f})")
+    if s.get("power_mean_mw") is not None:
+        efficiency = s["fps_mean"] / (s["power_mean_mw"] / 1000.0)  # FPS/W
+        print(f"  │  Power  : {s['power_mean_mw']:.0f} mW  "
+              f"(max: {s.get('power_max_mw', 0):.0f} mW)  "
+              f"efficiency: {efficiency:.2f} FPS/W")
+    else:
+        print(f"  │  Power  : n/a (no sensor detected)")
     print(f"  │  n reps : {s['n']}")
     print(f"  └────────────────────────────────────────────")
 
 
 def print_summary(all_results: Dict[str, Dict]) -> None:
-    print(f"\n{'='*62}")
+    has_power = any(s.get("power_mean_mw") is not None for s in all_results.values())
+    width = 80 if has_power else 62
+    print(f"\n{'='*width}")
     print("  FINAL SUMMARY  (thesis-ready numbers)")
-    print(f"{'='*62}")
-    hdr = f"  {'Backend':<18} {'Mean ± Std':>18}  {'95% CI':>10}  {'FPS':>8}"
+    print(f"{'='*width}")
+    if has_power:
+        hdr = (f"  {'Backend':<18} {'Mean ± Std':>18}  {'95% CI':>10}"
+               f"  {'FPS':>7}  {'Power':>8}  {'FPS/W':>6}")
+    else:
+        hdr = f"  {'Backend':<18} {'Mean ± Std':>18}  {'95% CI':>10}  {'FPS':>8}"
     print(hdr)
-    print(f"  {'-'*18} {'-'*18}  {'-'*10}  {'-'*8}")
+    print(f"  {'-'*(width-2)}")
     for name, s in all_results.items():
         ms_str = f"{s['mean_ms']:.1f} ± {s['std_ms']:.1f} ms"
         ci_str = f"±{s['ci95_ms']:.1f} ms"
-        print(f"  {name:<18} {ms_str:>18}  {ci_str:>10}  {s['fps_mean']:>8.2f}")
-    print(f"{'='*62}")
+        if has_power:
+            pwr    = s.get("power_mean_mw")
+            pwr_s  = f"{pwr:.0f} mW" if pwr else "  n/a   "
+            eff_s  = f"{s['fps_mean']/(pwr/1000):.1f}" if pwr else "  n/a"
+            print(f"  {name:<18} {ms_str:>18}  {ci_str:>10}"
+                  f"  {s['fps_mean']:>7.2f}  {pwr_s:>8}  {eff_s:>6}")
+        else:
+            print(f"  {name:<18} {ms_str:>18}  {ci_str:>10}  {s['fps_mean']:>8.2f}")
+    print(f"{'='*width}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -679,8 +824,10 @@ def main() -> None:
         print(f"  Backend: {label}   ({args.repeats} reps × {args.runs} runs, warmup={args.warmup})")
         print(f"{'─'*62}")
 
-        rep_means: List[float] = []
-        extra_info: dict       = {}
+        rep_means:      List[float] = []
+        rep_power_means: List[float] = []
+        rep_power_maxes: List[float] = []
+        extra_info: dict            = {}
 
         for rep in range(1, args.repeats + 1):
             # Cooldown before every rep (including first to ensure stable start)
@@ -698,21 +845,34 @@ def main() -> None:
                 print(f"    rep {rep:>2}/{args.repeats}  ✗  failed — skipping")
                 continue
 
-            times    = data["times_ms"]
-            mean_ms  = statistics.mean(times)
-            std_ms   = statistics.stdev(times) if len(times) > 1 else 0.0
+            times   = data["times_ms"]
+            mean_ms = statistics.mean(times)
+            std_ms  = statistics.stdev(times) if len(times) > 1 else 0.0
             rep_means.append(mean_ms)
+
+            pwr_rep = data.get("power")  # dict with mean_mw/max_mw/min_mw or None
+            if pwr_rep:
+                rep_power_means.append(pwr_rep["mean_mw"])
+                rep_power_maxes.append(pwr_rep["max_mw"])
 
             if "providers" in data:
                 extra_info["providers"] = data["providers"]
 
-            print_rep(rep, args.repeats, mean_ms, std_ms, temp, freq)
+            print_rep(rep, args.repeats, mean_ms, std_ms, temp, freq,
+                      power_mw=pwr_rep["mean_mw"] if pwr_rep else None)
 
         if not rep_means:
             print(f"  ✗  All repetitions failed for {label}")
             continue
 
         stats = compute_stats(rep_means)
+        if rep_power_means:
+            stats["power_mean_mw"] = statistics.mean(rep_power_means)
+            stats["power_max_mw"]  = max(rep_power_maxes)
+            stats["power_std_mw"]  = statistics.stdev(rep_power_means) if len(rep_power_means) > 1 else 0.0
+        else:
+            stats["power_mean_mw"] = None
+            stats["power_max_mw"]  = None
         if extra_info:
             stats.update(extra_info)
 
