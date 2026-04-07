@@ -16,7 +16,7 @@ device:
     kind: "llvm"
     mtriple: "aarch64-linux-gnu"
     mcpu: "cortex-a76" # native - for automatic detection
-    num_cores: 4
+    num-cores: 4
 
 precision:
   name: "fp32"            # "fp32" | "fp16"
@@ -24,9 +24,9 @@ precision:
 tvm:
   log_dir: "./optimizer/tvm_runner/out/tvm_tuning_logs/tuning_yolov8n_pi5_cpu_fp32_v1"
   use_existing_db: true   # compile can reuse DB without tuning
-  max_trials_global: 130
-  max_trials_per_task: 5
-  num_trials_per_iter: 3
+  max_trials_global: 10000
+  max_trials_per_task: 150
+  num_trials_per_iter: 64
   timeout_builder_s: 300
   timeout_runner_s: 300
   export_path: "../models/compiled_tvm_models/tvm_yolov8n_pi5_cpu_fp32_v1.so" 
@@ -41,7 +41,7 @@ benchmark:
 
 onnxruntime:
   #provider: "CUDAExecutionProvider"   # "CPUExecutionProvider" | "CUDAExecutionProvider" | "TensorrtExecutionProvider"
-  threads: 1 #so.intra_op_num_threads for ONNXRT
+  threads: 4 #so.intra_op_num_threads for ONNXRT
   trt:
     enable_engine_cache: true
     engine_cache_path: "./optimizer/tvm_runner/out/experiments/trt_cache/trt_current"

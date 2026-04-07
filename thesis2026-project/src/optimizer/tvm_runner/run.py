@@ -184,6 +184,7 @@ class Config:
     @property
     def def_target(self) -> Dict[str, Any]:
         device = self.raw.get("device") or {}
+        host = device.get("host") or {}
         kind = device.get("kind")
         if not kind:
             raise ValueError("device.kind is required")
@@ -203,10 +204,8 @@ class Config:
                 if value is not None:
                     target[key] = value
 
-            host = device.get("host") or {}
-
             host_target: Dict[str, Any] = {}
-            for key in ("kind", "mtriple", "mcpu", "num_cores"):
+            for key in ("kind", "mtriple", "mcpu", "num-cores"):
                 value = host.get(key)
                 if value is not None:
                     host_target[key] = value
@@ -215,8 +214,8 @@ class Config:
                 target["host"] = host_target
         
         elif kind == "cpu":
-            for key in ("kind", "mtriple", "mcpu", "num_cores"):
-                value = device.get(key)
+            for key in ("kind", "mtriple", "mcpu", "num-cores"):
+                value = host.get(key)
                 if value is not None:
                     target[key] = value
         else:
@@ -563,6 +562,10 @@ def ort_session(cfg: Config) -> ort.InferenceSession:
     else:
         providers = [provider]
 
+    _unwanted = {"AzureExecutionProvider"}
+    providers = [p for p in providers if (p if isinstance(p, str) else p[0]) not in _unwanted]
+
+
     return ort.InferenceSession(cfg.onnx_path, sess_options=so, providers=providers)
 
 def ort_expected_np_dtype(sess: ort.InferenceSession) -> np.dtype:
@@ -604,7 +607,7 @@ def bench_ort(cfg: Config, x_np: np.ndarray, runs: int, warmup: int) -> Dict[str
     t1 = time.perf_counter()
 
     ms_ = (t1 - t0) * 1000.0 / runs
-    return {"ms": ms_, "fps": 1000.0 / ms_}
+    return {"ms": ms_, "fps": 1000.0 / ms_, "providers": sess.get_providers()}
 
 # ----------------------------
 # CLI commands
@@ -713,7 +716,7 @@ def cmd_bench(cfg: Config, log: RunLogger) -> None:
                 tvm_ms=tvm_res["ms"], tvm_fps=tvm_res["fps"],
                 pt_ms=pt_res["ms"], pt_fps=pt_res["fps"],
                 ort_provider=cfg.ort_provider, ort_ms=ort_cpu["ms"], ort_fps=ort_cpu["fps"])
-        print("ONNXRuntime (CPU):", ort_cpu, "providers:", ort.get_available_providers())
+        print("ONNXRuntime (CPU):", ort_cpu, "providers:", ort_cpu.get("providers", []))
     else: 
         raise ValueError(f"Unknown device.kind: {cfg.device_kind}")
     
