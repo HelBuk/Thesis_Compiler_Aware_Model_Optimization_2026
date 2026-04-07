@@ -545,7 +545,7 @@ def ort_session(cfg: Config) -> ort.InferenceSession:
     so = ort.SessionOptions()
     so.intra_op_num_threads = cfg.ort_threads
     so.inter_op_num_threads = 1
-    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL 
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     so.enable_cpu_mem_arena = cfg.ort_use_arena
 
