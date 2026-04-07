@@ -118,16 +118,16 @@ def print_system_info() -> None:
     print(f"  Governor   : {gov or 'unknown'}")
     if freq and mfreq:
         pct = freq / mfreq * 100
-        flag = "✓" if pct > 95 else "⚠  NOT AT MAX — lock with --set-performance"
-        print(f"  CPU freq   : {freq:.0f} / {mfreq:.0f} MHz  ({pct:.1f}%)  {flag}")
-    print(f"  Temperature: {f'{temp:.1f} °C' if temp is not None else 'unknown'}")
+        flag = "ok" if pct > 95 else "NOT AT MAX — lock with --set-performance"
+        print(f"CPU freq   : {freq:.0f} / {mfreq:.0f} MHz  ({pct:.1f}%)  {flag}")
+    print(f"Temperature: {f'{temp:.1f} °C' if temp is not None else 'unknown'}")
     print("=" * 62 + "\n")
 
 
 def check_throttled(threshold_pct: float = 95.0) -> bool:
     freq, mfreq = get_cpu_freq_mhz(), get_cpu_max_freq_mhz()
     if freq and mfreq and (freq / mfreq * 100) < threshold_pct:
-        print(f"  ⚠  CPU throttled: {freq:.0f}/{mfreq:.0f} MHz — results unreliable")
+        print(f"CPU throttled: {freq:.0f}/{mfreq:.0f} MHz — results unreliable")
         return True
     return False
 
@@ -140,13 +140,13 @@ def cooldown(target_c: float = 55.0, max_wait_s: float = 90.0, verbose: bool = T
         if temp is None or temp <= target_c or elapsed >= max_wait_s:
             break
         if verbose:
-            print(f"  ⏳ Cooling … {temp:.1f} °C → {target_c:.1f} °C  ({elapsed:.0f}s elapsed)",
+            print(f"Cooling … {temp:.1f} °C → {target_c:.1f} °C  ({elapsed:.0f}s elapsed)",
                   end="\r", flush=True)
         time.sleep(3)
     if verbose:
         temp = get_temperature_c()
         tag  = f"{temp:.1f} °C" if temp is not None else "?"
-        print(f"  ✓  Ready — temperature: {tag}                              ")
+        print(f"Ready — temperature: {tag}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,24 +200,41 @@ def _sample_power_mw() -> Optional[float]:
     if _POWER_SOURCE == "vcgencmd":
         try:
             r = subprocess.run(["vcgencmd", "pmic_read_adc"],
-                               capture_output=True, text=True, timeout=2)
+                            capture_output=True, text=True, timeout=2)
             if r.returncode == 0:
-                voltage = current = None
+                # Pi5 format:
+                #   "  3V7_WL_SW_A current(0)=0.10247270A"
+                #   "  3V7_WL_SW_V volt(8)=3.69884800V"
+                # Sum P = V * I across all matched rail pairs.
+                currents: dict = {}
+                voltages: dict = {}
                 for line in r.stdout.splitlines():
-                    if "EXT5V_V" in line:
-                        try:
-                            voltage = float(line.split("=")[1].strip().rstrip("V").strip())
-                        except Exception:
-                            pass
-                    elif "EXT5V_A" in line:
-                        try:
-                            current = float(line.split("=")[1].strip().rstrip("A").strip())
-                        except Exception:
-                            pass
-                if voltage is not None and current is not None:
-                    return voltage * current * 1000.0   # W → mW
+                    line = line.strip()
+                    if "current(" in line and "=" in line:
+                        name = line.split("current(")[0].strip()   # e.g. "3V7_WL_SW_A"
+                        if name.endswith("_A"):
+                            try:
+                                val = float(line.split("=")[1].strip().rstrip("A"))
+                                currents[name[:-2]] = val          # key: "3V7_WL_SW"
+                            except ValueError:
+                                pass
+                    elif "volt(" in line and "=" in line:
+                        name = line.split("volt(")[0].strip()      # e.g. "3V7_WL_SW_V"
+                        if name.endswith("_V"):
+                            try:
+                                val = float(line.split("=")[1].strip().rstrip("V"))
+                                voltages[name[:-2]] = val          # key: "3V7_WL_SW"
+                            except ValueError:
+                                pass
+                total_mw = sum(
+                    currents[rail] * voltages[rail] * 1000.0
+                    for rail in currents if rail in voltages
+                )
+                if total_mw > 0:
+                    return total_mw
         except Exception:
             pass
+
 
     return None
 
@@ -299,7 +316,7 @@ def _worker_tvm(cfg_raw: dict, runs: int, warmup: int) -> None:
     rt_mod = tvm.runtime.load_module(cfg_raw["tvm"]["export_path"])
     dev    = tvm.cuda(0) if is_cuda else tvm.cpu(0)
     vm     = relax.VirtualMachine(rt_mod, dev)
-    x_tvm  = tvm.nd.array(x_np, dev)
+    x_tvm  = tvm.runtime.tensor(x_np, dev)
 
     for _ in range(warmup):
         vm["main"](x_tvm)
@@ -656,7 +673,7 @@ _WORKER_FN = {
 
 def run_isolated(backend: str, cfg_raw: dict, runs: int, warmup: int) -> Optional[dict]:
     """
-    Spawn a fresh Python process for one backend × one repetition.
+    Spawn a fresh Python process for one backend x one repetition.
     Passes config as JSON via env var to avoid shell-quoting issues.
     """
     env = os.environ.copy()
@@ -682,13 +699,13 @@ def run_isolated(backend: str, cfg_raw: dict, runs: int, warmup: int) -> Optiona
             env=env, timeout=900,
         )
     except subprocess.TimeoutExpired:
-        print("  ✗  Subprocess timed out", file=sys.stderr)
+        print("Subprocess timed out", file=sys.stderr)
         return None
 
     if result.returncode != 0:
         # Print last 60 lines of stderr for diagnosis
         err_lines = result.stderr.strip().splitlines()
-        print(f"  ✗  Worker failed (exit {result.returncode}):", file=sys.stderr)
+        print(f"Worker failed (exit {result.returncode}):", file=sys.stderr)
         for line in err_lines[-60:]:
             print(f"     {line}", file=sys.stderr)
         return None
@@ -702,7 +719,7 @@ def run_isolated(backend: str, cfg_raw: dict, runs: int, warmup: int) -> Optiona
         except json.JSONDecodeError:
             continue
 
-    print("  ✗  No valid JSON found in worker output", file=sys.stderr)
+    print("No valid JSON found in worker output", file=sys.stderr)
     print(f"     stdout tail: {result.stdout[-500:]}", file=sys.stderr)
     return None
 
@@ -804,6 +821,9 @@ def main() -> None:
                     help="Try sudo cpufreq-set -g performance before benchmarking")
     ap.add_argument("--out",             default=None,
                     help="JSON output path (default: next to config file)")
+    ap.add_argument("--cooldown-timeout", type=float, default=90.0,
+                help="Max seconds to wait for cooldown (default: 90)")
+
     args = ap.parse_args()
 
     cfg_path = Path(args.config).resolve()
@@ -812,7 +832,7 @@ def main() -> None:
     # ── Optionally set performance governor ──────────────────────────────────
     if args.set_performance:
         ok = try_set_performance_governor()
-        print(f"  CPU governor → performance: {'✓' if ok else '✗ (run with sudo or install cpufrequtils)'}")
+        print(f"  CPU governor → performance: {'ok' if ok else 'fail (run with sudo or install cpufrequtils)'}")
 
     print_system_info()
 
@@ -832,7 +852,7 @@ def main() -> None:
         for rep in range(1, args.repeats + 1):
             # Cooldown before every rep (including first to ensure stable start)
             if not args.no_cooldown:
-                cooldown(target_c=args.cooldown_temp)
+                cooldown(target_c=args.cooldown_temp, max_wait_s=args.cooldown_timeout)
 
             check_throttled()
 
@@ -842,7 +862,7 @@ def main() -> None:
             data = run_isolated(backend, cfg_raw, args.runs, args.warmup)
 
             if data is None:
-                print(f"    rep {rep:>2}/{args.repeats}  ✗  failed — skipping")
+                print(f"rep {rep:>2}/{args.repeats} failed — skipping")
                 continue
 
             times   = data["times_ms"]
@@ -862,7 +882,7 @@ def main() -> None:
                       power_mw=pwr_rep["mean_mw"] if pwr_rep else None)
 
         if not rep_means:
-            print(f"  ✗  All repetitions failed for {label}")
+            print(f"All repetitions failed for {label}")
             continue
 
         stats = compute_stats(rep_means)
