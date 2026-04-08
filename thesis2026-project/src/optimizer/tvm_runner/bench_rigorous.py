@@ -507,13 +507,17 @@ def _worker_tflite(cfg_raw: dict, runs: int, warmup: int) -> None:
     threads = int(tflite_cfg.get("threads", 4))
 
     # Prefer the lightweight tflite_runtime package (available on Pi5 / Orin).
-    # Fall back to the full tensorflow tf.lite.Interpreter if not installed.
+    # Fall back to the full ai_edge_litert or tensorflow tf.lite.Interpreter if not installed.
     try:
         import tflite_runtime.interpreter as _tflite
         Interpreter = _tflite.Interpreter
     except ImportError:
-        import tensorflow as tf
-        Interpreter = tf.lite.Interpreter
+        try:
+            from ai_edge_litert.interpreter import Interpreter
+        except ImportError:
+            import tensorflow as tf
+            Interpreter = tf.lite.Interpreter
+
 
     interp = Interpreter(model_path=model_path, num_threads=threads)
     interp.allocate_tensors()
