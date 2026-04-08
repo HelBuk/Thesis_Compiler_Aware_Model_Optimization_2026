@@ -34,15 +34,15 @@ tvm:
   num_trials_per_iter: 64
   timeout_builder_s: 300
   timeout_runner_s: 300
-  export_path: "tvm_yolov8n_gpu_one_round_66_tasks_v6.so" #"./out/tvm_compiled_models/yolov8n_orin_gpu_fp32_v2.so"
+  export_path: "../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v6.so" #"./out/tvm_compiled_models/yolov8n_orin_gpu_fp32_v2.so"
 
 tvm_targeted_tuning:
   enable: false
   operations: null                    # Tasks to tune: String or List[str]
 
 benchmark:
-  runs: 200
-  warmup: 20
+  runs: 1000
+  warmup: 200
 
 onnxruntime:
   #provider: "CUDAExecutionProvider"   # "CPUExecutionProvider" | "CUDAExecutionProvider" | "TensorrtExecutionProvider"
@@ -52,3 +52,6 @@ onnxruntime:
     engine_cache_path: "./optimizer/tvm_runner/out/experiments/trt_cache/trt_current"
     fp16_enable: false
   use_arena: true # Default: True; if None: True; Otherwise: val; 
+
+tensorrt:
+  engine_path: "./optimizer/tvm_runner/out/experiments/trt_cache/trt_current/TensorrtExecutionProvider_TRTKernel_graph_main_graph_12725355770372969813_0_0_sm87.engine"

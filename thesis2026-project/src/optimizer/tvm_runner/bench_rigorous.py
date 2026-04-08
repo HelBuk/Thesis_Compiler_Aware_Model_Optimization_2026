@@ -159,16 +159,13 @@ _POWER_PATHS:  List[str] = []  # sysfs paths for INA3221 rails
 
 def _discover_power_source() -> tuple:
     """Find the first available power sensor on this platform."""
-    import glob
+
     # Jetson INA3221 (Orin Nano, Xavier, AGX …) — values in µW
-    for pattern in (
-        "/sys/bus/i2c/drivers/ina3221x/*/iio:device*/in_power*_input",
-        "/sys/bus/i2c/drivers/ina3221/*/hwmon/hwmon*/power*_input",
-        "/sys/devices/platform/*/i2c-*/*/hwmon/hwmon*/power*_input",
-    ):
-        paths = sorted(glob.glob(pattern))
-        if paths:
-            return "ina3221", paths
+    import glob
+    for hwmon in glob.glob("/sys/class/hwmon/hwmon*"):
+        name = _read_file(f"{hwmon}/name")
+        if name == "ina3221":
+            return "ina3221_vi", [hwmon] 
     # Raspberry Pi 5 PMIC via vcgencmd pmic_read_adc
     try:
         r = subprocess.run(["vcgencmd", "pmic_read_adc"],
@@ -186,16 +183,21 @@ def _sample_power_mw() -> Optional[float]:
     if not _POWER_SOURCE:
         _POWER_SOURCE, _POWER_PATHS = _discover_power_source()
 
-    if _POWER_SOURCE == "ina3221":
-        total = 0.0
-        for p in _POWER_PATHS:
-            raw = _read_file(p)
-            if raw:
+    if _POWER_SOURCE == "ina3221_vi":
+        hwmon = _POWER_PATHS[0]
+        total_mw = 0.0
+        matched = 0
+        for ch in range(1, 8):
+            curr_raw = _read_file(f"{hwmon}/curr{ch}_input")  # mA
+            volt_raw = _read_file(f"{hwmon}/in{ch}_input")    # mV
+            if curr_raw and volt_raw:
                 try:
-                    total += int(raw)       # µW
+                    mw = int(curr_raw) * int(volt_raw) / 1000.0  # mA*mV/1000 = mW
+                    total_mw += mw
+                    matched += 1
                 except ValueError:
                     pass
-        return total / 1000.0 if total > 0 else None   # µW → mW
+        return total_mw if matched > 0 else None
 
     if _POWER_SOURCE == "vcgencmd":
         try:
