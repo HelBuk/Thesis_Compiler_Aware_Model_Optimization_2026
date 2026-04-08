@@ -437,7 +437,7 @@ Stages:
 
     A typical ML execution flow involves translating a model defined in a high-level framework
     (like TensorFlow, PyTorch, or JAX) into a format suitable for high-performance execution on target hardware.
-    This translation process is orchestrated by the ML compiler and runtime stack (see Fig. ~\ref{fig:example})
+    This translation process is orchestrated by the ML compiler and runtime stack (see Fig. ~\ref{fig:compflow})
 
     \begin{figure}[t]
         \centering
@@ -681,6 +681,300 @@ These strategies reduce dispatch overhead for frequently executed execution path
             93.26\% by the pre-trained model, the accuracy drop is negligible on CIFAR-10.
     \end{itemize}
 
+
+\section{Apache TVM}
+
+Apache TVM is an open-source machine learning compiler stack designed to transform high-level model
+descriptions into efficient executable code for diverse hardware targets, including CPUs, GPUs,
+and specialized accelerators. In contrast to framework-centric execution, where a model is typically
+run as a sequence of library calls inside a general-purpose runtime, TVM adopts a compiler-first
+approach: the model is imported, represented in intermediate forms, transformed through a series
+of optimizations, lowered into tensor programs, and finally compiled into target-specific code and
+runtime artifacts. The central motivation behind TVM is performance portability, that is, the ability
+to obtain efficient inference across heterogeneous hardware without having to manually rewrite kernels
+for each platform ~\cite{chen2018tvm}.
+
+Deep learning frameworks such as PyTorch and TensorFlow make models easy to define, train, and export,
+but they do not necessarily produce binaries that are well optimized for every deployment target.
+Their default execution paths often depend on pre-existing backend libraries and general-purpose
+runtimes, which may leave performance on the table, especially on edge devices or less common
+architectures. TVM aims to close this gap by treating model deployment as a compiler problem.
+Instead of only selecting from a fixed set of vendor-provided kernels, it can transform the graph,
+generate low-level tensor code, and tune the generated implementation for the target hardware.
+
+From a systems perspective, TVM can be understood as a multi-stage compilation pipeline:
+
+\begin{enumerate}
+    \item \textbf{Frontend import.} Models are imported from formats such as ONNX, TensorFlow, or
+    framework-exported graphs and translated into TVM's internal representation.
+    \item \textbf{Graph-level optimization.} High-level transformations are applied, such as constant
+    folding, dead-code elimination, operator fusion, and layout rewriting.
+    \item \textbf{Lowering to tensor programs.} Individual operators are lowered into explicit loop- and
+    tensor-based computations that expose opportunities for schedule optimization.
+    \item \textbf{Schedule optimization and tuning.} The compiler explores implementation choices such as
+    tiling, loop reordering, vectorization, unrolling, parallelization, memory placement, and thread binding.
+    \item \textbf{Code generation.} The optimized tensor programs are translated into target-specific code,
+    for example via LLVM for CPUs or CUDA for NVIDIA GPUs.
+    \item \textbf{Runtime packaging and execution.} The compiled artifact is packaged together with a runtime
+    component, such as a graph executor, virtual machine, or ahead-of-time runtime, depending on the deployment
+    setting.
+\end{enumerate}
+
+The key idea behind TVM is that performance optimization should occur at multiple abstraction levels.
+At the graph level, TVM can simplify and restructure the model to reduce overhead and memory traffic.
+At the operator level, it can search for efficient implementations of the remaining kernels. This is
+especially important because deep learning performance is often determined not only by arithmetic cost,
+but also by memory access patterns, tensor layout, synchronization overhead, and the degree to which
+the generated kernels match the microarchitectural properties of the target hardware. In this sense,
+TVM differs from a pure runtime system: it does not simply execute a graph, but attempts to synthesize
+an efficient implementation of that graph for a specific target.
+
+A major contribution of TVM is the separation between the computation and the schedule.
+The computation describes what is to be computed, while the schedule describes how the
+computation is mapped to hardware. For example, the same convolution can be implemented with different
+tile sizes, loop orders, vector widths, thread mappings, and memory staging strategies. By exposing
+these choices explicitly, TVM enables systematic optimization instead of relying solely on fixed library
+kernels. This design is particularly valuable on hardware where vendor libraries are unavailable,
+suboptimal, or narrowly tuned for a limited set of workloads.
+
+Another important feature of TVM is automated tuning. Rather than requiring all schedules to be written
+manually, TVM can search over a space of candidate implementations and evaluate them on the target device.
+The goal is to discover schedules that best exploit the target architecture's compute resources, cache
+hierarchy, memory bandwidth, and parallel execution model. In practice, this means that TVM can adapt
+the same model to very different platforms, ranging from embedded ARM CPUs to NVIDIA GPUs and more
+specialized accelerators. This tuning-based approach is one of the main reasons TVM is attractive for
+research and deployment on heterogeneous edge hardware.
+
+TVM is particularly appealing in scenarios where model deployment must go beyond standard inference APIs.
+For example, it allows the developer to inspect intermediate representations, influence optimization
+passes, control scheduling decisions, and integrate custom compilation flows. This makes it useful not
+only as a deployment framework, but also as a research platform for studying compiler effects on
+machine learning inference. In the context of edge AI, where latency, memory traffic, and hardware
+utilization are critical, this level of control can be a major advantage.
+
+At the same time, TVM also has several limitations. First, achieving strong performance often depends on
+the quality of the tuning process. An untuned TVM build may perform only modestly better than a generic
+runtime, and in some cases may perform worse. Second, the compilation workflow is more complex than that
+of more deployment-oriented frameworks such as ONNX Runtime or TensorRT. This complexity increases the
+engineering effort required to build a stable pipeline, especially when dealing with dynamic shapes,
+unsupported operators, or custom layers. Third, while TVM offers broad flexibility, this flexibility
+comes with a steeper learning curve: understanding its IR structure, scheduling model, and tuning workflow
+typically requires considerably more compiler knowledge than using a runtime-oriented backend. These
+trade-offs make TVM powerful, but not always the most practical choice for rapid deployment.
+
+Compared with TensorRT, TVM is generally more open and more flexible, but often less turnkey.
+TensorRT is highly optimized for NVIDIA GPUs and provides aggressive graph- and kernel-level
+optimizations with relatively little manual effort, making it very effective for production inference
+on supported NVIDIA platforms. However, TensorRT is tied to the NVIDIA ecosystem and offers less
+control over compiler internals. TVM, by contrast, can target a broader range of devices and allows
+deeper intervention into compilation and scheduling, which is advantageous for research and for
+non-standard hardware targets. Compared with ONNX Runtime, TVM typically provides more opportunities
+for hardware-specific code generation and tuning, whereas ONNX Runtime emphasizes broad operator support,
+ease of use, and stable execution through execution providers. Thus, TVM occupies a distinctive position:
+it is best viewed not merely as an inference runtime, but as a programmable optimization stack for
+machine learning deployment.
+
+Overall, the main strength of TVM lies in its ability to bridge the gap between high-level model
+representation and low-level hardware-aware optimization. Its compiler-driven design makes it particularly
+relevant when standard backends do not fully exploit the target platform, or when the goal is to study
+how graph transformations, scheduling, and code generation influence end-to-end inference performance.
+For this reason, TVM is a compelling framework in research on compiler-aware optimization of deep learning
+models for edge devices.
+
+One of the central graph optimizations performed by TVM is operator fusion. Instead of executing each
+operation independently, multiple adjacent operations can be merged into a single fused region. This
+reduces kernel launch overhead, avoids writing intermediate tensors to memory, and may improve cache
+reuse.
+
+A common example in neural networks is the fusion of convolution, bias addition, and activation:
+
+\begin{equation}
+y = \mathrm{ReLU}(\mathrm{Conv}(x, w) + b)
+\end{equation}
+
+Without fusion, this sequence may be executed as three separate kernels:
+
+\begin{enumerate}
+\item convolution,
+\item elementwise bias addition,
+\item activation.
+\end{enumerate}
+
+With fusion, the same sequence can be lowered into one kernel that computes the final output directly:
+
+\begin{equation}
+y_{n,c,h,w} = \max \left(0,\; \sum_{r,s,k} x_{n,k,h+r,w+s} \cdot w_{c,k,r,s} + b_c \right)
+\end{equation}
+
+This eliminates the need to materialize the intermediate tensor produced by the convolution before
+activation.
+
+A simplified illustration of the transformation is shown below:
+
+\begin{minted}[fontsize=\small, breaklines=true]{text}
+
+Before fusion:
+conv2d -> bias_add -> relu
+
+After fusion:
+
+fused_conv2d_bias_relu
+
+\end{minted}
+
+In practice, TVM identifies fusible patterns during graph transformation passes and groups them into
+larger composite functions that are later lowered as a unit.
+
+
+\paragraph{Tensor expression abstraction.}
+
+
+At the operator level, TVM uses tensor-based abstractions to describe computation. In the original TVM
+design, a tensor expression specifies what should be computed, while a separate schedule specifies
+how it should be executed on hardware. This separation is fundamental because the same mathematical
+operation can be implemented efficiently in many different ways depending on the target architecture.
+
+
+For example, matrix multiplication can be expressed as:
+\begin{equation}
+C[i,j] = \sum_k A[i,k] \cdot B[k,j]
+\end{equation}
+
+A simplified TVM tensor-expression implementation is shown below.
+
+\begin{minted}[fontsize=\small, breaklines=true]{python}
+
+from tvm import te
+# Problem size
+M, N, K = 1024, 1024, 1024
+# Placeholders
+A = te.placeholder((M, K), name="A")
+B = te.placeholder((K, N), name="B")
+# Reduction axis
+k = te.reduce_axis((0, K), name="k")
+# Compute definition
+C = te.compute(
+ (M, N),
+lambda i, j: te.sum(A[i, k] * B[k, j], axis=k),
+name="C"
+)
+\end{minted}
+
+
+This definition describes the mathematical computation only. It does not yet specify loop ordering,
+blocking, vectorization, or parallel execution.
+
+
+\paragraph{Scheduling and kernel mapping.}
+To obtain an efficient implementation, TVM applies scheduling decisions that determine how the tensor
+computation maps to loops, threads, and memory. Typical transformations include tiling, loop splitting,
+reordering, vectorization, unrolling, and thread binding.
+A simplified scheduling example for matrix multiplication on CPU is shown below:
+
+\begin{minted}[fontsize=\small, breaklines=true]{python}
+s = te.create_schedule(C.op)
+i, j = C.op.axis
+k = C.op.reduce_axis[0]
+# Tile output axes
+io, ii = s[C].split(i, factor=32)
+jo, ji = s[C].split(j, factor=32)
+# Reorder loops
+s[C].reorder(io, jo, k, ii, ji)
+# Parallelize outer loops
+s[C].parallel(io)
+# Vectorize innermost loop
+s[C].vectorize(ji)
+
+\end{minted}
+
+Here, tiling improves locality, parallelization distributes work across CPU cores, and vectorization
+maps the innermost loop onto SIMD instructions. On GPUs, the same computation would instead be mapped
+to thread blocks and warps.
+
+
+A simplified CUDA-style schedule might look as follows:
+
+\begin{minted}[fontsize=\small, breaklines=true]{python}
+bx, tx = s[C].split(i, factor=16)
+by, ty = s[C].split(j, factor=16)
+s[C].bind(bx, te.thread_axis("blockIdx.x"))
+s[C].bind(by, te.thread_axis("blockIdx.y"))
+s[C].bind(tx, te.thread_axis("threadIdx.x"))
+s[C].bind(ty, te.thread_axis("threadIdx.y"))
+
+\end{minted}
+
+
+Such transformations demonstrate that TVM does not merely call a pre-existing kernel; rather, it can
+generate a hardware-aware implementation by explicitly controlling the execution structure.
+
+\paragraph{Fusion and memory traffic reduction.}
+
+The practical benefit of fusion can be understood through memory traffic. Suppose three operators are
+executed separately:
+
+\begin{equation}
+    z = \mathrm{ReLU}(x + y)
+\end{equation}
+
+If implemented naively as two kernels, the intermediate result \(u = x + y\) must first be written to
+memory and then read again by the activation kernel. With fusion, the output is computed directly:
+
+\begin{equation}
+z_i = \max(0, x_i + y_i)
+\end{equation}
+
+This reduces memory traffic from:
+\begin{equation}
+\text{read}(x) + \text{read}(y) + \text{write}(u) + \text{read}(u) + \text{write}(z)
+\end{equation}
+
+to:
+
+\begin{equation}
+\text{read}(x) + \text{read}(y) + \text{write}(z)
+\end{equation}
+
+For memory-bound workloads, such reductions can improve performance substantially, particularly on
+edge devices with limited memory bandwidth.
+
+
+
+\paragraph{Auto-tuning and search.}
+
+
+A major advantage of TVM is that these scheduling decisions need not be chosen manually. Instead,
+TVM can search over a space of candidate schedules and evaluate them on the target hardware. For
+example, the compiler may explore different tile sizes, vector widths, loop orders, or memory staging
+strategies in order to identify the implementation with the best measured latency.
+
+A simplified view of this process is:
+
+\begin{enumerate}
+\item define the computation,
+\item generate multiple candidate schedules,
+\item benchmark each candidate on the target device,
+\item select the best-performing schedule,
+\item compile the final executable.
+\end{enumerate}
+
+This search-based optimization is one of the reasons TVM is attractive for heterogeneous deployment:
+it can adapt the same model to different hardware backends without requiring a fully manual kernel
+engineering effort.
+
+
+
+
+\paragraph{Relation to this thesis.}
+
+
+In the context of this thesis, TVM is particularly relevant because it exposes the interaction between
+graph-level transformations and kernel-level execution efficiency. Unlike purely runtime-oriented
+frameworks, TVM allows direct control over lowering and scheduling decisions, which makes it suitable
+for studying how memory traffic, layout transformations, operator fusion, and target-specific code
+generation affect inference latency on edge platforms. This is especially valuable when analyzing
+whether bottlenecks arise from the model graph itself, from suboptimal kernel implementations, or from
+a mismatch between the deployed runtime and the target hardware.
 
 
 
@@ -1234,40 +1528,175 @@ Detailed per-layer benchmarking results are provided in Appendix~\ref{chap:appen
 %        \label{fig:roofline_mac_mps}
 %    \end{figure}
 
-
-\section{Apache TVM}
-
-Apache TVM is a modular ML compiler framework that transforms high-level tensor programs into optimized
-low-level code and runtime artifacts. It is an Open Source Project, mainly developed by a
-Tianqi Chen's team at Carnegie Mellon University.
-
-Deep learning frameworks make models easy to define, train, and export. However, they do not always produce
-hardware-efficient binaries for every deployment target. TVM exists to close that gap: it turns
-model programs into optimized executables across heterogeneous hardware. It also provides deep optimization
-control over the model.
-
-TVM addresses this with a compiler-first approach: represents computation in intermediate forms,
-applies transformations, searches optimization spaces, and generates code for many targets.
-
-\subsection*{Core architecture}
-
-TVM can be understood as a pipeline:
-
-\begin{enumerate}
-\item Frontend import: ONNX, PyTorch-exported graphs, TensorFlow, etc.
-\item Graph-level IR transformations: operator fusion, layout rewrite, constant folding.
-\item Tensor-level lowering and scheduling: loop tiling, vectorization, unrolling, memory placement.
-\item Target code generation: LLVM for CPU, CUDA for NVIDIA GPU, other backends.
-\item Runtime packaging: graph executor, VM, or AOT runtime.
-\end{enumerate}
-
-\begin{minted}[linenos, breaklines, frame=single]{python}
-def add(a, b):
-    return a + b
-\end{minted}
+\section{Performance Comparison}
 
 
-TVM performs hardware-aware graph partitioning.
+We evaluated the performance of YOLOv8n models on two hardware platforms: the NVIDIA Orin Nano and the
+Raspberry Pi 5. Following this evaluation, we investigated different model compilation approaches tailored
+to each target platform.
+
+Due to substantial differences in hardware architectures, the set of available inference frameworks also differs.
+Hardware-specific frameworks such as TensorRT are limited to NVIDIA GPUs and therefore cannot be used for a direct
+cross-platform comparison. Instead, we assess the performance improvements provided by each framework
+relative to a common baseline on the same hardware.
+
+The baseline execution is performed in PyTorch eager mode. In this mode, operations are executed immediately as
+Python code is interpreted line by line. The computational graph is constructed dynamically at runtime, which
+makes debugging straightforward and enables inspection of intermediate results, such as per-layer performance
+metrics presented in the previous section. However, eager execution introduces several limitations: Python-level
+overhead for each operation, lack of global graph-level optimization, and limited hardware-specific tuning.
+As a result, the model is effectively executed as a sequence of independent operators rather than as an optimized
+computational graph.
+
+To address these limitations, the model can be treated as a static graph and optimized using compiler-based
+frameworks. A variety of such compilers have been developed to enable hardware-aware optimizations, including
+operator fusion, memory planning, and kernel selection. In this section, we evaluate these approaches on the
+target hardware platforms.
+
+A standard step in this workflow is converting the model to the ONNX (Open Neural Network Exchange) format.
+In this work, we use ONNX export with opset version 17 and enable graph simplification. The opset defines the
+set of available operators (e.g., Conv, Add, Resize) and their semantics. Choosing an appropriate opset
+version is important: newer opsets may not be fully supported by all backends, while older versions may
+lack required operators or optimizations. The opset selection can therefore impact operator decomposition,
+kernel count, memory traffic, and opportunities for fusion.
+
+Graph simplification is applied to reduce computational redundancy and streamline the graph structure.
+This includes:
+\begin{itemize}
+\item
+Constant folding: precomputing constant expressions (e.g., $x + (2 \times 3) \rightarrow x + 6$)
+\item
+Node elimination: removing redundant operations such as identity mappings
+\item
+Subgraph simplification: collapsing sequences of operations into simpler equivalents when possible
+\item
+Dead code elimination: removing unused branches of the graph
+
+\end{itemize}
+
+
+While these transformations simplify the graph, backend-specific compilers (e.g., TensorRT, TVM) may perform
+additional, more aggressive optimizations such as kernel fusion and layout transformations.
+
+
+Once converted, the ONNX model can be executed using a variety of inference frameworks. On CPU-based platforms,
+commonly used frameworks include PyTorch (via TorchScript or TorchInductor), ONNX Runtime, and TensorFlow Lite.
+These frameworks provide different levels of optimization, ranging from general-purpose execution to lightweight
+deployment on resource-constrained devices.
+
+On GPU-based platforms, available options include PyTorch with CUDA execution, ONNX Runtime with GPU or TensorRT
+execution providers, and TensorRT as a dedicated compiler and runtime for NVIDIA hardware. TensorRT performs
+aggressive graph-level and kernel-level optimizations, such as operator fusion, precision calibration
+(e.g., FP16/INT8), and memory layout transformations, making it particularly effective for high-performance
+inference on NVIDIA devices.
+
+Another notable framework that supports both CPU and GPU targets is Apache TVM. Unlike runtime-focused frameworks,
+TVM operates as a deep learning compiler stack that performs end-to-end optimization, including graph
+transformations, operator scheduling, and hardware-specific code generation. This approach provides a
+high degree of flexibility and control over low-level execution compared to more API-driven frameworks,
+although it typically requires more manual tuning and expertise.
+
+\subsection{Raspberry Pi~5 Benchmark Overview}
+
+All Raspberry Pi~5 experiments were conducted on a Linux system based on the
+\texttt{6.12.62+rpt-rpi-2712} kernel using the AArch64 architecture. The CPU frequency
+governor was fixed to \texttt{performance}, and the CPU was configured to 2.4\,GHz
+during the measurements. To reduce thermal and scheduling-related variation, the
+benchmarking procedure included a cooldown phase before each repetition and checks for
+frequency throttling. Each backend was evaluated over five repeated runs, with 200 timed
+inferences per repetition after 30 warm-up iterations. The comparison was performed
+using all four available CPU cores on the Raspberry Pi~5 in order to reflect the maximum
+CPU throughput available in this deployment setting. This setup was chosen to reduce
+short-term variance and to provide a stable estimate of sustained inference performance
+under controlled CPU conditions.
+
+The evaluated CPU backends were TVM, ONNX Runtime, Google AI Edge LiteRT, and PyTorch
+used as a baseline. In the Python environment used in this work, LiteRT was accessed
+through the \texttt{ai\_edge\_litert} runtime. ONNX Runtime was evaluated with the
+\texttt{CPUExecutionProvider}. Table~\ref{tab:pi5_backend_benchmark} summarises the
+measured latency and throughput, while Table~\ref{tab:pi5_backend_power} summarises
+power results.
+
+\begin{table}[ht]
+\centering
+\caption{End-to-end YOLOv8n inference performance on Raspberry Pi~5 CPU. Each result is based on 5 repetitions,
+with 200 timed runs per repetition after 30 warm-up iterations. LiteRT corresponds to the
+\texttt{ai\_edge\_litert} runtime.}
+\label{tab:pi5_backend_benchmark}
+\begin{tabular}{lrrrrrr}
+\toprule
+Backend & Mean (ms) & Std (ms) & Median (ms) & Min (ms) & Max (ms) & FPS mean \\
+\midrule
+TVM                 & 192.0 & 6.0 & 188.8 & 187.0 & 201.3 & 5.21 \\
+ONNX Runtime        & 189.2 & 5.7 & 187.2 & 185.6 & 199.2 & 5.28 \\
+LiteRT              & 154.1 & 2.0 & 155.2 & 151.2 & 156.0 & 6.49 \\
+PyTorch (baseline)  & 290.1 & 1.8 & 289.8 & 288.5 & 293.3 & 3.45 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Overall Performance.}
+Among all evaluated frameworks, LiteRT achieved the best overall latency on the
+Raspberry Pi~5, with a mean inference time of 154.1\,ms and a throughput of
+6.49\,FPS. ONNX Runtime and TVM formed a second performance group with very similar
+results: ONNX Runtime achieved a mean latency of 189.2\,ms, while TVM reached
+192.0\,ms. The difference between them was 2.8\,ms, which is small relative to the
+observed run-to-run variation. PyTorch was clearly slower than the other backends,
+with a mean latency of 290.1\,ms and a throughput of 3.45\,FPS.
+
+\begin{table}[ht]
+\centering
+\caption{Average power consumption during YOLOv8n inference on Raspberry Pi~5 CPU. LiteRT corresponds to the
+\texttt{ai\_edge\_litert} runtime.}
+\label{tab:pi5_backend_power}
+\begin{tabular}{lrrr}
+\toprule
+Backend & Mean Power (mW) & Max Power (mW) & Std (mW) \\
+\midrule
+TVM                 & 4096.2 & 4783.1 & 46.1 \\
+ONNX Runtime        & 4043.2 & 5415.1 & 172.5 \\
+LiteRT              & 2292.8 & 2591.5 & 14.2 \\
+PyTorch (baseline)  & 2316.4 & 2759.8 & 30.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Stability of Measurements.}
+The repeated-run statistics show that TVM and ONNX Runtime had comparable variability,
+with standard deviations of 6.03\,ms and 5.65\,ms respectively. PyTorch and LiteRT
+were more stable, with standard deviations of 1.84\,ms and 2.05\,ms. LiteRT therefore
+combined the best average performance in this benchmark with comparatively consistent
+execution.
+
+\paragraph{Power Behaviour.}
+TVM and ONNX Runtime showed similar average power draw, measuring 4.10\,W and
+4.04\,W respectively. In contrast, LiteRT and PyTorch consumed substantially less
+average power, at 2.29\,W and 2.32\,W. This is a notable result, since LiteRT was
+both the fastest backend in this experiment and the one with the lowest average power
+consumption.
+
+\paragraph{Interpretation of the TVM Result.}
+Although TVM did not outperform ONNX Runtime in this end-to-end benchmark, the result
+remains important. TVM achieved nearly identical CPU performance while relying on a
+compiler-driven deployment pipeline based on Relax and MetaSchedule tuning. This shows
+that the generated schedules were competitive with a mature production runtime on
+Raspberry Pi~5, even if they did not provide a clear FP32 latency advantage in this
+configuration.
+
+\paragraph{Conclusion.}
+The benchmark results show three distinct groups on the Raspberry Pi~5 CPU. LiteRT
+delivered the best end-to-end result, combining the lowest latency, the highest
+throughput, and the lowest average power consumption. ONNX Runtime and TVM achieved
+similar performance, with ONNX Runtime being slightly faster in the measured
+configuration. PyTorch eager mode remained the slowest baseline by a large margin.
+
+Relative to the PyTorch eager baseline, TVM achieved a \(1.51\times\) speedup,
+corresponding to a 33.8\,\% reduction in mean inference latency. ONNX Runtime
+achieved a \(1.53\times\) speedup, corresponding to a 34.8\,\% latency reduction.
+LiteRT provided the largest improvement, reaching a \(1.88\times\) speedup and a
+46.9\,\% reduction in mean latency. Overall, these results indicate that TVM is
+capable of producing competitive CPU inference performance on Raspberry Pi~5, but in
+this experiment the most efficient backend was LiteRT rather than TVM.
 
 \section{FP32 Runtime Comparison on Jetson Orin}
 \label{subsec:fp32_runtime_comparison_orin}
@@ -1293,7 +1722,8 @@ The configuration (\texttt{gpu\_fp32.yaml}) used:
 \end{itemize}
 
 For TVM, the evaluated module was compiled using an existing MetaSchedule database generated in an earlier tuning stage.
-The tuning logs indicate a substantial search effort (\(4282\) total trials), suggesting that the measured TVM result reflects a tuned, deployment-oriented build rather than an untuned baseline.
+The tuning logs indicate a substantial search effort (\(4282\) total trials), suggesting that the measured
+TVM result reflects a tuned, deployment-oriented build rather than an untuned baseline.
 
 \begin{table}[ht]
 \centering
@@ -1313,12 +1743,17 @@ PyTorch (Ultralytics) & 24.7877 & 40.3426 \\
 \end{table}
 
 The results show a clear separation between TensorRT-backed and non-TensorRT execution in this setup.
-ONNX Runtime with TensorRT EP achieved the lowest latency (\(13.53\) ms), corresponding to \(73.91\) FPS, while TVM, ONNX Runtime CUDA EP, and PyTorch formed a second cluster around \(23.5\)--\(24.8\) ms (\(\sim 40\)--\(43\) FPS).
-Relative to ONNX Runtime CUDA EP, TensorRT EP reduced latency by approximately \(43.2\%\) (about \(1.76\times\) speedup).
+ONNX Runtime with TensorRT EP achieved the lowest latency (\(13.53\) ms), corresponding to \(73.91\) FPS,
+while TVM, ONNX Runtime CUDA EP, and PyTorch formed a second cluster around \(23.5\)--\(24.8\) ms
+(\(\sim 40\)--\(43\) FPS).
+Relative to ONNX Runtime CUDA EP, TensorRT EP reduced latency by approximately \(43.2\%\) (about \(1.76\times\)
+speedup).
 TVM and ONNX Runtime CUDA EP were close in performance, with TVM slightly faster in this run.
 
 Overall, this experiment provides a practical FP32 deployment baseline for subsequent quantization analysis.
-It also indicates that, on Jetson Orin, backend selection can have an impact comparable to model-level optimization: the same FP32 network exhibits markedly different inference speed depending on the runtime execution provider.
+It also indicates that, on Jetson Orin, backend selection can have an impact comparable to model-level
+optimization: the same FP32 network exhibits markedly different inference speed depending on the runtime
+execution provider.
 
 
 \section{Quantization Influence on YOLOv8n}
@@ -1693,7 +2128,7 @@ reformat operations may appear as kernels or device-to-device copies.
 
 \chapter{Description of Use of Artificial Intelligence}
 
-    In working on this specialization project, I have used
+    In working on this Master's Thesis, I have used
     artificial intelligence (AI) tools in the following limited
     ways. I used ChatGPT (OpenAI) to assist with idea development,
     clarifying concepts, and improving the structure and language of the text (for example,
@@ -1816,8 +2251,11 @@ Full Model (THOP)                    & 327.00 & 157.765 & 13.54 & Mixed / Overhe
 \end{longtable}
 
 \begin{longtable}{p{0.44\textwidth} r r r p{0.18\textwidth}}
-\caption{Per-layer performance statistics of YOLOv8n on Jetson Orin Nano (GPU, FP32). Regime is derived from the roofline knee $\mathrm{AI}_{\mathrm{knee}}\approx 14.56$ FLOPs/byte (using measured BW=55.68\,GB/s and peak=810.68\,GFLOP/s): Memory-bound if AI$<13.10$, Knee/transition if $13.10\le$AI$\le 16.02$, Compute-bound if AI$>16.02$.}
-\label{tab:roofline_orin_layers_all}\\
+\caption{Per-layer performance statistics of YOLOv8n on Jetson Orin Nano (GPU, FP32). Regime is derived
+from the roofline knee $\mathrm{AI}_{\mathrm{knee}}\approx 14.56$ FLOPs/byte (using measured BW=55.68\,GB/s and
+peak=810.68\,GFLOP/s): Memory-bound if AI$<13.10$, Knee/transition if $13.10\le$AI$\le 16.02$, Compute-bound
+if AI$>16.02$.}
+\label{tab:roofline_orin_layers_all_orin}\\
 
 \toprule
 Layer & Time (ms) & AI (FLOPs/byte) & Perf (GFLOP/s) & Regime \\
