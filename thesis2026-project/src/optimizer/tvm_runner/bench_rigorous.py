@@ -804,6 +804,34 @@ BACKEND_LABELS = {
 }
 
 
+def detect_device_tag(cfg_raw: dict) -> str:
+    """Return a short platform tag for the output filename.
+
+    Examples: 'pi5_cpu', 'orin_gpu', 'cpu'
+    """
+    device_kind = cfg_raw.get("device", {}).get("kind", "cpu")
+    if device_kind == "cuda":
+        # Could refine further (Orin Nano vs AGX etc.) via /proc/device-tree/model
+        model = _read_file("/proc/device-tree/model") or ""
+        if "orin" in model.lower():
+            return "orin_gpu"
+        return "jetson_gpu"
+    # CPU — check for Pi5 specifically
+    model = _read_file("/proc/device-tree/model") or ""
+    if "raspberry pi 5" in model.lower():
+        return "pi5_cpu"
+    if "raspberry pi" in model.lower():
+        return "pi_cpu"
+    return "cpu"
+
+
+def _save_results(out_path: Path, payload: dict) -> None:
+    """Atomically write current results to JSON (safe against partial writes)."""
+    tmp = out_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(out_path)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Rigorous isolated benchmark")
     ap.add_argument("--config",          required=True,
@@ -832,6 +860,33 @@ def main() -> None:
 
     cfg_path = Path(args.config).resolve()
     cfg_raw  = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+
+    # ── Resolve output path early (includes timestamp + device tag) ───────────
+    ts  = time.strftime("%Y%m%d_%H%M%S")
+    tag = detect_device_tag(cfg_raw)
+    if args.out:
+        out_path = Path(args.out)
+    else:
+        out_dir  = Path(__file__).parent / "out" / "benchmarking" / "save_here"
+        out_path = out_dir / f"bench_{tag}_{ts}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  Results will be saved → {out_path}")
+
+    # ── Base payload written immediately so file exists from the start ────────
+    payload: dict = {
+        "timestamp"   : ts,
+        "platform"    : platform.platform(),
+        "device_tag"  : tag,
+        "config"      : str(cfg_path),
+        "repeats"     : args.repeats,
+        "runs_per_rep": args.runs,
+        "warmup"      : args.warmup,
+        "cpu_governor": get_cpu_governor(),
+        "cpu_freq_mhz": get_cpu_freq_mhz(),
+        "status"      : "running",
+        "results"     : {},
+    }
+    _save_results(out_path, payload)
 
     # ── Optionally set performance governor ──────────────────────────────────
     if args.set_performance:
@@ -885,6 +940,14 @@ def main() -> None:
             print_rep(rep, args.repeats, mean_ms, std_ms, temp, freq,
                       power_mw=pwr_rep["mean_mw"] if pwr_rep else None)
 
+            # Save partial rep data immediately after each rep
+            partial_key = f"{label}_partial"
+            payload["results"][partial_key] = {
+                "rep_means_so_far": rep_means,
+                "n_completed"     : len(rep_means),
+            }
+            _save_results(out_path, payload)
+
         if not rep_means:
             print(f"All repetitions failed for {label}")
             continue
@@ -901,26 +964,20 @@ def main() -> None:
             stats.update(extra_info)
 
         all_results[label] = stats
+        # Replace partial entry with final stats, save immediately
+        payload["results"].pop(f"{label}_partial", None)
+        payload["results"][label] = stats
+        _save_results(out_path, payload)
         print_stats_block(label, stats)
+        print(f"  Saved → {out_path}")
 
     # ── Summary ──────────────────────────────────────────────────────────────
     print_summary(all_results)
 
-    # ── Save JSON ─────────────────────────────────────────────────────────────
-    out_path = Path(args.out) if args.out else cfg_path.parent / "bench_rigorous_results.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "timestamp"   : time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "platform"    : platform.platform(),
-        "config"      : str(cfg_path),
-        "repeats"     : args.repeats,
-        "runs_per_rep": args.runs,
-        "warmup"      : args.warmup,
-        "cpu_governor": get_cpu_governor(),
-        "cpu_freq_mhz": get_cpu_freq_mhz(),
-        "results"     : all_results,
-    }
-    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    # ── Final save with status=complete ──────────────────────────────────────
+    payload["status"] = "complete"
+    payload["results"] = all_results
+    _save_results(out_path, payload)
     print(f"\n  Results saved → {out_path}\n")
 
 
