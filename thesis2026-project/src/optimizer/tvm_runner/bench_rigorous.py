@@ -496,6 +496,134 @@ def _worker_pytorch(cfg_raw: dict, runs: int, warmup: int) -> None:
                       "times_ms": times, "power": _power_stats(pwr)}))
 
 
+def _worker_torch_compile(cfg_raw: dict, runs: int, warmup: int) -> None:
+    """
+    PyTorch 2.x torch.compile() worker.
+
+    Tries backends in order of decreasing aggressiveness:
+      1. inductor  + mode='max-autotune'    (Triton-based, GPU only)
+      2. inductor  + mode='reduce-overhead' (CUDA graphs via Triton)
+      3. cudagraphs                         (no Triton, GPU only)
+      4. aot_eager                          (CPU-compatible fallback)
+
+    Compilation is timed separately and reported in the JSON output.
+    The benchmark warmup runs start AFTER compilation is complete.
+    """
+    import numpy as np
+    import torch
+    from ultralytics import YOLO
+
+    device_kind = cfg_raw.get("device", {}).get("kind", "cpu")
+    use_cuda    = device_kind == "cuda" and torch.cuda.is_available()
+    device      = torch.device("cuda:0" if use_cuda else "cpu")
+
+    if not use_cuda:
+        torch.set_num_threads(4)
+        torch.set_num_interop_threads(1)
+
+    batch = cfg_raw["model"].get("batch", 1)
+    imgsz = cfg_raw["model"].get("imgsz", 640)
+
+    model = YOLO(cfg_raw["model"]["pt_path"]).model.eval().to(device)
+    x     = torch.randn(batch, 3, imgsz, imgsz, dtype=torch.float32, device=device)
+
+    # ── select compile backend ────────────────────────────────────────────────
+    compile_backend = "unknown"
+    compile_mode    = "default"
+    compile_error   = None
+
+    if not hasattr(torch, "compile"):
+        print(json.dumps({"error": "torch.compile not available (need PyTorch >= 2.0)"}),
+              file=__import__("sys").stderr)
+        raise SystemExit(1)
+
+    compiled_model = None
+
+    # Try most aggressive first, fall back gracefully
+    if use_cuda:
+        attempts = [
+            ("inductor",   "max-autotune"),
+            ("inductor",   "reduce-overhead"),
+            ("cudagraphs", "default"),
+        ]
+    else:
+        attempts = [
+            ("inductor",  "default"),
+            ("aot_eager", "default"),
+        ]
+
+    for backend, mode in attempts:
+        try:
+            torch._dynamo.reset()
+            kw = {"backend": backend, "fullgraph": False}
+            if backend == "inductor":
+                kw["mode"] = mode
+            compiled_model  = torch.compile(model, **kw)
+            compile_backend = backend
+            compile_mode    = mode
+            break
+        except Exception as e:
+            compile_error  = str(e)
+            compiled_model = None
+
+    if compiled_model is None:
+        print(json.dumps({"error": f"torch.compile failed: {compile_error}"}),
+              file=__import__("sys").stderr)
+        raise SystemExit(1)
+
+    # ── first forward pass — actual compilation happens here ─────────────────
+    t_compile_start = time.perf_counter()
+    with torch.inference_mode():
+        compiled_model(x)
+        if use_cuda:
+            torch.cuda.synchronize()
+    compile_s = time.perf_counter() - t_compile_start
+
+    # ── post-compile warmup (caches, cuDNN heuristics) ────────────────────────
+    with torch.inference_mode():
+        for _ in range(warmup):
+            compiled_model(x)
+        if use_cuda:
+            torch.cuda.synchronize()
+
+    # ── benchmark ─────────────────────────────────────────────────────────────
+    pwr:   List[float] = []
+    times: List[float] = []
+
+    with torch.inference_mode():
+        if use_cuda:
+            for i in range(runs):
+                if i % _PWR_EVERY == 0:
+                    p = _sample_power_mw()
+                    if p is not None:
+                        pwr.append(p)
+                t0 = time.perf_counter()
+                compiled_model(x)
+                torch.cuda.synchronize()
+                t1 = time.perf_counter()
+                times.append((t1 - t0) * 1000.0)
+        else:
+            for i in range(runs):
+                if i % _PWR_EVERY == 0:
+                    p = _sample_power_mw()
+                    if p is not None:
+                        pwr.append(p)
+                t0 = time.perf_counter()
+                compiled_model(x)
+                t1 = time.perf_counter()
+                times.append((t1 - t0) * 1000.0)
+
+    print(json.dumps({
+        "backend":         "TorchCompile",
+        "compile_backend": compile_backend,
+        "compile_mode":    compile_mode,
+        "compile_time_s":  round(compile_s, 2),
+        "device":          str(device),
+        "times_ms":        times,
+        "power":           _power_stats(pwr),
+    }))
+
+
 def _worker_tflite(cfg_raw: dict, runs: int, warmup: int) -> None:
     import numpy as np
 
@@ -669,11 +797,12 @@ def _worker_trt(cfg_raw: dict, runs: int, warmup: int) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _WORKER_FN = {
-    "tvm"    : "_worker_tvm",
-    "ort"    : "_worker_ort",
-    "pytorch": "_worker_pytorch",
-    "tflite" : "_worker_tflite",
-    "trt"    : "_worker_trt",
+    "tvm"           : "_worker_tvm",
+    "ort"           : "_worker_ort",
+    "pytorch"       : "_worker_pytorch",
+    "tflite"        : "_worker_tflite",
+    "trt"           : "_worker_trt",
+    "torch_compile" : "_worker_torch_compile",
 }
 
 
@@ -798,11 +927,12 @@ def print_summary(all_results: Dict[str, Dict]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 BACKEND_LABELS = {
-    "tvm"    : "TVM",
-    "ort"    : "ONNXRuntime",
-    "pytorch": "PyTorch",
-    "tflite" : "TFLite",
-    "trt"    : "TensorRT",
+    "tvm"          : "TVM",
+    "ort"          : "ONNXRuntime",
+    "pytorch"      : "PyTorch",
+    "tflite"       : "TFLite",
+    "trt"          : "TensorRT",
+    "torch_compile": "TorchCompile",
 }
 
 
@@ -850,7 +980,7 @@ def main() -> None:
                     help="Skip thermal cooldown between reps")
     ap.add_argument("--backends",        nargs="+",
                     default=["tvm", "ort", "pytorch"],
-                    choices=["tvm", "ort", "pytorch", "tflite", "trt"])
+                    choices=["tvm", "ort", "pytorch", "tflite", "trt", "torch_compile"])
     ap.add_argument("--set-performance", action="store_true",
                     help="Try sudo cpufreq-set -g performance before benchmarking")
     ap.add_argument("--out",             default=None,
