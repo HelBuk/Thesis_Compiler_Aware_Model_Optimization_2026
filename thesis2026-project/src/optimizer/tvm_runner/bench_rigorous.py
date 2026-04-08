@@ -501,13 +501,15 @@ def _worker_torch_compile(cfg_raw: dict, runs: int, warmup: int) -> None:
     PyTorch 2.x torch.compile() worker.
 
     Tries backends in order of decreasing aggressiveness:
-      1. inductor  + mode='max-autotune'    (Triton-based, GPU only)
-      2. inductor  + mode='reduce-overhead' (CUDA graphs via Triton)
-      3. cudagraphs                         (no Triton, GPU only)
-      4. aot_eager                          (CPU-compatible fallback)
+      GPU: 1. inductor  + mode='reduce-overhead' (Triton-based CUDA graphs)
+           2. cudagraphs                         (no Triton needed)
+      CPU: 1. inductor  + mode='default'         (OpenMP C++ codegen)
+           2. aot_eager                          (AOT tracing fallback)
 
-    Compilation is timed separately and reported in the JSON output.
-    The benchmark warmup runs start AFTER compilation is complete.
+    torch.compile() is lazy — the actual compilation fires on the first
+    forward pass, so each attempt includes a trial forward pass inside
+    the try/except so errors are caught and fallback proceeds correctly.
+    Compilation time is reported separately; benchmark warmup starts after.
     """
     import numpy as np
     import torch
@@ -538,13 +540,17 @@ def _worker_torch_compile(cfg_raw: dict, runs: int, warmup: int) -> None:
         raise SystemExit(1)
 
     compiled_model = None
+    compile_s      = 0.0
 
-    # Try most aggressive first, fall back gracefully
+    # Try most aggressive first, fall back gracefully.
+    # NOTE: torch.compile() itself is lazy — it wraps the model without
+    # compiling. The actual compilation (and any Triton/backend errors)
+    # only fires on the FIRST forward pass. So we must run that first
+    # pass inside the attempt loop to catch fallback errors correctly.
     if use_cuda:
         attempts = [
-            ("inductor",   "max-autotune"),
-            ("inductor",   "reduce-overhead"),
-            ("cudagraphs", "default"),
+            ("inductor",   "reduce-overhead"),   # max-autotune needs many SMs
+            ("cudagraphs", "default"),            # no Triton needed
         ]
     else:
         attempts = [
@@ -558,7 +564,17 @@ def _worker_torch_compile(cfg_raw: dict, runs: int, warmup: int) -> None:
             kw = {"backend": backend, "fullgraph": False}
             if backend == "inductor":
                 kw["mode"] = mode
-            compiled_model  = torch.compile(model, **kw)
+            candidate = torch.compile(model, **kw)
+
+            # ── first forward pass: actual compilation happens here ──────────
+            t0 = time.perf_counter()
+            with torch.inference_mode():
+                candidate(x)
+                if use_cuda:
+                    torch.cuda.synchronize()
+            compile_s = time.perf_counter() - t0
+
+            compiled_model  = candidate
             compile_backend = backend
             compile_mode    = mode
             break
@@ -567,17 +583,9 @@ def _worker_torch_compile(cfg_raw: dict, runs: int, warmup: int) -> None:
             compiled_model = None
 
     if compiled_model is None:
-        print(json.dumps({"error": f"torch.compile failed: {compile_error}"}),
+        print(json.dumps({"error": f"torch.compile failed on all backends: {compile_error}"}),
               file=__import__("sys").stderr)
         raise SystemExit(1)
-
-    # ── first forward pass — actual compilation happens here ─────────────────
-    t_compile_start = time.perf_counter()
-    with torch.inference_mode():
-        compiled_model(x)
-        if use_cuda:
-            torch.cuda.synchronize()
-    compile_s = time.perf_counter() - t_compile_start
 
     # ── post-compile warmup (caches, cuDNN heuristics) ────────────────────────
     with torch.inference_mode():
@@ -1068,6 +1076,9 @@ def main() -> None:
 
             if "providers" in data:
                 extra_info["providers"] = data["providers"]
+            for _key in ("compile_backend", "compile_mode", "compile_time_s"):
+                if _key in data:
+                    extra_info[_key] = data[_key]
 
             print_rep(rep, args.repeats, mean_ms, std_ms, temp, freq,
                       power_mw=pwr_rep["mean_mw"] if pwr_rep else None)
