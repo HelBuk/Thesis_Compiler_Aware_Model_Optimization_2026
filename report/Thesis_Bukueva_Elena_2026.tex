@@ -1998,8 +1998,28 @@ to improve upon the baseline and instead increased latency by a factor of
 inference performance on the Jetson Orin Nano, but in this experiment the
 largest practical advantage was obtained with TensorRT.
 
+\section{FP16 Inference Results}
+
+Before discussing the measured FP16 results, it is important to clarify that conversion to FP16 is not
+the same as quantization. In FP16 inference, weights and activations remain in floating-point representation,
+but with reduced numerical precision compared to FP32. By contrast, quantization usually refers
+to mapping tensors into lower-bit integer or fixed-point formats, such as INT8,
+which changes not only the storage format but also the arithmetic model used
+during execution. FP16 should therefore be understood as reduced-precision
+floating-point inference rather than true quantization.
+
+This distinction is important for interpreting the following measurements. Reducing precision from FP32 to FP16 can
+decrease memory traffic and improve throughput on hardware with native half-precision support, often with only a
+small impact on model accuracy. However, the resulting performance behaviour is different from that of integer
+quantization, since the model still operates in a floating-point domain.
+The following subsection therefore evaluates FP16 as a  separate optimisation path and analyses
+its effect on latency, throughput, and overall deployment efficiency.
+
+
 
 \section{Quantization Influence on YOLOv8n}
+
+
 Statistical significance was evaluated with a paired bootstrap test on validation images (1000 resamples), and
 confidence intervals were computed using the percentile method. The results indicate that INT8 quantization causes
 a statistically significant decrease in detection accuracy.
