@@ -1596,41 +1596,225 @@ transformations, operator scheduling, and hardware-specific code generation. Thi
 high degree of flexibility and control over low-level execution compared to more API-driven frameworks,
 although it typically requires more manual tuning and expertise.
 
+\subsection{TVM MetaSchedule Tuning}
+
+Unlike the other evaluated deployment frameworks, TVM does not rely only on a
+fixed set of pre-implemented backend optimisations. Instead, it exposes the
+execution schedule itself as an optimisation problem and searches for
+hardware-specific implementations of individual operators. In practice, this
+means that TVM requires an additional tuning stage before final compilation, in
+which candidate schedules are generated, measured on the target device, and
+ranked according to their runtime performance. This makes TVM fundamentally
+different from frameworks such as ONNX Runtime, LiteRT, or PyTorch eager mode,
+which mainly depend on predefined kernels and runtime-level optimisations.
+
+For this reason, the TVM results are discussed separately from the general
+framework comparison. The purpose of the following subsection is not only to
+report the final benchmark numbers, but also to analyse how MetaSchedule
+improved the execution of YOLOv8n, which operators benefited most from tuning,
+and where the main remaining bottlenecks are. This additional discussion is
+important because, in the case of TVM, the observed inference performance is
+directly shaped by the quality of the schedule search rather than by the
+default behaviour of a fixed runtime backend.
+
+\subsection{TVM MetaSchedule Tuning Results on Raspberry Pi~5}
+
+TVM MetaSchedule was evaluated on the Raspberry Pi~5 (4-core Cortex-A76,
+AArch64, 2.4\,GHz) using the full YOLOv8n inference graph imported through the
+Relax frontend. The tuning run lasted approximately 6 hours and 15 minutes,
+during which TVM explored 7\,221 valid schedules across 65 extracted operator
+tasks. The resulting tuned model achieved a summed task latency of 173.6\,ms,
+while the measured end-to-end inference latency was approximately 185--188\,ms.
+The difference can be attributed to runtime overhead outside the tuned kernels,
+including Python execution, input preparation, and postprocessing in the
+detection head.
+
+\paragraph{General Tuning Behaviour.}
+The tuning results show that TVM was able to improve the execution of the
+convolution-heavy parts of the network through schedule search and cache-aware
+tiling. However, no task in this run could be tensorised into a dedicated ARM
+intrinsic pattern. In practice, this means that the observed performance gains
+came mainly from improved loop ordering, tiling, and LLVM-driven vectorisation,
+rather than from explicitly tensorised micro-kernel generation. This is an
+important observation because it highlights both the strength and the
+limitations of the current FP32 compilation path on Raspberry Pi~5: TVM can
+still produce competitive schedules, but it does not yet exploit the hardware
+as fully as a tensorised implementation would.
+
+\paragraph{Best-Performing Operators.}
+The highest efficiency was achieved by $1{\times}1$ convolutions, particularly
+in the neck and detection head. These layers are structurally simpler than
+$3{\times}3$ convolutions and map more naturally to vectorised execution, which
+allowed them to reach throughput above 80\,GFLOPS in the best cases. Several
+mid-network $3{\times}3$ convolutions also performed well once the channel
+dimensions became sufficiently large. For such layers, the tuned schedules were
+able to keep the working set in cache and reduce memory traffic, which is
+especially important on a bandwidth-constrained CPU platform.
+
+\paragraph{Main Bottlenecks.}
+The weakest-performing operator was the initial stem convolution. Although its
+FLOP count is relatively modest, it operates on a very large spatial input and
+only three input channels, resulting in poor arithmetic intensity and limited
+opportunity for data reuse. Consequently, it consumed a disproportionately
+large share of inference time. Other early-stage $3{\times}3$ convolutions with
+low channel counts and large feature maps showed similar behaviour. In
+addition, the softmax operation in the detection head remained highly
+inefficient, not because of high computational complexity, but because it is
+dominated by repeated memory accesses and reductions rather than dense
+arithmetic.
+
+\paragraph{Weighted Bottleneck Analysis.}
+A per-layer view alone does not fully capture the true runtime bottlenecks of
+YOLOv8n. Some convolution tasks appear multiple times in the graph, especially
+inside repeated C2f blocks, and therefore contribute much more to total
+inference time than their individual latency would suggest. In the tuned model,
+several repeated $3{\times}3$ convolutions in the backbone and neck became the
+dominant contributors to total runtime once their multiplicity was taken into
+account. This confirms that tuning effort should be focused not only on the
+slowest individual operators, but also on operators that are executed many
+times.
+
+\paragraph{Overall Assessment.}
+Overall, the tuned TVM model reached an end-to-end latency of about 192\,ms on
+Raspberry Pi~5, compared with approximately 290.1\,ms for PyTorch eager mode
+under comparable conditions. The improvement appears to come mainly from better
+cache-aware scheduling of convolution layers, particularly the more expensive
+$3{\times}3$ operators in the middle of the network.
+
+At the same time, the results also highlight the limitations of FP32 tuning on
+this platform. While MetaSchedule improved many layers, the absence of
+tensorisation meant that the performance gains remained incremental rather than
+transformative. The most difficult kernels were the early low-channel
+convolutions, where memory access patterns dominate and schedule search alone
+has limited effect. Therefore, the main conclusion is that TVM tuning is
+beneficial on Raspberry Pi~5, but the achievable gains in FP32 remain bounded.
+Larger improvements would likely require either a more targeted tuning budget
+for the most expensive tasks or a reduced-precision compilation path such as
+FP16.
+
+\subsection{TVM MetaSchedule Tuning Results on the Jetson Orin Nano GPU}
+
+TVM MetaSchedule was evaluated on the NVIDIA Jetson Orin Nano GPU using the
+full YOLOv8n inference graph imported through the Relax frontend.
+TVM explored 7\,257 valid
+schedules across the same 65 extracted operator tasks. The resulting tuned model
+achieved a summed task latency of 22\,920\,$\mu$s, while the measured end-to-end
+inference latency was 23.38\,ms. The difference between these values was small,
+indicating that the tuned kernel execution accounted for almost all of the
+observed runtime.
+
+Compared with the Raspberry Pi~5 CPU result of 173\,591\,$\mu$s summed task
+latency, the GPU tuning result corresponds to a kernel-level speedup of
+approximately \(7.6\times\). This confirms that the transition from CPU to GPU
+substantially accelerated the convolution-dominated parts of the model, even
+though the graph structure and extracted operator tasks remained unchanged.
+
+\paragraph{General Tuning Behaviour.}
+The tuning results show that TVM was able to improve execution on the GPU by
+searching over CUDA-specific schedule parameters such as thread-block structure,
+tiling configuration, and memory movement patterns. However, as in the CPU case,
+no task in this run could be tensorised into a dedicated intrinsic pattern. In
+practice, this means that the observed gains came from improved CUDA scheduling
+rather than from an explicit tensor-core-style mapping. This is an important
+observation, because it highlights both the strength and the limitation of the
+current FP32 GPU compilation path: TVM can still generate competitive CUDA
+schedules, but it does not yet exploit all hardware-specific acceleration paths
+that may be available on the platform.
+
+\paragraph{Best-Performing Operators.}
+The most efficient GPU kernels were large mid-network \(3{\times}3\)
+convolutions, particularly those in repeated C2f blocks and in the neck. Unlike
+the CPU case, where \(1{\times}1\) convolutions achieved the highest
+throughput, the GPU benefited most from larger dense convolutional operators
+with sufficiently high channel counts to expose substantial parallelism. The
+best-performing task reached 585.6\,GFLOPS, while several other large
+\(3{\times}3\) convolutions exceeded 500\,GFLOPS. These results indicate that
+once the working set becomes large enough, the GPU can effectively amortise
+memory movement and keep a large number of execution units occupied.
+
+\paragraph{Main Bottlenecks.}
+The weakest-performing convolution remained the initial stem layer. Although it
+benefited substantially from GPU acceleration compared to the CPU, it still
+achieved much lower efficiency than the large mid-network operators. The reason
+is structural: the layer has only three input channels and a very large spatial
+resolution, which limits arithmetic intensity and reduces the amount of useful
+parallel work available per memory access. Several other early-stage
+\(3{\times}3\) convolutions with low channel counts showed similar behaviour.
+
+The softmax operation in the detection head also remained inefficient. Its
+absolute latency was much lower than on the CPU, but its achieved throughput
+was still very small compared with dense convolutions. This indicates that the
+operation remained dominated by reductions and repeated memory access rather
+than by highly parallel arithmetic.
+
+\paragraph{Weighted Bottleneck Analysis.}
+As in the CPU analysis, a per-layer view alone does not fully capture the true
+runtime bottlenecks of YOLOv8n. Several convolution tasks appear multiple times
+in the graph, especially inside repeated C2f blocks, and therefore contribute
+more to total inference time than their individual latency would suggest. On the
+GPU, the dominant weighted bottlenecks were again repeated \(3{\times}3\)
+convolutions in the backbone and neck. In particular, task~50
+(\texttt{conv2d24}) contributed the largest weighted latency, followed by
+task~16 (\texttt{conv2d11}), which appeared seven times in the graph. This is
+qualitatively similar to the CPU case: the most important optimisation targets
+are not necessarily the single slowest kernels, but rather the kernels that are
+executed many times.
+
+\paragraph{Overall Assessment.}
+Overall, the tuned TVM model reached an end-to-end latency of 23.38\,ms on the
+Jetson Orin Nano GPU, compared with approximately 25.12\,ms for PyTorch eager
+mode under comparable conditions. This means that TVM provided a measurable but
+modest improvement over the baseline GPU execution path.
+At the same time, the results also highlight the remaining limitations of the
+current FP32 TVM GPU path. While MetaSchedule reduced the latency of the
+convolution-heavy parts of the model substantially relative to the CPU, the
+absence of tensorisation meant that the gains remained bounded relative to the
+best available inference engine. In this experiment, TensorRT remained
+significantly faster at 11.38\,ms, indicating that additional performance is
+still available beyond the schedules found by MetaSchedule. Therefore, the main
+conclusion is that TVM tuning is effective on the Jetson Orin Nano GPU and
+produces a strong result, but in FP32 it remains a competitive general solution
+rather than the fastest deployment path for this workload.
+
 \subsection{Raspberry Pi~5 Benchmark Overview}
 
 All Raspberry Pi~5 experiments were conducted on a Linux system based on the
-\texttt{6.12.62+rpt-rpi-2712} kernel using the AArch64 architecture. The CPU frequency
-governor was fixed to \texttt{performance}, and the CPU was configured to 2.4\,GHz
-during the measurements. To reduce thermal and scheduling-related variation, the
-benchmarking procedure included a cooldown phase before each repetition and checks for
-frequency throttling. Each backend was evaluated over five repeated runs, with 200 timed
-inferences per repetition after 30 warm-up iterations. The comparison was performed
-using all four available CPU cores on the Raspberry Pi~5 in order to reflect the maximum
-CPU throughput available in this deployment setting. This setup was chosen to reduce
-short-term variance and to provide a stable estimate of sustained inference performance
-under controlled CPU conditions.
+\texttt{6.12.62+rpt-rpi-2712} kernel using the AArch64 architecture. The CPU
+frequency governor was fixed to \texttt{performance}, and the CPU was configured
+to 2.4\,GHz during the measurements. To reduce thermal and scheduling-related
+variation, the benchmarking procedure included a cooldown phase before each
+repetition and checks for frequency throttling. Each backend was evaluated over
+five repeated runs, with 200 timed inferences per repetition after 30 warm-up
+iterations. In addition, each repetition was executed in a fresh subprocess in
+order to reduce cross-framework interference, such as cache contamination or
+residual runtime state. The comparison was performed using all four available
+CPU cores on the Raspberry Pi~5 in order to reflect the maximum CPU throughput
+available in this deployment setting. This setup was chosen to reduce
+short-term variance and to provide a stable estimate of sustained inference
+performance under controlled CPU conditions.
 
-The evaluated CPU backends were TVM, ONNX Runtime, Google AI Edge LiteRT, and PyTorch
-used as a baseline. In the Python environment used in this work, LiteRT was accessed
-through the \texttt{ai\_edge\_litert} runtime. ONNX Runtime was evaluated with the
-\texttt{CPUExecutionProvider}. Table~\ref{tab:pi5_backend_benchmark} summarises the
-measured latency and throughput, while Table~\ref{tab:pi5_backend_power} summarises
-power results.
+The evaluated CPU backends were TVM, ONNX Runtime, TorchCompile, Google AI Edge
+LiteRT, and PyTorch eager mode used as a baseline. ONNX Runtime was evaluated
+with the \texttt{CPUExecutionProvider}. Table~\ref{tab:pi5_backend_benchmark}
+summarises the measured latency and throughput, while
+Table~\ref{tab:pi5_backend_power} summarises power results.
 
 \begin{table}[ht]
 \centering
-\caption{End-to-end YOLOv8n inference performance on Raspberry Pi~5 CPU. Each result is based on 5 repetitions,
-with 200 timed runs per repetition after 30 warm-up iterations. LiteRT corresponds to the
-\texttt{ai\_edge\_litert} runtime.}
+\caption{End-to-end YOLOv8n inference performance on Raspberry Pi~5 CPU.
+Values are reported as mean latency $\pm$ half-width of the 95\,\% confidence
+interval across 5 isolated repetitions, with 200 timed runs per repetition
+after 30 warm-up iterations.}
 \label{tab:pi5_backend_benchmark}
-\begin{tabular}{lrrrrrr}
+\begin{tabular}{lrrr}
 \toprule
-Backend & Mean (ms) & Std (ms) & Median (ms) & Min (ms) & Max (ms) & FPS mean \\
+Backend & Latency (ms) & FPS mean & Median (ms) \\
 \midrule
-TVM                 & 192.0 & 6.0 & 188.8 & 187.0 & 201.3 & 5.21 \\
-ONNX Runtime        & 189.2 & 5.7 & 187.2 & 185.6 & 199.2 & 5.28 \\
-LiteRT              & 154.1 & 2.0 & 155.2 & 151.2 & 156.0 & 6.49 \\
-PyTorch (baseline)  & 290.1 & 1.8 & 289.8 & 288.5 & 293.3 & 3.45 \\
+TVM             & $192.0 \pm 7.5$ & 5.21 & 188.8 \\
+ONNX Runtime    & $189.2 \pm 7.0$ & 5.28 & 187.2 \\
+TorchCompile    & $202.9 \pm 8.5$ & 4.93 & 202.2 \\
+LiteRT          & $154.1 \pm 2.5$ & 6.49 & 155.2 \\
+PyTorch eager   & $290.1 \pm 2.3$ & 3.45 & 289.8 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1638,122 +1822,181 @@ PyTorch (baseline)  & 290.1 & 1.8 & 289.8 & 288.5 & 293.3 & 3.45 \\
 \paragraph{Overall Performance.}
 Among all evaluated frameworks, LiteRT achieved the best overall latency on the
 Raspberry Pi~5, with a mean inference time of 154.1\,ms and a throughput of
-6.49\,FPS. ONNX Runtime and TVM formed a second performance group with very similar
-results: ONNX Runtime achieved a mean latency of 189.2\,ms, while TVM reached
-192.0\,ms. The difference between them was 2.8\,ms, which is small relative to the
-observed run-to-run variation. PyTorch was clearly slower than the other backends,
-with a mean latency of 290.1\,ms and a throughput of 3.45\,FPS.
+6.49\,FPS. ONNX Runtime and TVM formed the next performance group, with mean
+latencies of 189.2\,ms and 192.0\,ms respectively. TorchCompile was slower than
+both compiled deployment backends, reaching a mean latency of 202.9\,ms and a
+throughput of 4.93\,FPS. PyTorch eager mode remained the slowest configuration,
+with a mean latency of 290.1\,ms and a throughput of 3.45\,FPS. The difference
+between ONNX Runtime and TVM was only 2.8\,ms, whereas TorchCompile lagged
+behind ONNX Runtime by 13.6\,ms and behind TVM by 10.8\,ms.
 
 \begin{table}[ht]
 \centering
-\caption{Average power consumption during YOLOv8n inference on Raspberry Pi~5 CPU. LiteRT corresponds to the
-\texttt{ai\_edge\_litert} runtime.}
+\caption{Average power consumption during YOLOv8n inference on Raspberry Pi~5 CPU.}
 \label{tab:pi5_backend_power}
 \begin{tabular}{lrrr}
 \toprule
 Backend & Mean Power (mW) & Max Power (mW) & Std (mW) \\
 \midrule
-TVM                 & 4096.2 & 4783.1 & 46.1 \\
-ONNX Runtime        & 4043.2 & 5415.1 & 172.5 \\
-LiteRT              & 2292.8 & 2591.5 & 14.2 \\
-PyTorch (baseline)  & 2316.4 & 2759.8 & 30.3 \\
+TVM             & 4096.2 & 4783.1 & 46.1 \\
+ONNX Runtime    & 4043.2 & 5415.1 & 172.5 \\
+TorchCompile    & 2291.8 & 2742.5 & 63.2 \\
+LiteRT          & 2292.8 & 2591.5 & 14.2 \\
+PyTorch eager   & 2316.4 & 2759.8 & 30.3 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \paragraph{Stability of Measurements.}
-The repeated-run statistics show that TVM and ONNX Runtime had comparable variability,
-with standard deviations of 6.03\,ms and 5.65\,ms respectively. PyTorch and LiteRT
-were more stable, with standard deviations of 1.84\,ms and 2.05\,ms. LiteRT therefore
-combined the best average performance in this benchmark with comparatively consistent
-execution.
+The repeated-run statistics show that TVM and ONNX Runtime had comparable
+variability, with standard deviations of 6.03\,ms and 5.65\,ms respectively.
+TorchCompile showed a similar but slightly higher variability of 6.86\,ms. In
+contrast, PyTorch eager mode and LiteRT were more stable, with standard
+deviations of 1.84\,ms and 2.05\,ms. LiteRT therefore combined the best average
+performance in this benchmark with comparatively consistent execution.
 
 \paragraph{Power Behaviour.}
 TVM and ONNX Runtime showed similar average power draw, measuring 4.10\,W and
-4.04\,W respectively. In contrast, LiteRT and PyTorch consumed substantially less
-average power, at 2.29\,W and 2.32\,W. This is a notable result, since LiteRT was
-both the fastest backend in this experiment and the one with the lowest average power
-consumption.
+4.04\,W respectively. In contrast, TorchCompile, LiteRT, and PyTorch eager mode
+all operated near 2.3\,W average board power. LiteRT exhibited the lowest
+average power consumption at 2.29\,W, although the difference relative to
+TorchCompile was very small. This result is notable because LiteRT was both the
+fastest backend in this experiment and the one with the lowest measured average
+power consumption.
 
-\paragraph{Interpretation of the TVM Result.}
-Although TVM did not outperform ONNX Runtime in this end-to-end benchmark, the result
-remains important. TVM achieved nearly identical CPU performance while relying on a
-compiler-driven deployment pipeline based on Relax and MetaSchedule tuning. This shows
-that the generated schedules were competitive with a mature production runtime on
-Raspberry Pi~5, even if they did not provide a clear FP32 latency advantage in this
-configuration.
+\paragraph{Interpretation of the Results.}
+Although TVM did not outperform LiteRT, it remained competitive with ONNX
+Runtime and outperformed TorchCompile in this end-to-end benchmark. TVM
+achieved slightly lower latency than TorchCompile while relying on a fully
+compiler-driven deployment pipeline based on Relax and MetaSchedule tuning. This
+suggests that ahead-of-time compilation through a dedicated inference compiler
+remains more effective on this workload than applying \texttt{torch.compile} to
+the original PyTorch model on CPU. At the same time, the results also show that
+LiteRT provided the most efficient execution path among the tested frameworks on
+Raspberry Pi~5 for this FP32 model.
 
 \paragraph{Conclusion.}
-The benchmark results show three distinct groups on the Raspberry Pi~5 CPU. LiteRT
-delivered the best end-to-end result, combining the lowest latency, the highest
-throughput, and the lowest average power consumption. ONNX Runtime and TVM achieved
-similar performance, with ONNX Runtime being slightly faster in the measured
-configuration. PyTorch eager mode remained the slowest baseline by a large margin.
+The benchmark results show four practical performance tiers on the Raspberry
+Pi~5 CPU. LiteRT delivered the best end-to-end result, combining the lowest
+latency, the highest throughput, and the lowest average power consumption. ONNX
+Runtime and TVM achieved similar performance, with ONNX Runtime being slightly
+faster in the measured configuration. TorchCompile improved substantially over
+PyTorch eager mode, but remained slower than both ONNX Runtime and TVM.
+PyTorch eager mode was the slowest baseline by a large margin.
 
 Relative to the PyTorch eager baseline, TVM achieved a \(1.51\times\) speedup,
 corresponding to a 33.8\,\% reduction in mean inference latency. ONNX Runtime
-achieved a \(1.53\times\) speedup, corresponding to a 34.8\,\% latency reduction.
-LiteRT provided the largest improvement, reaching a \(1.88\times\) speedup and a
-46.9\,\% reduction in mean latency. Overall, these results indicate that TVM is
-capable of producing competitive CPU inference performance on Raspberry Pi~5, but in
-this experiment the most efficient backend was LiteRT rather than TVM.
+achieved a \(1.53\times\) speedup, corresponding to a 34.8\,\% latency
+reduction. TorchCompile achieved a \(1.43\times\) speedup, corresponding to a
+30.1\,\% latency reduction. LiteRT provided the largest improvement, reaching a
+\(1.88\times\) speedup and a 46.9\,\% reduction in mean latency. Overall, these
+results indicate that TVM is capable of producing competitive CPU inference
+performance on Raspberry Pi~5, but in this experiment the most efficient
+backend was LiteRT rather than TVM.
 
-\section{FP32 Runtime Comparison on Jetson Orin}
-\label{subsec:fp32_runtime_comparison_orin}
+\subsection{Jetson Orin Nano GPU Benchmark Overview}
 
-To establish a consistent FP32 baseline across deployment runtimes, a unified benchmark was executed on Jetson Orin.
-The run was performed on the shared evaluation pipeline, which measures four
-inference backends under the same input tensor shape and benchmarking procedure:
-\begin{itemize}
-  \item TVM (Relax VM, loaded from a precompiled \texttt{.so}),
-  \item ONNX Runtime CUDA Execution Provider,
-  \item ONNX Runtime TensorRT Execution Provider,
-  \item PyTorch (Ultralytics model execution).
-\end{itemize}
-
-The configuration (\texttt{gpu\_fp32.yaml}) used:
-\begin{itemize}
-  \item input model: \texttt{yolov8n\_opset17\_fp32.onnx},
-  \item PyTorch checkpoint: \texttt{yolov8n.pt},
-  \item device: CUDA (\texttt{cuda:0}),
-  \item precision: FP32,
-  \item input size: \(640 \times 640\), batch size \(=1\),
-  \item benchmark protocol: 200 measured runs with 20 warmup iterations.
-\end{itemize}
-
-For TVM, the evaluated module was compiled using an existing MetaSchedule database generated in an earlier tuning stage.
-The tuning logs indicate a substantial search effort (\(4282\) total trials), suggesting that the measured
-TVM result reflects a tuned, deployment-oriented build rather than an untuned baseline.
+GPU experiments were conducted on the NVIDIA Jetson Orin Nano using the full
+YOLOv8n model in FP32 precision with batch size~1. The evaluated backends were
+TVM, ONNX Runtime, TensorRT, PyTorch eager mode, and
+\texttt{torch.compile}. As in the CPU experiments, the benchmark procedure used
+isolated repetitions in order to reduce interference between backends.
+Table~\ref{tab:orin_backend_benchmark} summarises the measured latency and
+throughput, while Table~\ref{tab:orin_backend_power} summarises power results.
 
 \begin{table}[ht]
 \centering
-\small
-\begin{tabular}{lrr}
-\hline
-Runtime & Latency [ms] & FPS \\
-\hline
-ONNX Runtime TensorRT EP & 13.5292 & 73.9142 \\
-TVM (Relax VM) & 23.5091 & 42.5368 \\
-ONNX Runtime CUDA EP & 23.8097 & 41.9998 \\
-PyTorch (Ultralytics) & 24.7877 & 40.3426 \\
-\hline
+\caption{End-to-end YOLOv8n inference performance on the NVIDIA Jetson Orin Nano GPU.
+Values are reported as mean latency $\pm$ half-width of the 95\,\% confidence
+interval across 5 isolated repetitions, with 200 timed runs per repetition
+after 30 warm-up iterations.}
+\label{tab:orin_backend_benchmark}
+\begin{tabular}{lrrr}
+\toprule
+Backend & Latency (ms) & FPS mean & Median (ms) \\
+\midrule
+TVM             & $23.38 \pm 0.02$ & 42.77 & 23.39 \\
+ONNX Runtime    & $23.18 \pm 0.04$ & 43.14 & 23.17 \\
+TorchCompile    & $72.34 \pm 0.47$ & 13.82 & 72.26 \\
+TensorRT        & $11.38 \pm 0.02$ & 87.87 & 11.39 \\
+PyTorch eager   & $25.12 \pm 0.27$ & 39.81 & 25.12 \\
+\bottomrule
 \end{tabular}
-\caption{FP32 runtime benchmark results on Jetson Orin (\(640 \times 640\), batch \(=1\)).}
-\label{tab:fp32_runtime_benchmark_orin}
 \end{table}
 
-The results show a clear separation between TensorRT-backed and non-TensorRT execution in this setup.
-ONNX Runtime with TensorRT EP achieved the lowest latency (\(13.53\) ms), corresponding to \(73.91\) FPS,
-while TVM, ONNX Runtime CUDA EP, and PyTorch formed a second cluster around \(23.5\)--\(24.8\) ms
-(\(\sim 40\)--\(43\) FPS).
-Relative to ONNX Runtime CUDA EP, TensorRT EP reduced latency by approximately \(43.2\%\) (about \(1.76\times\)
-speedup).
-TVM and ONNX Runtime CUDA EP were close in performance, with TVM slightly faster in this run.
+\paragraph{Overall Performance.}
+TensorRT achieved by far the best end-to-end latency on the Jetson Orin Nano,
+reaching 11.38\,ms, which corresponds to 87.9\,FPS. ONNX Runtime and TVM
+formed a second performance group with nearly identical results, at 23.18\,ms
+and 23.38\,ms respectively. PyTorch eager mode was slightly slower at
+25.12\,ms, while \texttt{torch.compile} performed substantially worse than all
+other GPU backends, reaching 72.34\,ms.
 
-Overall, this experiment provides a practical FP32 deployment baseline for subsequent quantization analysis.
-It also indicates that, on Jetson Orin, backend selection can have an impact comparable to model-level
-optimization: the same FP32 network exhibits markedly different inference speed depending on the runtime
-execution provider.
+Relative to the PyTorch eager baseline, TVM achieved a \(1.07\times\) speedup,
+corresponding to a 6.9\,\% reduction in mean latency. ONNX Runtime achieved a
+\(1.08\times\) speedup and a 7.7\,\% latency reduction. TensorRT provided the
+largest improvement, reaching a \(2.21\times\) speedup and a 54.7\,\%
+reduction in mean latency. In contrast, \texttt{torch.compile} was slower than
+PyTorch eager mode by a factor of \(2.88\times\).
+
+\begin{table}[ht]
+\centering
+\caption{Average power consumption during YOLOv8n inference on the NVIDIA Jetson
+Orin Nano GPU.}
+\label{tab:orin_backend_power}
+\begin{tabular}{lrrr}
+\toprule
+Backend & Mean Power (mW) & Max Power (mW) & Std (mW) \\
+\midrule
+TVM             & 26007.9 & 26781.1 & 88.7 \\
+ONNX Runtime    & 26952.4 & 29632.6 & 84.8 \\
+TorchCompile    & 18599.2 & 19967.0 & 76.7 \\
+TensorRT        & 28405.8 & 30936.2 & 86.4 \\
+PyTorch eager   & 25884.4 & 29186.0 & 168.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Power and Efficiency.}
+In absolute power draw, the GPU backends operated within a relatively narrow
+range, from 18.6\,W for \texttt{torch.compile} to 28.4\,W for TensorRT.
+However, when throughput is taken into account, TensorRT was also the most
+power-efficient backend, achieving 3.10\,FPS/W. This is approximately
+1.9 times higher than TVM and ONNX Runtime, which both reached about
+1.6\,FPS/W, and about twice the efficiency of PyTorch eager mode. Although
+\texttt{torch.compile} consumed the least power, its very low throughput made
+it the least efficient backend overall.
+
+\paragraph{Interpretation of the TVM Result.}
+The TVM GPU result is notable for two reasons. First, its end-to-end latency
+was essentially identical to ONNX Runtime, with a difference of only 0.20\,ms.
+Second, TVM still outperformed PyTorch eager mode, although the margin was much
+smaller than on the CPU. This suggests that, on the Orin Nano GPU, the main
+convolution-heavy parts of the model are already executed efficiently by mature
+CUDA libraries across multiple frameworks, which reduces the practical
+advantage of compiler-level scheduling alone. In other words, TVM remained
+competitive, but did not establish a clear lead over ONNX Runtime on this
+platform.
+
+\paragraph{Conclusion.}
+The GPU benchmark results reveal three practical performance tiers. TensorRT
+forms the clear top tier, achieving both the lowest latency and the highest
+power efficiency. ONNX Runtime and TVM form a second tier with nearly identical
+performance, while PyTorch eager mode is only slightly slower. In contrast,
+\texttt{torch.compile} was not competitive for this workload in the tested
+configuration. Overall, these results show that TensorRT was the most effective
+deployment backend for YOLOv8n on the Jetson Orin Nano GPU, whereas TVM and
+ONNX Runtime delivered similar and competitive FP32 performance.
+
+Relative to the PyTorch eager baseline, TVM achieved a \(1.07\times\) speedup,
+equivalent to a 6.9\,\% reduction in mean inference latency, and ONNX Runtime
+achieved a \(1.08\times\) speedup with a 7.7\,\% latency reduction. TensorRT
+provided the largest improvement, reaching a \(2.21\times\) speedup and a
+54.7\,\% reduction in mean latency. In contrast, \texttt{torch.compile} failed
+to improve upon the baseline and instead increased latency by a factor of
+\(2.88\times\). These results indicate that TVM can provide competitive GPU
+inference performance on the Jetson Orin Nano, but in this experiment the
+largest practical advantage was obtained with TensorRT.
 
 
 \section{Quantization Influence on YOLOv8n}
