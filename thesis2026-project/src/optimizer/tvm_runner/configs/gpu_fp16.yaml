@@ -21,7 +21,7 @@ device:
     kind: "llvm"
     mtriple: "aarch64-linux-gnu"
     mcpu: "cortex-a78" # native - for automatic detection
-    #num_cores: 6
+    #num-cores: 6
 
 precision:
   name: "fp16"            # "fp32" | "fp16"
@@ -52,3 +52,6 @@ onnxruntime:
     engine_cache_path: "./optimizer/tvm_runner/out/experiments/trt_cache/trt_current"
     fp16_enable: true
   use_arena: true # Default: True; if None: True; Otherwise: val; 
+
+tensorrt:
+  engine_path: "./optimizer/tvm_runner/out/experiments/trt_cache/trt_current/TensorrtExecutionProvider_TRTKernel_graph_main_graph_11605077208752094771_0_0_fp16_sm87.engine"
