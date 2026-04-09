@@ -451,6 +451,8 @@ def _worker_pytorch(cfg_raw: dict, runs: int, warmup: int) -> None:
     device_kind = cfg_raw.get("device", {}).get("kind", "cpu")
     use_cuda    = device_kind == "cuda" and torch.cuda.is_available()
     device      = torch.device("cuda:0" if use_cuda else "cpu")
+    precision   = cfg_raw.get("precision", {}).get("name", "fp32")
+    torch_dtype = torch.float16 if precision == "fp16" else torch.float32
 
     if not use_cuda:
         torch.set_num_threads(4)
@@ -460,7 +462,9 @@ def _worker_pytorch(cfg_raw: dict, runs: int, warmup: int) -> None:
     imgsz = cfg_raw["model"].get("imgsz", 640)
 
     model = YOLO(cfg_raw["model"]["pt_path"]).model.eval().to(device)
-    x     = torch.randn(batch, 3, imgsz, imgsz, dtype=torch.float32, device=device)
+    if precision == "fp16":
+        model = model.half()
+    x = torch.randn(batch, 3, imgsz, imgsz, dtype=torch_dtype, device=device)
 
     with torch.inference_mode():
         for _ in range(warmup):
@@ -493,6 +497,7 @@ def _worker_pytorch(cfg_raw: dict, runs: int, warmup: int) -> None:
                 times.append((t1 - t0) * 1000.0)
 
     print(json.dumps({"backend": "PyTorch", "device": str(device),
+                      "precision": precision,
                       "times_ms": times, "power": _power_stats(pwr)}))
 
 
@@ -518,6 +523,8 @@ def _worker_torch_compile(cfg_raw: dict, runs: int, warmup: int) -> None:
     device_kind = cfg_raw.get("device", {}).get("kind", "cpu")
     use_cuda    = device_kind == "cuda" and torch.cuda.is_available()
     device      = torch.device("cuda:0" if use_cuda else "cpu")
+    precision   = cfg_raw.get("precision", {}).get("name", "fp32")
+    torch_dtype = torch.float16 if precision == "fp16" else torch.float32
 
     if not use_cuda:
         torch.set_num_threads(4)
@@ -527,7 +534,9 @@ def _worker_torch_compile(cfg_raw: dict, runs: int, warmup: int) -> None:
     imgsz = cfg_raw["model"].get("imgsz", 640)
 
     model = YOLO(cfg_raw["model"]["pt_path"]).model.eval().to(device)
-    x     = torch.randn(batch, 3, imgsz, imgsz, dtype=torch.float32, device=device)
+    if precision == "fp16":
+        model = model.half()
+    x = torch.randn(batch, 3, imgsz, imgsz, dtype=torch_dtype, device=device)
 
     # ── select compile backend ────────────────────────────────────────────────
     compile_backend = "unknown"
@@ -627,6 +636,7 @@ def _worker_torch_compile(cfg_raw: dict, runs: int, warmup: int) -> None:
         "compile_mode":    compile_mode,
         "compile_time_s":  round(compile_s, 2),
         "device":          str(device),
+        "precision":       precision,
         "times_ms":        times,
         "power":           _power_stats(pwr),
     }))
@@ -947,22 +957,31 @@ BACKEND_LABELS = {
 def detect_device_tag(cfg_raw: dict) -> str:
     """Return a short platform tag for the output filename.
 
-    Examples: 'pi5_cpu', 'orin_gpu', 'cpu'
+    Examples: 'pi5_cpu', 'orin_gpu', 'orin_gpu_fp16', 'cpu'
     """
     device_kind = cfg_raw.get("device", {}).get("kind", "cpu")
+    precision   = cfg_raw.get("precision", {}).get("name", "fp32")
+
     if device_kind == "cuda":
         # Could refine further (Orin Nano vs AGX etc.) via /proc/device-tree/model
         model = _read_file("/proc/device-tree/model") or ""
         if "orin" in model.lower():
-            return "orin_gpu"
-        return "jetson_gpu"
-    # CPU — check for Pi5 specifically
-    model = _read_file("/proc/device-tree/model") or ""
-    if "raspberry pi 5" in model.lower():
-        return "pi5_cpu"
-    if "raspberry pi" in model.lower():
-        return "pi_cpu"
-    return "cpu"
+            tag = "orin_gpu"
+        else:
+            tag = "jetson_gpu"
+    else:
+        # CPU — check for Pi5 specifically
+        model = _read_file("/proc/device-tree/model") or ""
+        if "raspberry pi 5" in model.lower():
+            tag = "pi5_cpu"
+        elif "raspberry pi" in model.lower():
+            tag = "pi_cpu"
+        else:
+            tag = "cpu"
+
+    if precision == "fp16":
+        tag = tag + "_fp16"
+    return tag
 
 
 def _save_results(out_path: Path, payload: dict) -> None:
@@ -1013,10 +1032,12 @@ def main() -> None:
     print(f"  Results will be saved → {out_path}")
 
     # ── Base payload written immediately so file exists from the start ────────
+    precision = cfg_raw.get("precision", {}).get("name", "fp32")
     payload: dict = {
         "timestamp"   : ts,
         "platform"    : platform.platform(),
         "device_tag"  : tag,
+        "precision"   : precision,
         "config"      : str(cfg_path),
         "repeats"     : args.repeats,
         "runs_per_rep": args.runs,
