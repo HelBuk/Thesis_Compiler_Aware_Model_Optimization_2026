@@ -94,8 +94,10 @@ backends:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import gc
 import json
+import multiprocessing as mp
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -395,6 +397,97 @@ def free_backend(backend: Optional[Backend]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subprocess-isolated eval for backends that share a CUDA process unsafely
+# (primarily TVM: its C++ abort() on CUDA errors would kill the whole script)
+# ---------------------------------------------------------------------------
+
+# Must be a top-level function so multiprocessing 'spawn' can pickle it.
+def _isolated_eval_worker(
+    spec_dict: dict,
+    eval_kwargs: dict,
+    queue: "mp.Queue[tuple]",
+) -> None:
+    """Runs inside a fresh spawned child process with a clean CUDA context."""
+    import traceback as _tb
+    try:
+        # Fresh import in the child — no prior CUDA allocator state.
+        from optimizer.evaluation.yolo_accuracy_comparison import (  # noqa: PLC0415
+            BackendSpec,
+            build_backend_from_spec,
+            free_backend,
+        )
+        from optimizer.evaluation.yolo_metrics import eval_backend  # noqa: PLC0415
+
+        spec = BackendSpec(**spec_dict)
+        backend = build_backend_from_spec(
+            spec,
+            imgsz=eval_kwargs["imgsz"],
+            conf=eval_kwargs["conf"],
+            iou=eval_kwargs["iou"],
+            max_det=eval_kwargs["max_det"],
+        )
+        stats = eval_backend(backend=backend, **eval_kwargs)
+        free_backend(backend)
+        queue.put(("ok", stats))
+    except Exception as exc:  # noqa: BLE001
+        queue.put(("error", f"{exc}\n{_tb.format_exc()}"))
+
+
+def _run_eval_isolated(
+    spec: BackendSpec,
+    eval_kwargs: dict,
+    timeout_s: int = 7200,
+) -> Dict[str, float]:
+    """Launch _isolated_eval_worker in a fresh 'spawn' process.
+
+    'spawn' guarantees the child has no inherited CUDA context from the parent,
+    so TVM / pycuda cannot conflict with PyTorch's or ORT's allocators.
+    If the child calls abort() (as TVM does on CUDA errors) only the child
+    dies; the parent catches a non-zero exit code and raises RuntimeError.
+    """
+    ctx = mp.get_context("spawn")
+    queue: "mp.Queue[tuple]" = ctx.Queue()
+
+    # dataclasses.asdict() deep-copies; all BackendSpec fields are primitives.
+    spec_dict = dataclasses.asdict(spec)
+
+    proc = ctx.Process(
+        target=_isolated_eval_worker,
+        args=(spec_dict, eval_kwargs, queue),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(timeout=timeout_s)
+
+    if proc.is_alive():
+        proc.kill()
+        proc.join()
+        raise RuntimeError(
+            f"Isolated eval subprocess timed out after {timeout_s}s"
+        )
+
+    if proc.exitcode != 0:
+        raise RuntimeError(
+            f"Isolated eval subprocess crashed (exitcode={proc.exitcode}). "
+            "Hint: rerun with CUDA_LAUNCH_BLOCKING=1 for a pinpointed traceback."
+        )
+
+    try:
+        kind, data = queue.get(timeout=30)
+    except Exception:
+        raise RuntimeError("Isolated eval subprocess exited cleanly but returned no result.")
+
+    if kind == "error":
+        raise RuntimeError(f"Isolated eval failed:\n{data}")
+
+    return data  # type: ignore[return-value]
+
+
+# Kinds that MUST run in a subprocess due to unrecoverable CUDA context conflicts
+_ISOLATED_KINDS = frozenset({"tvm"})
+
+
+# ---------------------------------------------------------------------------
 # Core: run one backend and return accuracy stats
 # ---------------------------------------------------------------------------
 
@@ -420,6 +513,27 @@ def run_backend_eval(
         f"  Model: {spec.model}\n"
         f"{'=' * 70}"
     )
+
+    # TVM's C++ runtime calls abort() on CUDA errors, killing the whole process.
+    # Run it in a subprocess so only the child dies if TVM crashes.
+    if spec.kind.lower() in _ISOLATED_KINDS:
+        print(f"  [subprocess-isolated — clean CUDA context per TVM requirement]")
+        eval_kwargs = dict(
+            data_yaml=data_yaml,
+            imgsz=imgsz,
+            batch=batch,
+            conf=conf,
+            iou=iou,
+            max_det=max_det,
+            project=project,
+            name=spec.name,
+            save_json=save_json,
+            save_txt=save_txt,
+            plots=plots,
+            max_batches=max_batches,
+            workers=workers,
+        )
+        return _run_eval_isolated(spec, eval_kwargs)
 
     backend: Optional[Backend] = None
     try:
