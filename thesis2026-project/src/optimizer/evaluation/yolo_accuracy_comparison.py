@@ -156,6 +156,13 @@ class TVMBackend(Backend):
         self._np_dtype = np.float16 if input_dtype.lower() == "float16" else np.float32
 
         if self._device_type == "cuda":
+            # Flush PyTorch's CUDA allocator before TVM touches the device.
+            # PyTorch's caching allocator and TVM's allocator fight for the same
+            # CUDA primary context when they share a process; syncing + emptying
+            # the cache first avoids the illegal-memory-access that results.
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
             self._dev = tvm.cuda(0)
         elif self._device_type == "cpu":
             self._dev = tvm.cpu(0)
@@ -178,6 +185,12 @@ class TVMBackend(Backend):
 
             self._vm.set_input("main", x_tvm)
             self._vm.invoke_stateful("main")
+
+            # Sync the device before reading outputs: without this, .numpy()
+            # races against still-running CUDA kernels, causing illegal access.
+            if self._device_type == "cuda":
+                self._dev.sync()
+
             y_nd = self._vm.get_outputs("main")
 
             if isinstance(y_nd, (tuple, list)):
@@ -200,6 +213,8 @@ class TVMBackend(Backend):
 
     def close(self) -> None:
         try:
+            if self._device_type == "cuda":
+                self._dev.sync()
             del self._vm
         except Exception:
             pass
