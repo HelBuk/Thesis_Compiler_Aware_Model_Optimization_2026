@@ -26,7 +26,7 @@ backends:
   - name: pytorch_fp32
     kind: torch
     model: ../models/yolov8n.pt
-    device: cpu                      # or cuda:0
+    device: cuda:0                      # or cuda:0
     baseline: true                   # all deltas are relative to this entry
 
   # # ── torch.compile (GPU: inductor; CPU: inductor / aot_eager) ─────────────
@@ -38,16 +38,16 @@ backends:
   #   compile_mode: default            # default | reduce-overhead | max-autotune
 
   # ── ONNX Runtime CPU ──────────────────────────────────────────────────────
-  - name: onnxrt_cpu
-    kind: ort
-    model: ../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx
-    device: cpu
-
-  # ── ONNX Runtime CUDA ─────────────────────────────────────────────────────
-  # - name: onnxrt_cuda
+  # - name: onnxrt_cpu
   #   kind: ort
   #   model: ../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx
-  #   device: cuda:0
+  #   device: cpu
+
+  # ── ONNX Runtime CUDA ─────────────────────────────────────────────────────
+  - name: onnxrt_cuda
+    kind: ort
+    model: ../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx
+    device: cuda:0
 
   # # ── TFLite FP32 (CPU) ─────────────────────────────────────────────────────
   # - name: tflite_fp32_cpu
@@ -85,20 +85,20 @@ backends:
   #   trt_plugin_so: /path/to/libc2f_m2_plugin.so
 
   # ── TVM GPU FP32 (Relax VirtualMachine) ──────────────────────────────────
-  # - name: tvm_gpu_fp32
-  #   kind: tvm
-  #   model: ../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v6.so
-  #   device: cuda:0
-  #   tvm_device_type: cuda
-  #   tvm_input_dtype: float32   # default; TVM module expects float32 input
+  - name: tvm_gpu_fp32
+    kind: tvm
+    model: ../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v6.so
+    device: cuda:0
+    tvm_device_type: cuda
+    tvm_input_dtype: float32   # default; TVM module expects float32 input
 
   # ── TVM GPU FP16 (Relax VirtualMachine) ──────────────────────────────────
-  # - name: tvm_gpu_fp16
-  #   kind: tvm
-  #   model: ../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_float16_v7.so
-  #   device: cuda:0
-  #   tvm_device_type: cuda
-  #   tvm_input_dtype: float16   # REQUIRED for fp16 compiled modules
+  - name: tvm_gpu_fp16
+    kind: tvm
+    model: ../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_float16_v7.so
+    device: cuda:0
+    tvm_device_type: cuda
+    tvm_input_dtype: float16   # REQUIRED for fp16 compiled modules
 
   # ── TVM CPU FP32 ──────────────────────────────────────────────────────────
   # - name: tvm_cpu_fp32

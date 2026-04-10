@@ -181,7 +181,7 @@ class TVMBackend(Backend):
         preds = []
         for i in range(x_np.shape[0]):
             x_i = np.ascontiguousarray(x_np[i : i + 1])
-            x_tvm = tvm.nd.array(x_i, device=self._dev)
+            x_tvm  = tvm.runtime.tensor(x_i, device=self._dev)
 
             self._vm.set_input("main", x_tvm)
             self._vm.invoke_stateful("main")
