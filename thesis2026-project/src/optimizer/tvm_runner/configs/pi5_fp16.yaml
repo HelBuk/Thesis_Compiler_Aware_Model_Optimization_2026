@@ -1,0 +1,53 @@
+run:
+  name: "yolov8n_pi5_cpu_fp16"
+  out_dir: "./optimizer/tvm_runner/out/experiments"
+  seed: 0
+
+model:
+  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_fp16_clean.onnx"
+  pt_path: "../models/yolov8n.pt"
+  imgsz: 640
+  batch: 1
+
+device:
+  kind: "cpu"            # "cuda" or "cpu"
+  arch: null
+  host:
+    kind: "llvm"
+    mtriple: "aarch64-linux-gnu"
+    mcpu: "cortex-a76" # native - for automatic detection
+    num-cores: 4
+
+precision:
+  name: "fp16"            # "fp32" | "fp16"
+
+tvm:
+  log_dir: "./optimizer/tvm_runner/out/tvm_tuning_logs/tuning_yolov8n_pi5_cpu_fp16_v1"
+  use_existing_db: true   # compile can reuse DB without tuning
+  max_trials_global: 10000
+  max_trials_per_task: 150
+  num_trials_per_iter: 64
+  timeout_builder_s: 300
+  timeout_runner_s: 300
+  export_path: "../models/compiled_tvm_models/tvm_yolov8n_pi5_cpu_fp16_v1.so" 
+
+tvm_targeted_tuning:
+  enable: false
+  operations: null                    # Tasks to tune: String or List[str]
+
+benchmark:
+  runs: 200
+  warmup: 20
+
+onnxruntime:
+  #provider: "CUDAExecutionProvider"   # "CPUExecutionProvider" | "CUDAExecutionProvider" | "TensorrtExecutionProvider"
+  threads: 4 #so.intra_op_num_threads for ONNXRT
+  trt:
+    enable_engine_cache: true
+    engine_cache_path: "./optimizer/tvm_runner/out/experiments/trt_cache/trt_current"
+    fp16_enable: true
+  use_arena: true # Default: True; if None: True; Otherwise: val; 
+
+tflite:
+  model_path: "../models/quantized_models/yolov8n_tflite_int8/yolov8n_float16.tflite"
+  threads: 4
