@@ -627,22 +627,38 @@ def print_comparison_table(
     baseline_name: str,
     all_stats: Dict[str, Dict[str, float]],
 ) -> None:
-    # Determine which metrics are available across all backends
+    # Split into successful (non-empty stats) and failed backends.
+    ok_stats  = {n: s for n, s in all_stats.items() if s}
+    failed    = [n for n, s in all_stats.items() if not s]
+
+    if not ok_stats:
+        print("[WARNING] All backends failed — no results to display.")
+        return
+
+    # Metrics present in every successful backend (baseline must be among them).
     avail_metrics = []
     for disp_key, label in _DISPLAY_METRICS:
-        if all(disp_key in s for s in all_stats.values()):
+        if all(disp_key in s for s in ok_stats.values()):
             avail_metrics.append((disp_key, label))
 
     if not avail_metrics:
-        print("[WARNING] No common display metrics found. Raw stats:")
-        for name, stats in all_stats.items():
+        print("[WARNING] No common display metrics found in successful backends.")
+        for name, stats in ok_stats.items():
             print(f"  {name}: {stats}")
+        if failed:
+            print(f"  FAILED (no stats): {', '.join(failed)}")
         return
 
-    baseline_stats = all_stats[baseline_name]
+    # If baseline itself failed, pick the first successful backend as reference.
+    if baseline_name not in ok_stats:
+        baseline_name = next(iter(ok_stats))
+        print(f"[WARNING] Original baseline failed; using {baseline_name!r} as reference.")
 
-    # Column widths
-    name_w = max(len(n) for n in all_stats) + 2
+    baseline_stats = ok_stats[baseline_name]
+
+    # Column widths — account for all names including failed ones.
+    all_names = list(ok_stats.keys()) + [f"{n} (FAILED)" for n in failed]
+    name_w = max(len(n) for n in all_names) + 2
     col_w = 13
 
     header_parts = [f"{'Backend':<{name_w}}"]
@@ -651,7 +667,6 @@ def print_comparison_table(
         header_parts.append(f"{'Δabs':>{col_w}}")
         header_parts.append(f"{'Δ%':>{col_w}}")
     header = "  ".join(header_parts)
-
     sep = "-" * len(header)
 
     print()
@@ -661,7 +676,7 @@ def print_comparison_table(
     print(header)
     print(sep)
 
-    for name, stats in all_stats.items():
+    for name, stats in ok_stats.items():
         tag = " (REF)" if name == baseline_name else ""
         row_parts = [f"{name + tag:<{name_w}}"]
         for disp_key, _ in avail_metrics:
@@ -675,6 +690,12 @@ def print_comparison_table(
                 d_str, p_str = _fmt_delta(val - ref_val, ref_val)
                 row_parts.append(f"{d_str:>{col_w}}")
                 row_parts.append(f"{p_str:>{col_w}}")
+        print("  ".join(row_parts))
+
+    for name in failed:
+        row_parts = [f"{name + ' (FAILED)':<{name_w}}"]
+        for _ in avail_metrics:
+            row_parts += [f"{'n/a':>{col_w}}"] * 3
         print("  ".join(row_parts))
 
     print(sep)
