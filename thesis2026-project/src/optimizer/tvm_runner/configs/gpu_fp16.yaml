@@ -4,7 +4,7 @@ run:
   seed: 0
 
 model:
-  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_fp16.onnx"
+  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_fp16_clean.onnx"
   pt_path: "../models/yolov8n.pt"
   imgsz: 640
   batch: 1
@@ -34,7 +34,7 @@ tvm:
   num_trials_per_iter: 5
   timeout_builder_s: 300
   timeout_runner_s: 300
-  export_path: "../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_float16_v7.so" #"./out/tvm_compiled_models/yolov8n_orin_gpu_fp32_v2.so"
+  export_path: "../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_float16_v8.so" #"./out/tvm_compiled_models/yolov8n_orin_gpu_fp32_v2.so"
 
 tvm_targeted_tuning:
   enable: false
