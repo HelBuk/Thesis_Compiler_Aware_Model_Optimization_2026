@@ -168,47 +168,41 @@ class TVMBackend(Backend):
         self._vm = tvm.relax.VirtualMachine(lib, self._dev)
         self._torch_device = "cpu"  # outputs come back to CPU via numpy
 
-        # Pre-allocate a single input NDArray and reuse it via copyfrom().
-        # Creating a new tvm.nd.array every inference call causes repeated
-        # device alloc/free that corrupts TVM's workspace on the 2nd batch.
-        # bench_rigorous.py uses the same pattern (one x_tvm, loop over runs).
-        self._x_tvm = tvm.nd.array(
-            np.zeros((1, 3, imgsz, imgsz), dtype=self._np_dtype),
-            device=self._dev,
-        )
-        if self._device_type == "cuda":
-            self._dev.sync()
+        # Persistent host-side numpy buffer.  tvm.runtime.tensor wraps it
+        # without copying (zero-copy view); keeping self._x_np_buf alive as a
+        # member ensures the host memory is never GC'd while an async H2D copy
+        # is still in flight — which was the root cause of the illegal-access.
+        # We create a fresh tvm.runtime.tensor each call (cheap host wrap) so
+        # the TVM VM always sees a stable host pointer, but we avoid repeated
+        # GPU alloc/free by letting the VM's internal workspace pool handle it.
+        self._x_np_buf = np.zeros((1, 3, imgsz, imgsz), dtype=self._np_dtype)
 
-        # Probe one dummy inference to catch dtype mismatches NOW (as a Python
-        # ValueError) rather than mid-eval (which surfaces as a hard C++ abort
-        # we cannot catch).  If the model's input annotation differs from the
-        # requested dtype, flip automatically.
+        # Probe one dummy inference to catch dtype mismatches NOW (Python
+        # ValueError, catchable) rather than mid-eval (hard C++ abort).
+        # If the model's input annotation differs from the requested dtype,
+        # flip automatically (fp16 TVM models often keep float32 input + cast).
         try:
-            self._vm.set_input("main", self._x_tvm)
+            _x_probe = tvm.runtime.tensor(self._x_np_buf, self._dev)
+            self._vm.set_input("main", _x_probe)
             self._vm.invoke_stateful("main")
             if self._device_type == "cuda":
                 self._dev.sync()
             _y = self._vm.get_outputs("main")
-            del _y
+            del _y, _x_probe
+            if self._device_type == "cuda":
+                self._dev.sync()
             print(f"[TVM] probe OK  model={Path(model_path).name}  "
                   f"input_dtype={self._np_dtype.__name__}")
         except ValueError as exc:
             if "dtype" in str(exc).lower():
-                # TVM compiled fp16 models often still annotate their input as
-                # float32 (cast is the first op inside the graph).  Flip and retry.
                 self._np_dtype = (
                     np.float16 if self._np_dtype == np.float32 else np.float32
                 )
+                self._x_np_buf = np.zeros((1, 3, imgsz, imgsz), dtype=self._np_dtype)
                 print(
                     f"[TVM] auto-corrected input dtype → {self._np_dtype.__name__} "
-                    f"(annotation said: {exc})"
+                    f"(annotation: {exc})"
                 )
-                self._x_tvm = tvm.nd.array(
-                    np.zeros((1, 3, imgsz, imgsz), dtype=self._np_dtype),
-                    device=self._dev,
-                )
-                if self._device_type == "cuda":
-                    self._dev.sync()
             else:
                 raise
 
@@ -218,13 +212,16 @@ class TVMBackend(Backend):
 
         preds = []
         for i in range(x_np.shape[0]):
-            # Reuse the pre-allocated device buffer — no alloc/free per image.
-            self._x_tvm.copyfrom(np.ascontiguousarray(x_np[i : i + 1]))
+            # Update the persistent buffer in-place, then wrap with a fresh
+            # tvm.runtime.tensor (zero-copy host view — no GPU alloc here).
+            # self._x_np_buf stays alive as a member, so no GC race.
+            np.copyto(self._x_np_buf, np.ascontiguousarray(x_np[i : i + 1]))
+            x_tvm = tvm.runtime.tensor(self._x_np_buf, self._dev)
 
-            self._vm.set_input("main", self._x_tvm)
+            self._vm.set_input("main", x_tvm)
             self._vm.invoke_stateful("main")
 
-            # Sync before reading: without this .numpy() races CUDA kernels.
+            # Sync before reading: ensures kernels finish before .numpy().
             if self._device_type == "cuda":
                 self._dev.sync()
 
@@ -233,10 +230,12 @@ class TVMBackend(Backend):
                 y = y_nd[0].numpy()
             else:
                 y = y_nd.numpy()
-            # Explicitly release the TVM device-buffer reference before the
-            # next invoke; delayed GC of y_nd overlapping the next workspace
-            # allocation is what causes the illegal-memory-access on batch 2.
-            del y_nd
+
+            # Release both tensors before the next invoke so TVM's workspace
+            # pool can safely reclaim device memory without overlap.
+            del x_tvm, y_nd
+            if self._device_type == "cuda":
+                self._dev.sync()
 
             preds.append(
                 yolo8_output_to_preds_ultra(
@@ -255,8 +254,8 @@ class TVMBackend(Backend):
         try:
             if self._device_type == "cuda":
                 self._dev.sync()
-            del self._x_tvm
             del self._vm
+            del self._x_np_buf
         except Exception:
             pass
 
