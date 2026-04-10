@@ -1,0 +1,117 @@
+# yolo_accuracy_comparison.py — config template
+#
+# Usage:
+#   python -m optimizer.evaluation.yolo_accuracy_comparison --config accuracy_comparison_template.yaml
+#   # or from the project root:
+#   python src/optimizer/evaluation/yolo_accuracy_comparison.py --config <this file>
+
+comparison:
+  data: ../datasets/coco/data.yaml          # Ultralytics dataset YAML with val split
+  imgsz: 640
+  batch: 1
+  conf: 0.001                        # low conf to match official mAP evaluation
+  iou: 0.7
+  max_det: 300
+  max_batches: 0                     # 0 = full val set; set e.g. 100 for a quick sanity check
+  workers: 0                         # dataloader workers; 0 = main process (safest for low RAM)
+  project: ./optimizer/evaluation/runs/accuracy_comparison
+  save_json: true
+  save_txt: true
+  plots: false
+  output_json: ./optimizer/evaluation/runs/accuracy_comparison/results.json
+
+backends:
+
+  # ── Baseline ──────────────────────────────────────────────────────────────
+  - name: pytorch_fp32
+    kind: torch
+    model: ../models/yolov8n.pt
+    device: cpu                      # or cuda:0
+    baseline: true                   # all deltas are relative to this entry
+
+  # # ── torch.compile (GPU: inductor; CPU: inductor / aot_eager) ─────────────
+  # - name: pytorch_compile_inductor
+  #   kind: torch_compile
+  #   model: ../models/yolov8n.pt
+  #   device: cpu
+  #   compile_backend: inductor
+  #   compile_mode: default            # default | reduce-overhead | max-autotune
+
+  # ── ONNX Runtime CPU ──────────────────────────────────────────────────────
+  - name: onnxrt_cpu
+    kind: ort
+    model: ../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx
+    device: cpu
+
+  # ── ONNX Runtime CUDA ─────────────────────────────────────────────────────
+  # - name: onnxrt_cuda
+  #   kind: ort
+  #   model: ../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx
+  #   device: cuda:0
+
+  # # ── TFLite FP32 (CPU) ─────────────────────────────────────────────────────
+  # - name: tflite_fp32_cpu
+  #   kind: tflite
+  #   model: ../models/quantized_models/yolov8n_tflite_int8/yolov8n_float32.tflite
+  #   device: cpu
+  #   threads: 4
+  #   tflite_delegate: cpu
+
+  # ── TFLite FP16 (CPU) ─────────────────────────────────────────────────────
+  # - name: tflite_fp16_cpu
+  #   kind: tflite
+  #   model: ../models/quantized_models/yolov8n_tflite_int8/yolov8n_float16.tflite
+  #   device: cpu
+  #   threads: 4
+  #   tflite_delegate: cpu
+
+  # ── TensorRT native engine FP32 ───────────────────────────────────────────
+  # - name: trt_fp32
+  #   kind: trt_engine
+  #   model: ./optimizer/tvm_runner/out/experiments/trt_cache/trt_current/TensorrtExecutionProvider_TRTKernel_graph_main_graph_12725355770372969813_0_0_sm87.engine
+  #   device: cuda:0
+
+  # ── TensorRT native engine FP16 ───────────────────────────────────────────
+  # - name: trt_fp16
+  #   kind: trt_engine
+  #   model: ./optimizer/tvm_runner/out/experiments/trt_cache/trt_current/TensorrtExecutionProvider_TRTKernel_graph_main_graph_11605077208752094771_0_0_fp16_sm87.engine
+  #   device: cuda:0
+
+  # ── TensorRT with custom plugin (C2f model.2 replacement) ─────────────────
+  # - name: trt_plugin_c2f
+  #   kind: trt_engine
+  #   model: /path/to/yolov8n_model2_plugin.engine
+  #   device: cuda:0
+  #   trt_plugin_so: /path/to/libc2f_m2_plugin.so
+
+  # ── TVM GPU FP32 (Relax VirtualMachine) ──────────────────────────────────
+  # - name: tvm_gpu_fp32
+  #   kind: tvm
+  #   model: ../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v6.so
+  #   device: cuda:0
+  #   tvm_device_type: cuda
+  #   tvm_input_dtype: float32   # default; TVM module expects float32 input
+
+  # ── TVM GPU FP16 (Relax VirtualMachine) ──────────────────────────────────
+  # - name: tvm_gpu_fp16
+  #   kind: tvm
+  #   model: ../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_float16_v7.so
+  #   device: cuda:0
+  #   tvm_device_type: cuda
+  #   tvm_input_dtype: float16   # REQUIRED for fp16 compiled modules
+
+  # ── TVM CPU FP32 ──────────────────────────────────────────────────────────
+  # - name: tvm_cpu_fp32
+  #   kind: tvm
+  #   model: ../models/compiled_tvm_models/tvm_yolov8n_pi5_cpu_fp32_v1.so
+  #   device: cpu
+  #   tvm_device_type: cpu
+  #   tvm_input_dtype: float32
+
+  # ── TVM CPU FP16 ──────────────────────────────────────────────────────────
+  # - name: tvm_cpu_fp16
+  #   kind: tvm
+  #   model: ../models/compiled_tvm_models/tvm_yolov8n_pi5_cpu_fp16_v1.so
+  #   device: cpu
+  #   tvm_device_type: cpu
+  #   tvm_input_dtype: float16   # REQUIRED for fp16 compiled modules

@@ -1,0 +1,753 @@
+#!/usr/bin/env python3
+"""
+yolo_accuracy_comparison.py — Multi-backend accuracy comparison for YOLOv8n.
+
+Runs each backend sequentially against the COCO validation split, accumulates
+mAP/precision/recall metrics, then prints a table of relative deltas vs the
+designated baseline backend.
+
+Memory design
+-------------
+* One backend is loaded at a time; it is fully freed (close() + del + gc.collect()
+  + cuda cache clear) before the next backend is loaded.
+* Inside each backend run, eval_backend() deletes imgs/preds/batch_data every
+  batch and calls gc.collect() + cuda_empty_cache() every 200 batches.
+* The Ultralytics DetectionValidator accumulates self.stats per batch. For the
+  COCO 5k val set this is ~5000 small tuples ≈ 20–40 MB total — constant-rate
+  growth that is acceptable. The stats list is freed when the validator goes out
+  of scope after get_stats().
+* Peak RAM per backend run ≈ model_weights + one batch of images + ~40 MB stats.
+
+Usage examples
+--------------
+  # YAML config (recommended)
+  python yolo_accuracy_comparison.py --config my_comparison.yaml
+
+  # Ad-hoc CLI (two backends)
+  python yolo_accuracy_comparison.py \\
+      --data coco.yaml \\
+      --backend torch  /models/yolov8n.pt        cpu \\
+      --backend ort    /models/yolov8n.onnx       cpu \\
+      --backend tflite /models/yolov8n.tflite     cpu \\
+      --backend tvm    /models/yolov8n_tvm.so     cuda:0 \\
+      --baseline torch
+
+YAML config format
+------------------
+comparison:
+  data: /path/to/coco.yaml
+  imgsz: 640
+  batch: 1
+  conf: 0.001
+  iou: 0.7
+  max_det: 300
+  max_batches: 0          # 0 = full val set
+  workers: 0
+  project: runs/accuracy_comparison
+  save_json: false
+  save_txt: false
+  plots: false
+  output_json: results.json
+
+backends:
+  - name: pytorch_fp32
+    kind: torch            # torch | torch_compile | ort | tensorrt | trt_engine | tflite | tvm
+    model: /path/to/yolov8n.pt
+    device: cpu
+    baseline: true         # optional; first entry is baseline if none marked
+
+  - name: pytorch_compile
+    kind: torch_compile
+    model: /path/to/yolov8n.pt
+    device: cpu
+    compile_backend: inductor   # optional
+    compile_mode: default        # optional
+
+  - name: onnxrt_cpu
+    kind: ort
+    model: /path/to/yolov8n.onnx
+    device: cpu
+
+  - name: tflite_fp32
+    kind: tflite
+    model: /path/to/yolov8n.tflite
+    device: cpu
+    threads: 4
+    tflite_delegate: cpu
+
+  - name: trt_fp32
+    kind: trt_engine
+    model: /path/to/yolov8n_fp32.engine
+    device: cuda:0
+
+  - name: trt_fp16
+    kind: trt_engine
+    model: /path/to/yolov8n_fp16.engine
+    device: cuda:0
+
+  - name: tvm_gpu
+    kind: tvm
+    model: /path/to/yolov8n_tvm.so
+    device: cuda:0
+    tvm_device_type: cuda   # cuda | cpu
+"""
+from __future__ import annotations
+
+import argparse
+import gc
+import json
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+import yaml
+
+# ---------------------------------------------------------------------------
+# Imports from the sibling yolo_metrics module
+# ---------------------------------------------------------------------------
+from optimizer.evaluation.yolo_metrics import (
+    Backend,
+    TorchBackend,
+    build_backend,
+    detect_best_device,
+    eval_backend,
+    yolo8_output_to_preds_ultra,
+)
+
+
+# ---------------------------------------------------------------------------
+# TVM backend (accuracy evaluation)
+# ---------------------------------------------------------------------------
+
+class TVMBackend(Backend):
+    """TVM Relax VirtualMachine backend for YOLOv8n accuracy evaluation.
+
+    Loads a compiled TVM `.so` module (produced by bench_rigorous / TVM tuning)
+    and runs inference through the Relax VirtualMachine API.
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        imgsz: int,
+        conf: float,
+        iou: float,
+        max_det: int,
+        device: str,
+        tvm_device_type: str = "cuda",
+        input_dtype: str = "float32",
+    ):
+        super().__init__(imgsz, conf, iou, max_det, device)
+
+        try:
+            import tvm
+            import tvm.relax
+        except ImportError as e:
+            raise ImportError(
+                "TVM is not installed. Install with `pip install apache-tvm` "
+                "or build from source."
+            ) from e
+
+        self._tvm = tvm
+        self._device_type = tvm_device_type.lower()
+        self._np_dtype = np.float16 if input_dtype.lower() == "float16" else np.float32
+
+        if self._device_type == "cuda":
+            self._dev = tvm.cuda(0)
+        elif self._device_type == "cpu":
+            self._dev = tvm.cpu(0)
+        else:
+            raise ValueError(f"Unsupported TVM device type: {tvm_device_type!r}")
+
+        lib = tvm.runtime.load_module(model_path)
+        self._vm = tvm.relax.VirtualMachine(lib, self._dev)
+
+        self._torch_device = "cpu"  # outputs come back to CPU via numpy
+
+    def infer_batch(self, imgs_bchw01: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
+        tvm = self._tvm
+        x_np = imgs_bchw01.detach().cpu().numpy().astype(self._np_dtype)
+
+        preds = []
+        for i in range(x_np.shape[0]):
+            x_i = np.ascontiguousarray(x_np[i : i + 1])
+            x_tvm = tvm.nd.array(x_i, device=self._dev)
+
+            self._vm.set_input("main", x_tvm)
+            self._vm.invoke_stateful("main")
+            y_nd = self._vm.get_outputs("main")
+
+            if isinstance(y_nd, (tuple, list)):
+                y = y_nd[0].numpy()
+            else:
+                y = y_nd.numpy()
+
+            preds.append(
+                yolo8_output_to_preds_ultra(
+                    out=y,
+                    imgsz=self.imgsz,
+                    conf=self.conf,
+                    iou=self.iou,
+                    max_det=self.max_det,
+                    torch_device="cpu",
+                )
+            )
+
+        return preds
+
+    def close(self) -> None:
+        try:
+            del self._vm
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# torch.compile backend
+# ---------------------------------------------------------------------------
+
+class TorchCompileBackend(TorchBackend):
+    """PyTorch eager + torch.compile() backend.
+
+    Wraps TorchBackend and applies torch.compile() after model load.
+    The first forward pass triggers compilation; subsequent calls are fast.
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        imgsz: int,
+        conf: float,
+        iou: float,
+        max_det: int,
+        device: str,
+        compile_backend: str = "inductor",
+        compile_mode: str = "default",
+    ):
+        super().__init__(model_path, imgsz, conf, iou, max_det, device)
+        self._compile_backend = compile_backend
+        self._compile_mode = compile_mode
+
+        print(
+            f"[torch.compile] backend={compile_backend!r} mode={compile_mode!r} "
+            f"device={self.torch_device!r}"
+        )
+        try:
+            self.model = torch.compile(
+                self.model,
+                backend=compile_backend,
+                mode=compile_mode,
+                fullgraph=False,
+            )
+        except Exception as e:
+            print(f"[torch.compile] WARNING: compile failed ({e}), falling back to eager.")
+
+
+# ---------------------------------------------------------------------------
+# BackendSpec — declarative description of one backend entry
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BackendSpec:
+    name: str
+    kind: str                       # torch | torch_compile | ort | tensorrt | trt_engine | tflite | tvm
+    model: str
+    device: str = ""
+    baseline: bool = False
+
+    # torch.compile options
+    compile_backend: str = "inductor"
+    compile_mode: str = "default"
+
+    # TFLite options
+    threads: int = 4
+    tflite_delegate: str = "cpu"
+
+    # ORT / TensorRT-via-ORT options
+    trt_fp16: bool = False
+    trt_int8: bool = False
+    trt_engine_cache: bool = False
+    trt_engine_cache_path: str = "./trt_cache"
+    trt_workspace_size: int = 2_147_483_648
+
+    # TRT native engine options
+    trt_plugin_so: Optional[str] = None
+
+    # TVM options
+    tvm_device_type: str = "cuda"
+    tvm_input_dtype: str = "float32"   # float32 | float16
+
+    # Extra raw kwargs for forward-compatibility
+    extra: Dict = field(default_factory=dict)
+
+
+def spec_from_dict(d: Dict) -> BackendSpec:
+    known = {f.name for f in BackendSpec.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+    kwargs = {k: v for k, v in d.items() if k in known}
+    extra = {k: v for k, v in d.items() if k not in known}
+    return BackendSpec(**kwargs, extra=extra)
+
+
+# ---------------------------------------------------------------------------
+# Build a backend from a BackendSpec
+# ---------------------------------------------------------------------------
+
+def _make_simple_args(spec: BackendSpec):
+    """Return a simple namespace compatible with yolo_metrics.build_backend()."""
+    import types
+    ns = types.SimpleNamespace()
+    ns.imgsz = 640          # overridden by caller
+    ns.conf = 0.001         # overridden by caller
+    ns.iou = 0.7            # overridden by caller
+    ns.max_det = 300        # overridden by caller
+    ns.threads = spec.threads
+    ns.tflite_delegate = spec.tflite_delegate
+    ns.trt_fp16 = spec.trt_fp16
+    ns.trt_int8 = spec.trt_int8
+    ns.trt_engine_cache = spec.trt_engine_cache
+    ns.trt_engine_cache_path = spec.trt_engine_cache_path
+    ns.trt_workspace_size = spec.trt_workspace_size
+    ns.trt_plugin_so = spec.trt_plugin_so
+    return ns
+
+
+def build_backend_from_spec(
+    spec: BackendSpec,
+    imgsz: int,
+    conf: float,
+    iou: float,
+    max_det: int,
+) -> Backend:
+    device = spec.device or detect_best_device()
+    kind = spec.kind.lower()
+
+    if kind == "torch_compile":
+        return TorchCompileBackend(
+            model_path=spec.model,
+            imgsz=imgsz,
+            conf=conf,
+            iou=iou,
+            max_det=max_det,
+            device=device,
+            compile_backend=spec.compile_backend,
+            compile_mode=spec.compile_mode,
+        )
+
+    if kind == "tvm":
+        return TVMBackend(
+            model_path=spec.model,
+            imgsz=imgsz,
+            conf=conf,
+            iou=iou,
+            max_det=max_det,
+            device=device,
+            tvm_device_type=spec.tvm_device_type,
+            input_dtype=spec.tvm_input_dtype,
+        )
+
+    # Delegate all other kinds to the existing factory
+    args = _make_simple_args(spec)
+    args.imgsz = imgsz
+    args.conf = conf
+    args.iou = iou
+    args.max_det = max_det
+    return build_backend(kind, spec.model, args, device_override=device)
+
+
+# ---------------------------------------------------------------------------
+# Memory-safe backend teardown
+# ---------------------------------------------------------------------------
+
+def free_backend(backend: Optional[Backend]) -> None:
+    if backend is None:
+        return
+    try:
+        backend.close()
+    except Exception:
+        pass
+    if isinstance(backend, TorchBackend):
+        try:
+            backend.model.to("cpu")
+        except Exception:
+            pass
+    del backend
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+# ---------------------------------------------------------------------------
+# Core: run one backend and return accuracy stats
+# ---------------------------------------------------------------------------
+
+def run_backend_eval(
+    spec: BackendSpec,
+    data_yaml: str,
+    imgsz: int,
+    batch: int,
+    conf: float,
+    iou: float,
+    max_det: int,
+    project: str,
+    max_batches: int,
+    workers: int,
+    save_json: bool,
+    save_txt: bool,
+    plots: bool,
+) -> Dict[str, float]:
+    """Load one backend, evaluate it on COCO val, free all resources, return stats."""
+    print(
+        f"\n{'=' * 70}\n"
+        f"  Evaluating: {spec.name}  (kind={spec.kind}  device={spec.device or 'auto'})\n"
+        f"  Model: {spec.model}\n"
+        f"{'=' * 70}"
+    )
+
+    backend: Optional[Backend] = None
+    try:
+        backend = build_backend_from_spec(spec, imgsz=imgsz, conf=conf, iou=iou, max_det=max_det)
+
+        stats = eval_backend(
+            backend=backend,
+            data_yaml=data_yaml,
+            imgsz=imgsz,
+            batch=batch,
+            conf=conf,
+            iou=iou,
+            max_det=max_det,
+            project=project,
+            name=spec.name,
+            save_json=save_json,
+            save_txt=save_txt,
+            plots=plots,
+            max_batches=max_batches,
+            workers=workers,
+        )
+    finally:
+        free_backend(backend)
+        backend = None
+
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Comparison table
+# ---------------------------------------------------------------------------
+
+_DISPLAY_METRICS: List[Tuple[str, str]] = [
+    ("metrics/mAP50(B)",    "mAP50"),
+    ("metrics/mAP50-95(B)", "mAP50-95"),
+    ("metrics/precision(B)","Prec"),
+    ("metrics/recall(B)",   "Recall"),
+]
+
+
+def _fmt(v: float) -> str:
+    return f"{v:.4f}"
+
+
+def _fmt_delta(d: float, ref: float) -> Tuple[str, str]:
+    sign = "+" if d >= 0 else ""
+    pct = (d / ref * 100.0) if abs(ref) > 1e-9 else float("nan")
+    pct_str = f"{sign}{pct:.2f}%" if not np.isnan(pct) else "  n/a"
+    return f"{sign}{d:.4f}", pct_str
+
+
+def print_comparison_table(
+    baseline_name: str,
+    all_stats: Dict[str, Dict[str, float]],
+) -> None:
+    # Determine which metrics are available across all backends
+    avail_metrics = []
+    for disp_key, label in _DISPLAY_METRICS:
+        if all(disp_key in s for s in all_stats.values()):
+            avail_metrics.append((disp_key, label))
+
+    if not avail_metrics:
+        print("[WARNING] No common display metrics found. Raw stats:")
+        for name, stats in all_stats.items():
+            print(f"  {name}: {stats}")
+        return
+
+    baseline_stats = all_stats[baseline_name]
+
+    # Column widths
+    name_w = max(len(n) for n in all_stats) + 2
+    col_w = 13
+
+    header_parts = [f"{'Backend':<{name_w}}"]
+    for _, label in avail_metrics:
+        header_parts.append(f"{label:>{col_w}}")
+        header_parts.append(f"{'Δabs':>{col_w}}")
+        header_parts.append(f"{'Δ%':>{col_w}}")
+    header = "  ".join(header_parts)
+
+    sep = "-" * len(header)
+
+    print()
+    print("=" * len(header))
+    print(f"  ACCURACY COMPARISON  —  baseline: {baseline_name}")
+    print("=" * len(header))
+    print(header)
+    print(sep)
+
+    for name, stats in all_stats.items():
+        tag = " (REF)" if name == baseline_name else ""
+        row_parts = [f"{name + tag:<{name_w}}"]
+        for disp_key, _ in avail_metrics:
+            val = float(stats.get(disp_key, float("nan")))
+            ref_val = float(baseline_stats.get(disp_key, float("nan")))
+            row_parts.append(f"{_fmt(val):>{col_w}}")
+            if name == baseline_name:
+                row_parts.append(f"{'—':>{col_w}}")
+                row_parts.append(f"{'—':>{col_w}}")
+            else:
+                d_str, p_str = _fmt_delta(val - ref_val, ref_val)
+                row_parts.append(f"{d_str:>{col_w}}")
+                row_parts.append(f"{p_str:>{col_w}}")
+        print("  ".join(row_parts))
+
+    print(sep)
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Config loading
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ComparisonConfig:
+    data: str
+    backends: List[BackendSpec]
+    baseline: str = ""
+    imgsz: int = 640
+    batch: int = 1
+    conf: float = 0.001
+    iou: float = 0.7
+    max_det: int = 300
+    max_batches: int = 0
+    workers: int = 0
+    project: str = "runs/accuracy_comparison"
+    save_json: bool = False
+    save_txt: bool = False
+    plots: bool = False
+    output_json: str = ""
+
+
+def load_yaml_config(path: str) -> ComparisonConfig:
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+
+    cmp = raw.get("comparison", {})
+    specs_raw = raw.get("backends", [])
+
+    specs: List[BackendSpec] = []
+    baseline_name = ""
+    for d in specs_raw:
+        spec = spec_from_dict(d)
+        specs.append(spec)
+        if spec.baseline and not baseline_name:
+            baseline_name = spec.name
+
+    if not baseline_name and specs:
+        baseline_name = specs[0].name
+
+    return ComparisonConfig(
+        data=cmp["data"],
+        backends=specs,
+        baseline=baseline_name,
+        imgsz=cmp.get("imgsz", 640),
+        batch=cmp.get("batch", 1),
+        conf=cmp.get("conf", 0.001),
+        iou=cmp.get("iou", 0.7),
+        max_det=cmp.get("max_det", 300),
+        max_batches=cmp.get("max_batches", 0),
+        workers=cmp.get("workers", 0),
+        project=cmp.get("project", "runs/accuracy_comparison"),
+        save_json=cmp.get("save_json", False),
+        save_txt=cmp.get("save_txt", False),
+        plots=cmp.get("plots", False),
+        output_json=cmp.get("output_json", ""),
+    )
+
+
+# ---------------------------------------------------------------------------
+# CLI argument parsing
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        description="Multi-backend YOLOv8n accuracy comparison",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+
+    ap.add_argument("--config", metavar="YAML",
+                    help="Path to YAML comparison config (recommended)")
+
+    # Dataset / eval settings (CLI override or standalone)
+    ap.add_argument("--data", help="Path to Ultralytics dataset YAML (e.g. coco.yaml)")
+    ap.add_argument("--imgsz", type=int, default=640)
+    ap.add_argument("--batch", type=int, default=1)
+    ap.add_argument("--conf", type=float, default=0.001)
+    ap.add_argument("--iou", type=float, default=0.7)
+    ap.add_argument("--max_det", type=int, default=300)
+    ap.add_argument("--max_batches", type=int, default=0,
+                    help="Limit to N batches per backend (0 = full val)")
+    ap.add_argument("--workers", type=int, default=0)
+    ap.add_argument("--project", default="runs/accuracy_comparison")
+    ap.add_argument("--save_json", action="store_true")
+    ap.add_argument("--save_txt", action="store_true")
+    ap.add_argument("--plots", action="store_true")
+    ap.add_argument("--output_json", default="",
+                    help="Save all stats to this JSON file")
+
+    # Ad-hoc backends: --backend KIND MODEL_PATH DEVICE
+    ap.add_argument("--backend", nargs=3, action="append",
+                    metavar=("KIND", "MODEL", "DEVICE"),
+                    help="Add a backend (repeatable). KIND: torch|torch_compile|ort|"
+                         "tensorrt|trt_engine|tflite|tvm. "
+                         "Example: --backend torch /models/yolov8n.pt cpu")
+    ap.add_argument("--baseline", default="",
+                    help="Name (KIND) of the baseline backend (default: first)")
+
+    return ap.parse_args()
+
+
+def build_config_from_args(args: argparse.Namespace) -> ComparisonConfig:
+    if not args.data:
+        raise SystemExit("--data is required when not using --config")
+    if not args.backend:
+        raise SystemExit("Specify at least one --backend KIND MODEL DEVICE")
+
+    specs: List[BackendSpec] = []
+    for kind, model, device in args.backend:
+        specs.append(BackendSpec(name=kind, kind=kind, model=model, device=device))
+
+    baseline = args.baseline or specs[0].name
+
+    return ComparisonConfig(
+        data=args.data,
+        backends=specs,
+        baseline=baseline,
+        imgsz=args.imgsz,
+        batch=args.batch,
+        conf=args.conf,
+        iou=args.iou,
+        max_det=args.max_det,
+        max_batches=args.max_batches,
+        workers=args.workers,
+        project=args.project,
+        save_json=args.save_json,
+        save_txt=args.save_txt,
+        plots=args.plots,
+        output_json=args.output_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    args = parse_args()
+
+    if args.config:
+        cfg = load_yaml_config(args.config)
+        # CLI flags override YAML where provided
+        if args.data:
+            cfg.data = args.data
+        if args.output_json:
+            cfg.output_json = args.output_json
+        if args.max_batches:
+            cfg.max_batches = args.max_batches
+    else:
+        cfg = build_config_from_args(args)
+
+    if not cfg.backends:
+        raise SystemExit("No backends defined. Check your config or --backend flags.")
+
+    if cfg.baseline not in {s.name for s in cfg.backends}:
+        cfg.baseline = cfg.backends[0].name
+        print(f"[INFO] baseline set to first backend: {cfg.baseline!r}")
+
+    print(f"\n[INFO] Dataset     : {cfg.data}")
+    print(f"[INFO] imgsz       : {cfg.imgsz}")
+    print(f"[INFO] batch       : {cfg.batch}")
+    print(f"[INFO] conf/iou    : {cfg.conf} / {cfg.iou}")
+    print(f"[INFO] max_batches : {cfg.max_batches or 'all'}")
+    print(f"[INFO] Backends    : {[s.name for s in cfg.backends]}")
+    print(f"[INFO] Baseline    : {cfg.baseline}")
+
+    all_stats: Dict[str, Dict[str, float]] = {}
+
+    for spec in cfg.backends:
+        try:
+            stats = run_backend_eval(
+                spec=spec,
+                data_yaml=cfg.data,
+                imgsz=cfg.imgsz,
+                batch=cfg.batch,
+                conf=cfg.conf,
+                iou=cfg.iou,
+                max_det=cfg.max_det,
+                project=cfg.project,
+                max_batches=cfg.max_batches,
+                workers=cfg.workers,
+                save_json=cfg.save_json,
+                save_txt=cfg.save_txt,
+                plots=cfg.plots,
+            )
+            all_stats[spec.name] = stats
+            print(f"[OK] {spec.name}: mAP50={stats.get('metrics/mAP50(B)', 'n/a'):.4f}  "
+                  f"mAP50-95={stats.get('metrics/mAP50-95(B)', 'n/a'):.4f}")
+        except Exception as exc:
+            print(f"[ERROR] {spec.name} failed: {exc}", file=sys.stderr)
+            all_stats[spec.name] = {}
+
+    # Print relative table
+    if cfg.baseline in all_stats and all_stats[cfg.baseline]:
+        # Re-order so baseline is first
+        ordered: Dict[str, Dict[str, float]] = {}
+        ordered[cfg.baseline] = all_stats[cfg.baseline]
+        for name, stats in all_stats.items():
+            if name != cfg.baseline:
+                ordered[name] = stats
+        print_comparison_table(cfg.baseline, ordered)
+    else:
+        print("[WARNING] Baseline stats missing; cannot print relative table.")
+        for name, stats in all_stats.items():
+            print(f"  {name}: {stats}")
+
+    # Save JSON
+    if cfg.output_json:
+        out_path = Path(cfg.output_json)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "baseline": cfg.baseline,
+            "backends": {name: stats for name, stats in all_stats.items()},
+            "relative": {},
+        }
+        baseline_s = all_stats.get(cfg.baseline, {})
+        for name, stats in all_stats.items():
+            rel: Dict[str, Dict[str, float]] = {}
+            for k, val in stats.items():
+                ref_val = baseline_s.get(k)
+                if ref_val is not None:
+                    try:
+                        delta = float(val) - float(ref_val)
+                        pct = delta / float(ref_val) * 100.0 if abs(float(ref_val)) > 1e-9 else float("nan")
+                        rel[k] = {"val": float(val), "delta": delta, "pct_delta": pct}
+                    except Exception:
+                        pass
+            payload["relative"][name] = rel
+        with open(out_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"[INFO] Results saved to {out_path}")
+
+
+if __name__ == "__main__":
+    main()
