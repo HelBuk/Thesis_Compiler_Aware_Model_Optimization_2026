@@ -168,27 +168,20 @@ class TVMBackend(Backend):
         self._vm = tvm.relax.VirtualMachine(lib, self._dev)
         self._torch_device = "cpu"  # outputs come back to CPU via numpy
 
-        # Persistent host-side numpy buffer.  tvm.runtime.tensor wraps it
-        # without copying (zero-copy view); keeping self._x_np_buf alive as a
-        # member ensures the host memory is never GC'd while an async H2D copy
-        # is still in flight — which was the root cause of the illegal-access.
-        # We create a fresh tvm.runtime.tensor each call (cheap host wrap) so
-        # the TVM VM always sees a stable host pointer, but we avoid repeated
-        # GPU alloc/free by letting the VM's internal workspace pool handle it.
-        self._x_np_buf = np.zeros((1, 3, imgsz, imgsz), dtype=self._np_dtype)
+        # Keep one persistent TVM input tensor and update it via copyfrom().
+        # This matches run.py's TVM calling pattern (vm["main"](x_tvm)).
+        self._x_tvm = tvm.runtime.tensor(
+            np.zeros((1, 3, imgsz, imgsz), dtype=self._np_dtype),
+            self._dev,
+        )
 
-        # Probe one dummy inference to catch dtype mismatches NOW (Python
-        # ValueError, catchable) rather than mid-eval (hard C++ abort).
-        # If the model's input annotation differs from the requested dtype,
-        # flip automatically (fp16 TVM models often keep float32 input + cast).
+        # Probe once to catch dtype mismatches early.
         try:
-            _x_probe = tvm.runtime.tensor(self._x_np_buf, self._dev)
-            self._vm.set_input("main", _x_probe)
-            self._vm.invoke_stateful("main")
+            self._x_tvm.copyfrom(np.zeros((1, 3, imgsz, imgsz), dtype=self._np_dtype))
+            _y = self._vm["main"](self._x_tvm)
             if self._device_type == "cuda":
                 self._dev.sync()
-            _y = self._vm.get_outputs("main")
-            del _y, _x_probe
+            del _y
             if self._device_type == "cuda":
                 self._dev.sync()
             print(f"[TVM] probe OK  model={Path(model_path).name}  "
@@ -198,7 +191,10 @@ class TVMBackend(Backend):
                 self._np_dtype = (
                     np.float16 if self._np_dtype == np.float32 else np.float32
                 )
-                self._x_np_buf = np.zeros((1, 3, imgsz, imgsz), dtype=self._np_dtype)
+                self._x_tvm = tvm.runtime.tensor(
+                    np.zeros((1, 3, imgsz, imgsz), dtype=self._np_dtype),
+                    self._dev,
+                )
                 print(
                     f"[TVM] auto-corrected input dtype → {self._np_dtype.__name__} "
                     f"(annotation: {exc})"
@@ -212,28 +208,19 @@ class TVMBackend(Backend):
 
         preds = []
         for i in range(x_np.shape[0]):
-            # Update the persistent buffer in-place, then wrap with a fresh
-            # tvm.runtime.tensor (zero-copy host view — no GPU alloc here).
-            # self._x_np_buf stays alive as a member, so no GC race.
-            np.copyto(self._x_np_buf, np.ascontiguousarray(x_np[i : i + 1]))
-            x_tvm = tvm.runtime.tensor(self._x_np_buf, self._dev)
-
-            self._vm.set_input("main", x_tvm)
-            self._vm.invoke_stateful("main")
+            self._x_tvm.copyfrom(np.ascontiguousarray(x_np[i : i + 1]))
+            y_nd = self._vm["main"](self._x_tvm)
 
             # Sync before reading: ensures kernels finish before .numpy().
             if self._device_type == "cuda":
                 self._dev.sync()
 
-            y_nd = self._vm.get_outputs("main")
             if isinstance(y_nd, (tuple, list)):
                 y = y_nd[0].numpy()
             else:
                 y = y_nd.numpy()
 
-            # Release both tensors before the next invoke so TVM's workspace
-            # pool can safely reclaim device memory without overlap.
-            del x_tvm, y_nd
+            del y_nd
             if self._device_type == "cuda":
                 self._dev.sync()
 
@@ -255,7 +242,7 @@ class TVMBackend(Backend):
             if self._device_type == "cuda":
                 self._dev.sync()
             del self._vm
-            del self._x_np_buf
+            del self._x_tvm
         except Exception:
             pass
 
