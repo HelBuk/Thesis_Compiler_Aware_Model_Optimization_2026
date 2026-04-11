@@ -266,10 +266,11 @@ class TorchCompileBackend(TorchBackend):
         iou: float,
         max_det: int,
         device: str,
+        precision: str = "fp32",
         compile_backend: str = "inductor",
         compile_mode: str = "default",
     ):
-        super().__init__(model_path, imgsz, conf, iou, max_det, device)
+        super().__init__(model_path, imgsz, conf, iou, max_det, device, precision=precision)
         self._compile_backend = compile_backend
         self._compile_mode = compile_mode
 
@@ -299,6 +300,7 @@ class BackendSpec:
     model: str
     device: str = ""
     baseline: bool = False
+    precision: str = "fp32"          # fp32 | fp16 (for torch/torch_compile)
 
     # torch.compile options
     compile_backend: str = "inductor"
@@ -353,6 +355,7 @@ def _make_simple_args(spec: BackendSpec):
     ns.trt_engine_cache_path = spec.trt_engine_cache_path
     ns.trt_workspace_size = spec.trt_workspace_size
     ns.trt_plugin_so = spec.trt_plugin_so
+    ns.precision = spec.precision
     return ns
 
 
@@ -374,6 +377,7 @@ def build_backend_from_spec(
             iou=iou,
             max_det=max_det,
             device=device,
+            precision=spec.precision,
             compile_backend=spec.compile_backend,
             compile_mode=spec.compile_mode,
         )

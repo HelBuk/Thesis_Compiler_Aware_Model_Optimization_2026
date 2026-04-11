@@ -280,13 +280,25 @@ class ORTBackend(Backend):
             providers=providers,
             provider_options=provider_options,
         )
-        self.in_name = self.sess.get_inputs()[0].name
+        inp = self.sess.get_inputs()[0]
+        self.in_name = inp.name
+        type_map = {
+            "tensor(float)": np.float32,
+            "tensor(float16)": np.float16,
+            "tensor(double)": np.float64,
+            "tensor(int64)": np.int64,
+            "tensor(int32)": np.int32,
+            "tensor(int8)": np.int8,
+            "tensor(uint8)": np.uint8,
+        }
+        self.in_dtype = type_map.get(inp.type, np.float32)
 
         print("[ORT] requested providers:", providers)
         print("[ORT] active providers:", self.sess.get_providers())
+        print(f"[ORT] input dtype: {self.in_dtype.__name__}")
 
     def infer_batch(self, imgs_bchw01: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
-        x = imgs_bchw01.detach().cpu().numpy().astype(np.float32)
+        x = imgs_bchw01.detach().cpu().numpy().astype(self.in_dtype, copy=False)
         y = self.sess.run(None, {self.in_name: x})[0]
 
         preds = []
@@ -573,20 +585,38 @@ class TensorRTEngineBackend(Backend):
 
 
 class TorchBackend(Backend):
-    def __init__(self, model_path: str, imgsz: int, conf: float, iou: float, max_det: int, device: str):
+    def __init__(
+        self,
+        model_path: str,
+        imgsz: int,
+        conf: float,
+        iou: float,
+        max_det: int,
+        device: str,
+        precision: str = "fp32",
+    ):
         super().__init__(imgsz, conf, iou, max_det, device)
         from ultralytics import YOLO
 
         self.torch_device = device or detect_best_device()
+        self.precision = str(precision).lower()
+        self._use_fp16 = self.precision in ("fp16", "float16") and str(self.torch_device).startswith("cuda")
         y = YOLO(model_path)
         self.model = y.model
         self.model.eval()
         self.model.to(self.torch_device)
+        if self._use_fp16:
+            self.model = self.model.half()
+        elif self.precision in ("fp16", "float16"):
+            print(f"[Torch] precision={precision!r} requested on non-CUDA device; using fp32.")
 
     @torch.inference_mode()
     def infer_batch(self, imgs_bchw01: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
         x = imgs_bchw01.to(self.torch_device, non_blocking=False)
-        if x.dtype != torch.float32:
+        if self._use_fp16:
+            if x.dtype != torch.float16:
+                x = x.half()
+        elif x.dtype != torch.float32:
             x = x.float()
 
         out = self.model(x)
@@ -818,6 +848,7 @@ def build_backend(kind: str, model_path: str, args, device_override: Optional[st
             iou=args.iou,
             max_det=args.max_det,
             device=device,
+            precision=getattr(args, "precision", "fp32"),
         )
 
     raise ValueError(f"Unsupported backend: {kind}")
