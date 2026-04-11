@@ -59,7 +59,7 @@ backends:
   # ── ONNX Runtime CUDA FP16 ────────────────────────────────────────────────
   - name: onnxrt_cuda_fp16
     kind: ort
-    model: ../models/quantized_models/onnx/yolov8n_opset17_fp16_clean.onnx
+    model: ../models/quantized_models/onnx/yolov8n_opset17_fp16.onnx
     device: cuda:0
 
 
