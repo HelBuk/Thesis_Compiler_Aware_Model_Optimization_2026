@@ -99,6 +99,7 @@ import gc
 import json
 import multiprocessing as mp
 import sys
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -828,6 +829,69 @@ def build_config_from_args(args: argparse.Namespace) -> ComparisonConfig:
 
 
 # ---------------------------------------------------------------------------
+# Incremental JSON save helpers
+# ---------------------------------------------------------------------------
+
+def _now_ts() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _build_payload(
+    baseline: str,
+    all_stats: Dict[str, Dict[str, float]],
+    backend_status: Dict[str, Dict[str, str]],
+    run_started_at: str,
+    status: str,
+) -> Dict:
+    payload: Dict = {
+        "run_started_at": run_started_at,
+        "updated_at": _now_ts(),
+        "status": status,  # running | completed
+        "baseline": baseline,
+        "backends": {name: stats for name, stats in all_stats.items()},
+        "backend_status": backend_status,
+        "relative": {},
+    }
+
+    baseline_s = all_stats.get(baseline, {})
+    for name, stats in all_stats.items():
+        rel: Dict[str, Dict[str, float]] = {}
+        for k, val in stats.items():
+            ref_val = baseline_s.get(k)
+            if ref_val is not None:
+                try:
+                    delta = float(val) - float(ref_val)
+                    pct = delta / float(ref_val) * 100.0 if abs(float(ref_val)) > 1e-9 else float("nan")
+                    rel[k] = {"val": float(val), "delta": delta, "pct_delta": pct}
+                except Exception:
+                    pass
+        payload["relative"][name] = rel
+    return payload
+
+
+def _save_results_json(
+    out_path: Path,
+    baseline: str,
+    all_stats: Dict[str, Dict[str, float]],
+    backend_status: Dict[str, Dict[str, str]],
+    run_started_at: str,
+    status: str,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _build_payload(
+        baseline=baseline,
+        all_stats=all_stats,
+        backend_status=backend_status,
+        run_started_at=run_started_at,
+        status=status,
+    )
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    tmp_path.replace(out_path)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -862,6 +926,9 @@ def main() -> None:
     print(f"[INFO] Baseline    : {cfg.baseline}")
 
     all_stats: Dict[str, Dict[str, float]] = {}
+    backend_status: Dict[str, Dict[str, str]] = {}
+    run_started_at = _now_ts()
+    out_path = Path(cfg.output_json) if cfg.output_json else None
 
     for spec in cfg.backends:
         try:
@@ -881,11 +948,31 @@ def main() -> None:
                 plots=cfg.plots,
             )
             all_stats[spec.name] = stats
+            backend_status[spec.name] = {
+                "state": "ok",
+                "completed_at": _now_ts(),
+            }
             print(f"[OK] {spec.name}: mAP50={stats.get('metrics/mAP50(B)', 'n/a'):.4f}  "
                   f"mAP50-95={stats.get('metrics/mAP50-95(B)', 'n/a'):.4f}")
         except Exception as exc:
             print(f"[ERROR] {spec.name} failed: {exc}", file=sys.stderr)
             all_stats[spec.name] = {}
+            backend_status[spec.name] = {
+                "state": "failed",
+                "completed_at": _now_ts(),
+                "error": str(exc),
+            }
+
+        if out_path is not None:
+            _save_results_json(
+                out_path=out_path,
+                baseline=cfg.baseline,
+                all_stats=all_stats,
+                backend_status=backend_status,
+                run_started_at=run_started_at,
+                status="running",
+            )
+            print(f"[INFO] Checkpoint saved to {out_path} after backend={spec.name}")
 
     # Print relative table
     if cfg.baseline in all_stats and all_stats[cfg.baseline]:
@@ -901,30 +988,15 @@ def main() -> None:
         for name, stats in all_stats.items():
             print(f"  {name}: {stats}")
 
-    # Save JSON
-    if cfg.output_json:
-        out_path = Path(cfg.output_json)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "baseline": cfg.baseline,
-            "backends": {name: stats for name, stats in all_stats.items()},
-            "relative": {},
-        }
-        baseline_s = all_stats.get(cfg.baseline, {})
-        for name, stats in all_stats.items():
-            rel: Dict[str, Dict[str, float]] = {}
-            for k, val in stats.items():
-                ref_val = baseline_s.get(k)
-                if ref_val is not None:
-                    try:
-                        delta = float(val) - float(ref_val)
-                        pct = delta / float(ref_val) * 100.0 if abs(float(ref_val)) > 1e-9 else float("nan")
-                        rel[k] = {"val": float(val), "delta": delta, "pct_delta": pct}
-                    except Exception:
-                        pass
-            payload["relative"][name] = rel
-        with open(out_path, "w") as f:
-            json.dump(payload, f, indent=2)
+    if out_path is not None:
+        _save_results_json(
+            out_path=out_path,
+            baseline=cfg.baseline,
+            all_stats=all_stats,
+            backend_status=backend_status,
+            run_started_at=run_started_at,
+            status="completed",
+        )
         print(f"[INFO] Results saved to {out_path}")
 
 
