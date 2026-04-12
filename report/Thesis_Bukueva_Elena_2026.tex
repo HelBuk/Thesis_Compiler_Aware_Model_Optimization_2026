@@ -98,8 +98,8 @@
 \rfoot{\thepage}
 
 % ======= Title Page Variables (edit these) =======
-\newcommand{\ThesisTitleEng}{Compiler-Aware Model Optimization for Edge AI Accelerators}
-\newcommand{\ThesisTitleNor}{Kompilatorbevisst modelloptimalisering for Edge AI-akseleratorer}
+\newcommand{\ThesisTitleEng}{Compiler-Aware Model Inference Optimization for Edge AI Accelerators}
+\newcommand{\ThesisTitleNor}{Kompilerbevisst optimalisering av modellinferens for Edge-AI-akseleratorer}
 \newcommand{\AuthorName}{Bukueva Elena}
 \newcommand{\SupervisorName}{Professor Geir Mathisen, Dept. of Eng. Cybernetics}
 
@@ -1196,101 +1196,234 @@ effective computations, leading to improved inference performance.
 \chapter{Methodology}
 \noindent
 
-In this work, we explore existing optimization strategies and evaluate their effectiveness on the YOLOv8n model.
-This model is selected due to its wide applicability to custom object detection tasks, as well as its strong accuracy
-relative to models of similar size. Additionally, YOLOv8n is widely adopted and well-supported within the community.
-Its architecture is sufficiently complex to expose challenges faced by modern compilers when optimizing model
-performance, while remaining lightweight enough to be deployed on a range of edge devices. At the same time, its
-size enables efficient training and experimentation on commonly available hardware, such as an
-NVIDIA GeForce RTX 3070 GPU.
+This chapter describes the methodology used to evaluate and optimize deep learning inference on edge-oriented hardware platforms. The study is centered on the YOLOv8n object detection model and investigates how compiler-based optimization frameworks, numerical precision reduction, structural model simplification, and low-level kernel customization affect inference performance and detection accuracy.
 
-The methodology follows a structured analysis pipeline. First, the baseline performance of the model is evaluated on
-target hardware using the original FP32 PyTorch weights provided by Ultralytics. This step establishes a reference
-point and helps determine whether there is room for optimization. To guide this analysis, the roofline model is used
-to assess whether performance is limited by memory bandwidth or computational capacity. If the model operates near the
-hardware limits, further improvements may require architectural changes or deployment on more suitable hardware.
-However, in practice, performance is often limited by suboptimal parallelization or inefficient memory usage.
+The methodology is organized as a sequence of experimental stages. First, a baseline is established using the original FP32 PyTorch implementation of YOLOv8n. Next, bottlenecks are analyzed using hardware-aware performance models and profiling tools. Based on the observed limitations, several optimization directions are explored, including framework-level compilation, quantization, precision reduction, pruning, and custom TensorRT plugin development. Each optimization is evaluated with respect to latency, throughput, and accuracy in order to characterize the trade-offs between performance and model quality.
 
-When memory-related bottlenecks are identified, optimization strategies focus on reducing memory traffic and
-improving data locality. This includes techniques such as precision reduction (e.g., quantization to INT8), improving
-cache utilization, minimizing host-to-device data transfers, and applying operator fusion to avoid unnecessary
-intermediate memory operations. For example, combining convolution, normalization, and activation into a single
-fused operation can significantly reduce memory overhead.
+\section{Model Selection}
 
-When compute underutilization is observed, optimization efforts shift toward improving parallel execution and kernel
-efficiency. This includes refining kernel implementations, reducing the number of launched kernels, and optimizing
-core operations such as matrix multiplication. Profiling tools are used to identify performance-critical layers and
-understand the underlying causes of inefficiency.
+YOLOv8n is selected as the reference model for this study. The model represents a practical and relevant target for edge deployment because it combines a compact architecture with competitive detection accuracy. It is widely used in real-world object detection tasks, is actively supported by the research and engineering community, and can be exported to multiple deployment backends. These properties make it suitable for comparative analysis across inference frameworks.
 
-Building on this analysis, the model is evaluated across multiple inference frameworks to compare performance
-characteristics and identify framework-specific bottlenecks. Quantization techniques are applied where supported,
-and their impact on both performance and accuracy is assessed. In addition, the sensitivity of the model to
-structural modifications is investigated through layer pruning and simplification of computationally expensive
-operations, such as replacing SiLU activations with simpler alternatives like ReLU.
+From a methodological perspective, YOLOv8n is large enough to expose non-trivial optimization challenges, including operator fusion, memory movement overhead, kernel launch inefficiencies, and sensitivity to reduced precision. At the same time, it remains sufficiently lightweight to allow repeated experimentation, retraining, export, and validation on commonly available development hardware. This enables a controlled and reproducible study of both high-level and low-level optimization strategies.
 
-Finally, advanced optimization approaches are explored, including the use of TensorRT with custom plugins to enable
-fine-grained control over kernel execution. This allows further investigation of low-level performance characteristics
-and potential gains beyond standard framework optimizations.
+\section{Overall Experimental Procedure}
+
+The experimental workflow follows five main stages:
+
+\begin{enumerate}
+    \item Establish a baseline using the original FP32 PyTorch model.
+    \item Identify performance bottlenecks through roofline analysis and runtime profiling.
+    \item Apply optimization techniques at the framework, numerical, and architectural levels.
+    \item Evaluate the optimized models on target hardware using identical benchmarking conditions.
+    \item Compare the resulting variants in terms of latency, throughput, and accuracy.
+\end{enumerate}
+
+This procedure ensures that each optimization step is assessed relative to a common reference and that conclusions are based on measurable changes in both performance and predictive quality.
+
+\section{Baseline Establishment}
+
+The starting point of the study is the pretrained FP32 YOLOv8n model provided by Ultralytics and executed in the original PyTorch runtime. This baseline serves two purposes. First, it provides a reference for all later comparisons. Second, it makes it possible to determine whether the observed performance is already close to the limits of the target hardware or whether substantial optimization opportunities remain.
+
+The baseline is evaluated on the selected hardware platforms under controlled conditions. For each platform, inference latency and throughput are measured using repeated runs with warm-up iterations to reduce initialization effects. Accuracy is evaluated on the validation dataset using standard object detection metrics. These baseline results form the reference against which all optimized variants are compared.
+
+\section{Bottleneck Analysis}
+
+After establishing the baseline, the next step is to determine the dominant performance limitations of the model on each platform. Two complementary approaches are used for this purpose: roofline-based reasoning and runtime profiling.
+
+The roofline model is used as a coarse analytical framework to determine whether performance is likely to be limited by memory bandwidth or by available compute throughput. This provides a hardware-aware interpretation of the measured performance and helps identify whether the main limitation arises from insufficient arithmetic intensity, inefficient memory access, or underutilization of the compute units.
+
+To refine this analysis, profiling tools are used to inspect the execution of individual operators and kernels. This makes it possible to identify layers with high latency, excessive memory movement, frequent kernel launches, or inefficient execution patterns. In particular, the profiling stage is used to answer the following questions:
+
+\begin{itemize}
+    \item Which layers dominate end-to-end inference time?
+    \item Whether the execution is primarily memory-bound or compute-bound.
+    \item Whether the framework introduces avoidable overhead through layout conversions, intermediate buffers, or host-device synchronization.
+    \item Whether operator fusion and backend-specific optimizations are effectively applied.
+\end{itemize}
+
+The outcome of this stage determines which optimization direction is most relevant for a given backend and hardware target.
+
+\section{Optimization Directions}
+
+Based on the bottleneck analysis, the study investigates several classes of optimization methods.
+
+\subsection{Compiler and Runtime Optimization}
+
+The first optimization direction consists of evaluating how different inference frameworks transform and execute the same model. Starting from the original PyTorch implementation, the model is exported or compiled for alternative backends such as TensorRT and TVM. The purpose of this comparison is to assess how much performance can be gained from compiler-level graph transformations, backend-specific kernel selection, operator fusion, and scheduling optimizations.
+
+This stage is not limited to reporting end-to-end latency. It also examines how the internal execution differs between backends, for example in the number of kernels launched, the use of fused operators, the presence of data layout transformations, and the distribution of execution time across layers. In this way, the comparison provides insight not only into which backend is faster, but also into why it is faster.
+
+\subsection{Numerical Precision Reduction}
+
+The second optimization direction focuses on reducing numerical precision in order to decrease memory traffic and accelerate arithmetic operations. Two forms of precision reduction are considered in this work.
+
+First, inference in FP16 is evaluated against the FP32 baseline. This comparison isolates the effect of reduced floating-point precision and shows whether the target hardware benefits from half-precision execution.
+
+Second, quantization to INT8 is explored where supported by the backend. Quantization has the potential to reduce model size, memory bandwidth requirements, and arithmetic cost, but it may also introduce accuracy degradation. Therefore, each quantized model is evaluated not only in terms of runtime performance but also in terms of detection quality. The purpose of this stage is to determine whether the performance gains justify the loss, if any, in predictive accuracy.
+
+\subsection{Model Compression and Structural Simplification}
+
+The third optimization direction targets the structure of the model itself. Rather than relying only on framework-level improvements, this part of the study investigates whether the network can be simplified in ways that improve runtime characteristics.
+
+Two approaches are considered. The first is pruning, which reduces model complexity by removing less important parameters or channels. The second is replacement of computationally expensive operations with simpler alternatives. In particular, the effect of replacing SiLU activations with ReLU is evaluated. This substitution is motivated by the fact that simpler activations may improve fusion opportunities and reduce kernel complexity, even if they slightly affect model accuracy.
+
+The purpose of this stage is to understand whether modest architectural simplifications can produce a favorable trade-off between accuracy and efficiency, especially on hardware with limited compute capability or reduced support for complex fused kernels.
+
+\subsection{Low-Level TensorRT Customization}
+
+The final optimization direction extends beyond standard framework usage and examines low-level customization within TensorRT. In this stage, custom plugins are developed to replace selected subgraphs with tailored implementations. The main case considered in this work is a custom plugin for the C2f block.
+
+The objective of this step is to investigate whether performance can be improved further by reducing backend overhead, controlling kernel behavior more explicitly, or eliminating inefficient execution patterns that are not resolved by the default TensorRT conversion pipeline. This stage complements the framework-level comparison by showing the extent to which manual low-level intervention can outperform standard automated optimization.
+
+\section{Evaluation Criteria}
+
+All model variants are evaluated using the same set of criteria in order to ensure consistent comparison.
+
+The primary performance metrics are inference latency and throughput. Latency is used to measure the response time of a single inference pass, while throughput indicates the sustained processing rate under repeated execution. Where relevant, profiling data is also used to analyze kernel-level execution time and the contribution of individual layers to the total runtime.
+
+The primary quality metric is object detection accuracy on the validation dataset. Standard detection metrics are used to verify whether a given optimization preserves acceptable predictive performance. This is particularly important for quantization, pruning, and activation replacement, where improvements in runtime may come at the cost of degraded detection quality.
+
+The final analysis therefore considers both efficiency and accuracy, with emphasis on the trade-off between them. An optimization is not treated as beneficial solely because it accelerates execution; it must also maintain sufficient model quality for practical deployment.
+
+\section{Methodological Summary}
+
+The methodology combines baseline benchmarking, bottleneck analysis, framework comparison, numerical optimization, structural simplification, and low-level backend customization. The goal is not only to identify the fastest deployment configuration for YOLOv8n, but also to understand which classes of optimization are most effective on edge-oriented hardware and under which conditions they provide measurable benefit.
+
+Figure~\ref{fig:thesis_scope} summarizes the scope of the study and the main experimental directions considered in this thesis.
+
+\begin{figure}[ht]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    font=\small,
+    every node/.style={align=center},
+    box/.style={
+        rectangle,
+        draw=black,
+        text width=3.2cm,
+        minimum height=1.0cm,
+        inner sep=4pt
+    },
+    line/.style={draw, thick},
+    boxsmall/.style={
+    rectangle,
+    draw=black,
+    text width=2.2cm,
+    minimum height=1.0cm,
+    inner sep=4pt
+    },
+]
+
+% Top node
+\node[box] (scope) at (0,0) {Research Scope};
+
+% First level
+\node[box] (comp) at (-6,-2.2) {Compiler / Runtime\\Optimization};
+\node[box] (eff)  at (0,-2.2)  {Model Compression\\and Efficiency};
+\node[box] (prec) at (6,-2.2)  {Numerical Precision\\and Quantization};
+
+% Second level
+\node[box] (tvm)   at (-8,-4.4) {TVM Compilation\\Analysis};
+\node[box] (trt)   at (-4,-4.4) {TensorRT Analysis};
+
+\node[box] (prune) at (0,-4.4)  {Pruning};
+
+\node[box] (quant) at (4,-4.4)  {Quantization};
+\node[box] (fp16)  at (8,-4.4)  {FP32 vs FP16};
+
+% Third level under TensorRT
+\node[box] (plugin) at (-6,-6.6) {Custom\\C2f Plugin};
+\node[box] (relu)   at (-2,-6.6) {ReLU vs SiLU};
+
+% Connections
+\draw[line] (scope.south) -- +(0,-0.5) -| (comp.north);
+\draw[line] (scope.south) -- +(0,-0.5) -- (eff.north);
+\draw[line] (scope.south) -- +(0,-0.5) -| (prec.north);
+
+\draw[line] (comp.south) -- +(0,-0.5) -| (tvm.north);
+\draw[line] (comp.south) -- +(0,-0.5) -| (trt.north);
+
+\draw[line] (eff.south) -- (prune.north);
+
+\draw[line] (prec.south) -- +(0,-0.5) -| (quant.north);
+\draw[line] (prec.south) -- +(0,-0.5) -| (fp16.north);
+
+\draw[line] (trt.south) -- +(0,-0.5) -| (plugin.north);
+\draw[line] (trt.south) -- +(0,-0.5) -| (relu.north);
+
+\end{tikzpicture}%
+}
+\caption{Overview of the thesis scope and main experimental directions.}
+\label{fig:thesis_scope}
+\end{figure}
 
 % ======= 6 Testing / Results (Vår uttesting / Resultater) =======
 \chapter{Testing and Results}
 \noindent
-% Short intro
+
 \section{Experimental Setup}
 
-Experiments are conducted on two target edge platforms: NVIDIA Orin Nano and Raspberry Pi 5.
-Model training and additional experimentation (e.g., pruning and operator substitution) are performed
-on a host workstation equipped with an NVIDIA GeForce RTX 3070 GPU.
+The experimental evaluation is conducted on two edge-oriented target platforms: the NVIDIA Jetson Orin Nano and the
+Raspberry Pi 5. These devices represent two different deployment scenarios for embedded inference: a GPU-accelerated
+AI platform with dedicated support for mixed-precision computation, and a general-purpose low-power ARM platform
+without a dedicated on-chip neural network accelerator.
 
-NVIDIA Orin Nano Platform  is an embedded AI computing module designed for edge
-inference and robotics applications. Its SoC combines: ARM-based CPU with 6 Cores, NVIDIA Ampere-based GPU and
-various I/O. The shared by CPU and GPU LPDDR memory reduces latency and speeds-up edge-workloads.
-The GPU in Orin Nano supports CUDA, Tensor Cores, Mixed precision (FP32, FP16, INT8) and 2:4 structured sparsity.
+Model training, export, and selected modification experiments, such as pruning and operator substitution, are performed
+on a host workstation equipped with an NVIDIA GeForce RTX 3070 GPU. This system is used as the primary development
+and experimentation environment, while all deployment-oriented inference benchmarks are executed on the target edge
+devices.
 
+The Jetson Orin Nano is designed for edge AI and robotics workloads. Its system-on-chip integrates a 6-core Arm CPU,
+an Ampere-based GPU, and shared LPDDR5 memory accessible by both CPU and GPU. This architecture is particularly
+relevant for this study because it supports CUDA execution, Tensor Cores, mixed-precision inference, and INT8
+acceleration, making it suitable for evaluating framework-level and low-level optimization strategies.
 
-\vspace{0.5em}
-Only key hardware characteristics relevant to performance analysis are reported,
-namely compute capability, memory size, and memory bandwidth.
+In contrast, the Raspberry Pi 5 represents a resource-constrained edge platform without a comparable integrated AI
+accelerator. It is therefore used to assess how optimization techniques behave on a more conventional embedded
+CPU-based system, where memory bandwidth and general-purpose compute resources are more limited.
+
+Only the hardware characteristics most relevant to performance analysis are reported in this section, namely compute
+capability, memory capacity, and memory bandwidth.
 
 \begin{table}[H]
 \centering
-\caption{Host GPU specifications (training platform)}
+\caption{Host GPU specifications used for training and model development}
 \label{tab:gpu_specs}
 \begin{tabular}{@{}ll@{}}
 \toprule
 \textbf{Property} & \textbf{Value} \\
 \midrule
-Device                  & NVIDIA GeForce RTX 3070 \\
-Architecture            & Ampere \\
-FP32 performance        & $\sim$20 TFLOPs \\
-Memory                  & 8 GB GDDR6 \\
-Memory bandwidth        & $\sim$448 GB/s \\
+Device            & NVIDIA GeForce RTX 3070 \\
+Architecture      & Ampere \\
+FP32 Performance  & $\sim$20 TFLOPs \\
+Memory            & 8 GB GDDR6 \\
+Memory Bandwidth  & $\sim$448 GB/s \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[H]
 \centering
-\caption{Edge device specifications}
+\caption{Specifications of the target edge devices}
 \label{tab:edge_specs}
 \begin{tabular}{@{}lll@{}}
 \toprule
-\textbf{Property} & \textbf{Orin Nano} & \textbf{Raspberry Pi 5} \\
+\textbf{Property} & \textbf{Jetson Orin Nano} & \textbf{Raspberry Pi 5} \\
 \midrule
-CPU                & 6-core Arm Cortex-A78AE & 4-core Arm Cortex-A76 \\
-GPU                & Ampere (1024 CUDA cores) & VideoCore VII \\
-FP32 performance   & $\sim$0.5--1 TFLOPs (GPU) & ~ \\
-Memory             & 8 GB LPDDR5              & 8 GB LPDDR4X \\
-Memory bandwidth   & $\sim$68 GB/s            & $\sim$25 GB/s \\
-Accelerators       & Tensor Cores             & None$^{*}$ \\
+CPU              & 6-core Arm Cortex-A78AE   & 4-core Arm Cortex-A76 \\
+GPU              & Ampere (1024 CUDA cores)  & VideoCore VII \\
+FP32 Performance & $\sim$0.5--1 TFLOPs (GPU) & --- \\
+Memory           & 8 GB LPDDR5               & 8 GB LPDDR4X \\
+Memory Bandwidth & $\sim$68 GB/s             & $\sim$25 GB/s \\
+Accelerators     & Tensor Cores              & None$^{*}$ \\
 \bottomrule
 \end{tabular}
 
 \vspace{0.5em}
 \raggedright
 {\footnotesize
-$^{*}$ The Raspberry Pi 5 supports external AI accelerators such as the Hailo-8, which can be integrated
-via PCIe, enabling efficient neural network inference on the device.
+$^{*}$ The Raspberry Pi 5 can be extended with external AI accelerators, such as the Hailo-8, via PCIe. However,
+    such accelerators are not used in the experiments reported in this thesis.
 }
 \end{table}
 
@@ -1578,7 +1711,6 @@ Dead code elimination: removing unused branches of the graph
 While these transformations simplify the graph, backend-specific compilers (e.g., TensorRT, TVM) may perform
 additional, more aggressive optimizations such as kernel fusion and layout transformations.
 
-
 Once converted, the ONNX model can be executed using a variety of inference frameworks. On CPU-based platforms,
 commonly used frameworks include PyTorch (via TorchScript or TorchInductor), ONNX Runtime, and TensorFlow Lite.
 These frameworks provide different levels of optimization, ranging from general-purpose execution to lightweight
@@ -1617,7 +1749,7 @@ important because, in the case of TVM, the observed inference performance is
 directly shaped by the quality of the schedule search rather than by the
 default behaviour of a fixed runtime backend.
 
-\subsection{TVM MetaSchedule Tuning Results on Raspberry Pi~5}
+\subsection{TVM MetaSchedule Tuning Results on Raspberry Pi~5 - FP32}
 
 TVM MetaSchedule was evaluated on the Raspberry Pi~5 (4-core Cortex-A76,
 AArch64, 2.4\,GHz) using the full YOLOv8n inference graph imported through the
@@ -1692,7 +1824,7 @@ Larger improvements would likely require either a more targeted tuning budget
 for the most expensive tasks or a reduced-precision compilation path such as
 FP16.
 
-\subsection{TVM MetaSchedule Tuning Results on the Jetson Orin Nano GPU}
+\subsection{TVM MetaSchedule Tuning Results on the Jetson Orin Nano GPU - FP32}
 
 TVM MetaSchedule was evaluated on the NVIDIA Jetson Orin Nano GPU using the
 full YOLOv8n inference graph imported through the Relax frontend.
@@ -1776,7 +1908,7 @@ conclusion is that TVM tuning is effective on the Jetson Orin Nano GPU and
 produces a strong result, but in FP32 it remains a competitive general solution
 rather than the fastest deployment path for this workload.
 
-\subsection{Raspberry Pi~5 Benchmark Overview}
+\subsection{Raspberry Pi~5 Benchmark Overview - FP32}
 
 All Raspberry Pi~5 experiments were conducted on a Linux system based on the
 \texttt{6.12.62+rpt-rpi-2712} kernel using the AArch64 architecture. The CPU
@@ -1894,7 +2026,7 @@ results indicate that TVM is capable of producing competitive CPU inference
 performance on Raspberry Pi~5, but in this experiment the most efficient
 backend was LiteRT rather than TVM.
 
-\subsection{Jetson Orin Nano GPU Benchmark Overview}
+\subsection{Jetson Orin Nano GPU Benchmark Overview - FP32}
 
 GPU experiments were conducted on the NVIDIA Jetson Orin Nano using the full
 YOLOv8n model in FP32 precision with batch size~1. The evaluated backends were
@@ -2014,6 +2146,378 @@ small impact on model accuracy. However, the resulting performance behaviour is 
 quantization, since the model still operates in a floating-point domain.
 The following subsection therefore evaluates FP16 as a  separate optimisation path and analyses
 its effect on latency, throughput, and overall deployment efficiency.
+
+\subsection{TVM MetaSchedule Tuning Results on the Jetson Orin Nano GPU - FP16}
+
+TVM MetaSchedule was evaluated a second time on the NVIDIA Jetson Orin Nano GPU
+using a float16 version of the YOLOv8n inference graph. The model was converted
+from the FP32 ONNX export using \texttt{onnxconverter-common} with
+\texttt{keep\_io\_types=False}, producing a graph in which the input, weights,
+and intermediate activations are represented in FP16. The Relax frontend
+imported this graph without further modification. During the tuning process, TVM
+explored 6\,477 valid schedules across 66 extracted operator tasks over
+approximately 18 hours. The resulting tuned model achieved a summed task latency
+of 9\,872\,$\mu$s, while the measured end-to-end inference latency was
+12.45\,ms. As in the FP32 case, the gap between the summed task latency and the
+measured end-to-end latency remained small, indicating that the tuned kernel
+execution accounted for most of the observed runtime.
+
+Compared with the FP32 GPU tuning result of 22\,920\,$\mu$s summed task
+latency, the FP16 tuned model achieved a kernel-level improvement of
+approximately \(2.3\times\). At the end-to-end level, the improvement was also
+substantial: latency decreased from 23.38\,ms in FP32 to 12.45\,ms in FP16,
+corresponding to an end-to-end speedup of approximately \(1.88\times\). This
+result shows that reduced-precision compilation was not merely a small
+incremental optimisation, but a major change in the execution regime of the
+model on this platform.
+
+\paragraph{Tensorisation as the Main Structural Change.}
+The most important difference between the FP32 and FP16 tuning campaigns was
+that FP16 enabled tensorisation through WMMA-style matrix multiply-accumulate
+operations on the Orin Nano GPU. In the FP32 campaign, no task could be mapped
+to a dedicated hardware intrinsic, and all schedules remained conventional CUDA
+thread-block implementations. In the FP16 campaign, by contrast, a large
+fraction of tasks could be mapped to tensorised execution. As a result, the
+optimisation problem changed qualitatively: instead of relying only on
+thread-block tiling and memory scheduling, MetaSchedule was able to search over
+implementations that directly exploited the GPU's matrix-multiplication
+hardware.
+
+This shift is clearly visible in the achieved arithmetic throughput. The peak
+throughput increased from 585.6\,GFLOPS in the FP32 campaign to
+1\,872.7\,GFLOPS in FP16, representing more than a \(3.2\times\) increase in
+peak operator efficiency. This confirms that the performance gain observed in
+FP16 was not only a consequence of reduced data size, but also of a more
+favourable optimisation path enabled by the lower-precision representation.
+
+\paragraph{Best-Performing Operators.}
+The best-performing tasks in the FP16 tuning campaign were large mid-network
+convolutions, especially fused operators in the backbone and neck. These layers
+benefited most from tensorised execution because their channel dimensions and
+spatial sizes were large enough to keep the available execution resources well
+utilised. The most efficient task reached 1\,872.7\,GFLOPS, while several
+others exceeded 1\,200\,GFLOPS. Compared with the FP32 results, this represents
+a substantial improvement in computational efficiency and confirms that the
+largest dense convolutions were the main beneficiaries of the FP16 compilation
+path.
+
+\paragraph{Main Bottlenecks.}
+Despite the overall improvement, the main bottlenecks remained qualitatively
+similar to those observed in FP32. The least efficient convolution was still
+the initial stem layer, whose very low input channel count limited its ability
+to benefit from tensorised execution. Even in FP16, this layer remained
+dominated by poor arithmetic intensity and limited data reuse, and therefore
+showed only modest improvement relative to the rest of the network. Several
+other early-stage convolutions with small channel counts exhibited similar
+behaviour.
+
+Non-convolutional operators in the detection path also remained relatively
+lightweight in absolute latency terms, but their optimisation potential was much
+smaller than that of the large mid-network convolutional kernels. As a result,
+the overall runtime distribution in FP16 became even more strongly concentrated
+in the repeated backbone and neck convolutions.
+
+\paragraph{Weighted Bottleneck Analysis.}
+As in the CPU and FP32 GPU analyses, per-task latency alone does not fully
+describe the runtime profile of YOLOv8n because some operators are executed
+multiple times in a single forward pass. When task multiplicity is taken into
+account, the dominant contributors to total runtime in FP16 remained repeated
+\(3{\times}3\) convolutions in the backbone and neck. In particular,
+task~50 (\texttt{conv2d24}) and task~16 (\texttt{conv2d11}) emerged as the most
+important weighted bottlenecks. The stem layer also remained a notable
+contributor because of its disproportionately high latency relative to its
+position in the graph. These results reinforce the conclusion that the most
+important optimisation targets are repeated mid-network convolutions rather than
+simply the single slowest layer.
+
+\paragraph{Overall Assessment.}
+Overall, the FP16 tuning campaign demonstrates that TVM MetaSchedule can exploit
+the Jetson Orin Nano GPU much more effectively in FP16 than in FP32. The
+end-to-end latency of the tuned TVM model decreased from 23.38\,ms in FP32 to
+12.45\,ms in FP16, while tuning time itself was reduced from 39 days to
+approximately 18 hours. The key structural reason for this improvement was that
+FP16 enabled tensorised execution for a large fraction of convolutional tasks,
+whereas FP32 did not. This establishes FP16 as the more appropriate precision
+target for TVM-based deployment of YOLOv8n on Orin-class hardware.
+
+At the same time, the results also show that the current FP16 TVM path still
+does not fully match the fastest available inference engine. Although TVM
+improved substantially and achieved a strong result, TensorRT remained faster in
+the final benchmark comparison. Therefore, the main conclusion is that FP16
+MetaSchedule tuning is highly effective on the Jetson Orin Nano GPU and
+substantially strengthens TVM's competitiveness, but it does not yet eliminate
+the remaining performance gap to the most specialised deployment backend.
+
+\subsection{Jetson Orin Nano GPU Benchmark Overview - FP16}
+
+GPU experiments were also conducted on the NVIDIA Jetson Orin Nano using the
+full YOLOv8n model in FP16 precision with batch size~1. The evaluated backends
+were TVM, ONNX Runtime, TensorRT, PyTorch eager mode, and
+\texttt{torch.compile}. As in the previous benchmark sections, the comparison
+was performed using isolated repetitions in order to reduce interference between
+frameworks. Table~\ref{tab:orin_fp16_backend_benchmark} summarises the measured
+latency and throughput, while Table~\ref{tab:orin_fp16_backend_power}
+summarises power results.
+
+\begin{table}[ht]
+\centering
+\caption{End-to-end YOLOv8n inference performance on the NVIDIA Jetson Orin Nano GPU in FP16 precision.
+Values are reported as mean latency $\pm$ half-width of the 95\,\% confidence
+interval across 5 isolated repetitions, with 200 timed runs per repetition
+after 30 warm-up iterations.}
+\label{tab:orin_fp16_backend_benchmark}
+\begin{tabular}{lrrr}
+\toprule
+Backend & Latency (ms) & FPS mean & Median (ms) \\
+\midrule
+TVM             & $12.45 \pm 0.05$ & 80.35 & 12.43 \\
+ONNX Runtime    & $16.95 \pm 0.02$ & 59.00 & 16.96 \\
+TorchCompile    & $72.72 \pm 0.21$ & 13.75 & 72.76 \\
+TensorRT        & $6.31 \pm 0.01$  & 158.55 & 6.31 \\
+PyTorch eager   & $27.36 \pm 0.24$ & 36.55 & 27.34 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Overall Performance.}
+TensorRT achieved the best end-to-end latency in the FP16 setting, reaching
+6.31\,ms, which corresponds to 158.6\,FPS. TVM formed the second-best result at
+12.45\,ms and substantially outperformed ONNX Runtime, which reached 16.95\,ms.
+PyTorch eager mode was considerably slower at 27.36\,ms, while
+\texttt{torch.compile} again performed substantially worse than all other
+backends, reaching 72.72\,ms.
+
+Relative to the PyTorch eager baseline, TVM achieved a \(2.20\times\) speedup,
+corresponding to a 54.5\,\% reduction in mean latency. ONNX Runtime achieved a
+\(1.61\times\) speedup and a 38.1\,\% latency reduction. TensorRT provided the
+largest improvement, reaching a \(4.34\times\) speedup and a 76.9\,\%
+reduction in mean latency. In contrast, \texttt{torch.compile} was slower than
+PyTorch eager mode by a factor of \(2.66\times\).
+
+\begin{table}[ht]
+\centering
+\caption{Average power consumption during YOLOv8n inference on the NVIDIA Jetson
+Orin Nano GPU in FP16 precision.}
+\label{tab:orin_fp16_backend_power}
+\begin{tabular}{lrrr}
+\toprule
+Backend & Mean Power (mW) & Max Power (mW) & Std (mW) \\
+\midrule
+TVM             & 21770.0 & 24514.2 & 122.6 \\
+ONNX Runtime    & 24601.7 & 29104.0 & 88.3 \\
+TorchCompile    & 16760.5 & 17874.5 & 33.9 \\
+TensorRT        & 24342.7 & 26500.5 & 19.0 \\
+PyTorch eager   & 20282.6 & 20852.0 & 79.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Power and Efficiency.}
+In absolute power draw, the FP16 GPU backends again operated within a
+relatively narrow range, from 16.8\,W for \texttt{torch.compile} to 24.6\,W for
+ONNX Runtime. However, throughput differed much more strongly than power, which
+made efficiency comparisons especially informative. TensorRT achieved the best
+efficiency at approximately 6.51\,FPS/W, followed by TVM at about 3.69\,FPS/W.
+PyTorch eager mode reached about 1.80\,FPS/W, and ONNX Runtime about
+2.40\,FPS/W. Although \texttt{torch.compile} consumed the least power, its low
+throughput again made it the least competitive backend in practice.
+
+\paragraph{Interpretation of the TVM Result.}
+The TVM FP16 result is particularly notable because, unlike in FP32, TVM no
+longer merely matched ONNX Runtime but clearly outperformed it. Its latency was
+4.50\,ms lower than ONNX Runtime, corresponding to an additional reduction of
+approximately 26.6\,\%. This indicates that FP16 compilation gave TVM access to
+optimisation opportunities that were not available in the FP32 case, most
+importantly tensorised execution for a large fraction of the convolutional
+operators. As a result, TVM moved from being merely competitive in FP32 to
+becoming the second-best backend overall in FP16.
+
+At the same time, TensorRT still remained significantly faster, with a latency
+of 6.31\,ms compared with 12.45\,ms for TVM. This shows that even though TVM
+benefited greatly from FP16 compilation, additional backend-specific
+optimisations still remain available beyond what MetaSchedule found in this
+work.
+
+\paragraph{Conclusion.}
+The FP16 benchmark results reveal a clearer separation between deployment
+backends than in the FP32 GPU case. TensorRT formed the top tier with the best
+latency, throughput, and efficiency. TVM formed a strong second tier and
+substantially outperformed ONNX Runtime, PyTorch eager mode, and
+\texttt{torch.compile}. ONNX Runtime remained competitive but was noticeably
+slower than TVM, while PyTorch eager mode was substantially slower than all
+three specialised deployment paths. As in the FP32 case, \texttt{torch.compile}
+was not competitive for this workload in the tested configuration.
+
+Overall, these results indicate that FP16 is the most favourable precision
+setting for TVM deployment on the Jetson Orin Nano GPU. In this configuration,
+TVM no longer merely matched other general deployment runtimes, but delivered a
+clear practical advantage over ONNX Runtime and PyTorch eager mode. However,
+TensorRT still provided the fastest overall execution and remained the most
+effective deployment backend in the final comparison.
+
+\subsection{FP16 Inference on the Raspberry Pi~5 CPU}
+
+To investigate whether half-precision arithmetic provides a runtime benefit on
+the Raspberry Pi~5, the YOLOv8n model was re-evaluated at FP16 precision across
+all applicable backends. The FP16 ONNX model was generated from the FP32 export
+using \texttt{onnxconverter-common} with \texttt{keep\_io\_types=False}, producing
+a graph in which all weights, activations, and the input tensor are represented
+as 16-bit floats. TVM was re-tuned on this model, yielding a separately compiled
+\texttt{.so} library. All other backends received the same FP16 ONNX as input.
+
+\paragraph{TVM FP16 Tuning Session.}
+TVM MetaSchedule tuned 65 operator tasks over approximately 4 hours and 6
+minutes — compared with 6 hours and 15 minutes for the FP32 campaign on the
+same graph. The faster convergence reflects the more distinct latency signal
+that FP16 kernels produce: once the vectoriser finds a schedule that fills the
+128-bit NEON register with eight \texttt{float16} values instead of four
+\texttt{float32} values, the improvement is immediately visible and the tuner
+concentrates its remaining trials on refinement rather than exploration. A total
+of 6{,}477 valid schedule candidates were evaluated across all tasks.
+
+As in the FP32 CPU campaign, every task encountered the
+\texttt{workload cannot be tensorized} message from MetaSchedule, for the same
+structural reason: the three-dimensional reduction of a convolution
+(input channels, kernel height, kernel width) cannot be mapped onto the
+one-dimensional dot-product pattern required by the NEON intrinsic interface.
+The tuner therefore fell back to standard cache-blocked tiling with LLVM
+auto-vectorisation in all 65 tasks. At FP16, LLVM targets the
+\texttt{float16x8} NEON type on cortex-a76, doubling the number of values
+processed per vector instruction compared with the \texttt{float32x4} path used
+in FP32 tuning. The peak achieved throughput rose from 87.1\,GFLOPS in the
+FP32 session to 169.2\,GFLOPS in the FP16 session — a ratio of $1.94\times$,
+consistent with the theoretical $2\times$ benefit from halving the element
+width within a fixed 128-bit register.
+
+\paragraph{End-to-End Benchmark Results.}
+Table~\ref{tab:pi5_fp32_fp16} presents the full benchmark comparison between
+FP32 and FP16 precision across all backends on the Raspberry Pi~5.
+
+\begin{table}[ht]
+\centering
+\caption{FP32 vs FP16 inference on the Raspberry Pi~5 CPU
+         (5 repetitions $\times$ 200 runs, 30 warm-up runs,
+         performance governor, batch size~1, 640$\times$640 input).
+         ORT and PyTorch FP16 results are estimated from single-repetition
+         measurements; TorchCompile FP16 is from the rigorous run.}
+\label{tab:pi5_fp32_fp16}
+\begin{tabular}{lrrrr}
+\toprule
+Backend & FP32 mean (ms) & FP16 mean (ms) & Ratio & FP16 status \\
+\midrule
+TVM          & 192.01 & 122.44 & $1.57\times$ faster & real fp16 \\
+ONNXRuntime  & 189.23 & $>$900\,s & timeout           & no fp16 Conv \\
+TFLite       & 154.06 & 153.27 & $1.00\times$         & weights only \\
+TorchCompile & 200.39 & 983.08 & $4.9\times$ slower   & GEMM fallback \\
+PyTorch      & 290.13 & $\approx$11\,000 & $38\times$ slower & scalar loop \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{TVM — the Only Backend with Real FP16 Acceleration.}
+TVM reduced its end-to-end latency from 192.01\,ms to 122.44\,ms, a speedup
+of $1.57\times$. This improvement stems from a qualitative change in the
+generated code: LLVM emits \texttt{VFMA.F16} NEON instructions that operate on
+eight \texttt{float16} values in parallel within the same 128-bit register that
+previously held four \texttt{float32} values. The gap between the measured
+$1.57\times$ end-to-end speedup and the theoretical $2\times$ kernel-level
+ceiling is explained by two factors. First, non-arithmetic operators — splits,
+concatenations, and the upsampling layers of the FPN neck — execute at the
+same speed regardless of element width. Second, the initial stem convolution,
+which has only three input channels, cannot fill the eight available FP16 NEON
+lanes; its latency therefore improves only marginally between precisions.
+Both of these effects are irreducible at the schedule level and represent
+genuine architectural constraints of the YOLOv8n graph on a scalar-SIMD
+processor.
+
+\paragraph{ONNXRuntime — Timeout Due to Missing FP16 Convolution Kernel.}
+The ONNXRuntime worker exceeded the 900-second subprocess timeout and produced
+no result. This is not a measurement artefact but a direct consequence of the
+MLAS math library not implementing a half-precision convolution kernel for ARM.
+When MLAS encounters a FP16 \texttt{Conv} operator, it inserts
+\texttt{Cast(float16$\to$float32)} nodes before and after every convolution and
+computes the operation in FP32. The resulting per-inference latency is estimated
+at approximately 7\,100\,ms — derived by scaling the FP32 ORT result by the
+same regression factor observed in PyTorch eager FP16. With 30 warm-up and 200
+timed iterations, the total subprocess time would reach approximately
+1\,630\,seconds, well above the timeout. This behaviour has been documented in
+the ONNX Runtime issue tracker~\cite{ort_fp16_issue_9731,ort_fp16_issue_13838}
+and reflects a fundamental gap in MLAS coverage rather than a configuration
+error.
+
+\paragraph{TFLite — Storage Benefit Only.}
+TFLite produced virtually identical latency at both precisions: 154.06\,ms in
+FP32 and 153.27\,ms in FP16, a difference smaller than one standard deviation.
+This result confirms that TFLite's FP16 model format stores weights as 16-bit
+values but promotes all arithmetic to FP32 before computation on this platform.
+The model occupies half the memory, which can reduce cache pressure and improve
+load time, but no arithmetic throughput benefit accrues at inference time. The
+near-identical power consumption at both precisions (2\,293\,mW FP16 vs
+2\,293\,mW FP32) corroborates this interpretation.
+
+\paragraph{TorchCompile and PyTorch — Regression Under FP16.}
+Both PyTorch-based backends degraded significantly at FP16. PyTorch eager mode
+regressed by a factor of $38\times$, from 290\,ms to approximately 11\,000\,ms.
+When \texttt{model.half()} is called on a CPU device, the ATen kernel dispatcher
+finds no half-precision GEMM implementation and falls back to an element-wise
+scalar loop that processes each \texttt{float16} value individually, upcasting
+to \texttt{float32} for each multiply-accumulate step.
+
+TorchCompile degraded by $4.9\times$, from 200\,ms to 983\,ms. This is less
+severe than PyTorch eager because the Inductor backend successfully generates
+vectorised C++ code for element-wise operations such as the SiLU activation and
+residual additions. However, the convolution operators — which dominate total
+runtime — are not covered by Inductor's FP16 CPU code generation path and still
+fall through to the same ATen scalar fallback. The resulting graph alternates
+between fast Inductor-compiled segments and slow ATen scalar segments, with
+type-conversion overhead at every boundary. The net effect is that TorchCompile
+FP16 is slower than TorchCompile FP32 despite Inductor genuinely improving some
+of the individual operations.
+
+\paragraph{Power Consumption.}
+Table~\ref{tab:pi5_fp16_power} reports the mean board power measured during
+inference for the backends that completed successfully.
+
+\begin{table}[ht]
+\centering
+\caption{Power and energy-efficiency comparison on the Raspberry Pi~5 CPU
+         at FP16 precision (successful runs only).}
+\label{tab:pi5_fp16_power}
+\begin{tabular}{lrrrr}
+\toprule
+Backend & Mean latency (ms) & Power (mW) & Energy/frame (mJ) & FPS/W \\
+\midrule
+TVM          & 122.44 & 4\,232 & 517.7 & 1.93 \\
+TFLite       & 153.27 & 2\,291 & 351.1 & 2.85 \\
+TorchCompile & 983.08 & 2\,202 & 2\,164.0 & 0.45 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+TFLite achieves the best energy efficiency at FP16 (2.85\,FPS/W), primarily
+because its lightweight runtime draws substantially less board power than the
+TVM or Inductor runtimes while delivering competitive latency. TVM draws more
+power (4\,232\,mW) due to higher CPU utilisation from its densely vectorised
+kernels, but still outperforms TFLite in absolute latency. TorchCompile consumes
+the least power per unit time but has by far the highest energy per frame
+because of its poor throughput.
+
+\paragraph{Overall Assessment.}
+The Raspberry Pi~5 FP16 results demonstrate that half-precision acceleration
+on ARM CPU is a compiler problem rather than a hardware problem. The Cortex-A76
+implements ARMv8.2-A FEAT\_FP16, providing native \texttt{float16} arithmetic
+in its NEON units. The bottleneck is that no major CPU runtime library — MLAS,
+OpenBLAS, or the ATen dispatcher — implements a half-precision GEMM kernel for
+this target. Only TVM, which generates the convolution kernel directly as LLVM
+IR and lets the AArch64 backend select \texttt{float16x8} NEON instructions,
+can exploit the available hardware capability. The result is a $1.57\times$
+end-to-end speedup over FP32 TVM, achieved within a four-hour tuning session.
+All other frameworks either time out, regress, or show no improvement at
+FP16 precision. This finding has a direct practical implication: deploying
+FP16 models on edge CPU platforms without a compilation-based inference
+engine yields no latency benefit and may cause severe degradation.
+
+\section{Accuracy Influence of the alternative Frameworks Usage and conversion to FP16}
 
 
 
