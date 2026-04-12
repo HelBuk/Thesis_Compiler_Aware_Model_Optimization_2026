@@ -836,6 +836,10 @@ def _now_ts() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _timestamped_output_path(base_path: Path, ts_token: str) -> Path:
+    return base_path.with_name(f"{base_path.stem}_{ts_token}{base_path.suffix}")
+
+
 def _build_payload(
     baseline: str,
     all_stats: Dict[str, Dict[str, float]],
@@ -928,7 +932,10 @@ def main() -> None:
     all_stats: Dict[str, Dict[str, float]] = {}
     backend_status: Dict[str, Dict[str, str]] = {}
     run_started_at = _now_ts()
-    out_path = Path(cfg.output_json) if cfg.output_json else None
+    run_file_ts = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
+    out_path = _timestamped_output_path(Path(cfg.output_json), run_file_ts) if cfg.output_json else None
+    if out_path is not None:
+        print(f"[INFO] Output JSON  : {out_path}")
 
     for spec in cfg.backends:
         try:
