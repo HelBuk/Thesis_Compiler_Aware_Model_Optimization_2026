@@ -213,3 +213,13 @@ __marimo__/
 .npy
 .DS_Store
 253_30387_173-pycharm-support-libs
+
+.sqlite3
+.nsys-rep
+.ncu-rep
+.json
+.txt
+.csv
+
+.claude
+.vscode
