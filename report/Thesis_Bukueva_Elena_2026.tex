@@ -98,8 +98,8 @@
 \rfoot{\thepage}
 
 % ======= Title Page Variables (edit these) =======
-\newcommand{\ThesisTitleEng}{Compiler-Aware Model Inference Optimization for Edge AI Accelerators}
-\newcommand{\ThesisTitleNor}{Kompilerbevisst optimalisering av modellinferens for Edge-AI-akseleratorer}
+\newcommand{\ThesisTitleEng}{Compiler-Aware Model Optimization for Edge AI}
+\newcommand{\ThesisTitleNor}{Kompilerbevisst optimaliseringfor Edge-AI}
 \newcommand{\AuthorName}{Bukueva Elena}
 \newcommand{\SupervisorName}{Professor Geir Mathisen, Dept. of Eng. Cybernetics}
 
@@ -258,48 +258,176 @@ The remainder of this report is organised as follows:
 % ======= 2 Literature Study (Litteraturstudie) =======
 \chapter{Literature Study}
 \noindent
+
+
+\textcolor{red}{This chapter is currently in draft form and requires further structuring,
+    formatting, and completion of the literature review. Its final revision is planned for the concluding phase
+    of the thesis work.}
+\section{Scope of the chapter}
+
+This chapter reviews the literature and technical background relevant to the objectives of this thesis. The focus is
+not on providing an exhaustive survey of all deep learning optimization methods, but rather on summarizing the concepts,
+systems, and prior work that are directly related to compiler-aware optimization of object detection models for edge
+deployment.
+
+The review is structured around the main themes that support the experimental part of the thesis. First, it introduces
+object detection models, with particular emphasis on the YOLO family and the YOLOv8 architecture used in this work.
+Second, it discusses the main challenges of deploying deep learning models on edge devices, including latency
+constraints, limited memory bandwidth, reduced compute resources, and the importance of efficient inference at
+small batch sizes. Third, it reviews optimization techniques that are central to this thesis, namely mixed-precision
+inference, quantization, pruning, and selected forms of structural simplification.
+
+In addition, the chapter examines machine learning compilers and inference runtimes as the software layer through
+which deployment optimization is realized. Particular attention is given to Apache TVM and TensorRT, since these
+frameworks are used in the experimental study and represent two different approaches to inference optimization: a
+flexible compiler-oriented stack and a highly optimized vendor-specific deployment framework. Finally, the review
+includes performance-oriented concepts such as operator fusion, memory traffic reduction, and the distinction between
+compute-bound and memory-bound execution, as these are necessary for interpreting the results presented later in the
+thesis.
+
+The literature covered in this chapter is therefore selected according to its relevance to the research questions
+and experiments of this work. Topics that are not directly connected to the implemented methods or evaluated deployment
+scenarios are discussed only briefly or omitted. This selective approach helps maintain focus on the techniques and
+systems that are most important for understanding the methodology and the experimental findings of the thesis.
+
+
 \section{Introduction to Object Detection with Deep Learning Models}
 
-Artificial Intelligence (AI) is a broad term covering a set of algorithms and operations on
-matrices and vectors that enable computers to perform a big variety of tasks in language
-understanding and translation, object recognition, robotic performance etc.
-We will consider only models performing object detection tasks, mostly having CNN
-\cite{krizhevsky2012imagenet}
-and Transformer \cite{vaswani2017attention} architectures.
+\textcolor{red}{TODO: Description of common object detection models and introduction to the the YOLO family}
+
+\section{YOLOv8 Architecture}
 \noindent
-\section{Introduction to Deep Learning Model Optimization }
 
-\section{Yolo8 Model Architecture}
+YOLOv8 is a one-stage convolutional object detector introduced by Ultralytics in 2023~\cite{yolov8_ultralytics}
+as part of the YOLO family of real-time vision models. Its design follows the standard decomposition of modern
+detectors into a backbone, a neck, and a prediction head, while introducing several architectural refinements
+compared with earlier YOLO generations. In particular, YOLOv8 employs C2f feature extraction blocks, an anchor-free
+split detection head, and an efficient multiscale feature aggregation pipeline. These design choices aim to improve
+the trade-off between detection accuracy and inference speed while maintaining practical deployability across
+heterogeneous hardware platforms. According to the official Ultralytics implementation, the standard detection
+family includes five model scales, ranging from YOLOv8n to YOLOv8x, where the nano variant contains approximately
+3.2 million parameters and requires about 8.7--8.9 GFLOPs at an input resolution of $640 \times 640$.
 
-Ultralytics YOLOv8 model follows the classic Backbone -> Neck -> Head layout
-with some improvements from other YOLO architectures.
+\paragraph{Overall structure of YOLOv8}
 
-The key role of the Backbone is feature extraction. It converts the image into
-hierarchical feature maps (from low to high level).
+The overall YOLOv8 architecture is illustrated in Figure~\ref{fig:yolo_architecture_0}. The figure also highlights
+the scaling variables used to derive the different model variants, which determine the network depth, width, and
+overall computational complexity.
 
-Its key components are:
+The standard YOLOv8 detection network consists of three main stages. The backbone extracts hierarchical visual
+features from the input image. The neck fuses semantically rich low-resolution features with spatially precise
+higher-resolution features. Finally, the prediction head converts the fused multiscale features into bounding box
+coordinates and class predictions. In the reference YOLOv8 configuration, the backbone progressively downsamples
+the input image into feature maps at multiple pyramid levels, while the head generates predictions at three output
+scales commonly associated with small, medium, and large objects. In the default P5 configuration, predictions
+are produced from feature levels P3/8, P4/16, and P5/32.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\linewidth]{pics/YOLOv8_structure.pdf}
+    \caption{Overall YOLOv8 architecture and model scaling variables~\cite{yolov8_architecture_rangeking}}
+    \label{fig:yolo_architecture_0}
+\end{figure}
+
+The backbone begins with strided convolutional layers that reduce spatial resolution while increasing channel
+depth. These stages are interleaved with C2f blocks, which are described in the Ultralytics reference implementation
+as a ``faster implementation of CSP bottleneck with 2 convolutions.'' The main purpose of these blocks is to improve
+gradient flow and feature reuse while maintaining computational efficiency. At the deepest stage of the network,
+YOLOv8 employs an SPPF (Spatial Pyramid Pooling -- Fast) module, which increases the effective receptive field
+and improves multiscale context aggregation with relatively low computational overhead.
+
+Overall, the main backbone components of YOLOv8 are:
 \begin{itemize}
-    \item Conv + BN + SiLU
-    \item C2f blocks (main innovation)
-    \item SPPF
+    \item convolutional blocks with Batch Normalization and SiLU activation,
+    \item C2f feature extraction blocks,
+    \item the SPPF module.
 \end{itemize}
 
-The core idea of the C2f (Cross-Stage Partial with full feature fusion)
+The C2f block itself is composed of several bottleneck units. Conceptually, such a block first reduces the number
+of channels, then performs spatial feature transformation, and finally combines intermediate representations
+to preserve useful information. This design improves feature propagation and reduces redundant computation while
+retaining informative representations. Compared with earlier CSP-style blocks, C2f enables richer feature reuse
+and more efficient gradient flow.
+
+The neck follows a PAN-FPN style design. In practice, this means that feature maps are upsampled, concatenated
+with earlier backbone features, and then processed again using C2f blocks. This combination of top-down and bottom-up
+feature fusion is central to YOLOv8's ability to detect objects across multiple scales. The reference YAML
+architecture repeatedly uses Upsample, Concat, and C2f blocks before the final
+Detect module. Such multiscale aggregation is particularly important for real-world datasets, where
+object size can vary significantly across scenes.
+
+The prediction head in YOLOv8 is both decoupled and anchor-free. Ultralytics describes YOLOv8 as using an anchor-free
+split detection head, meaning that predictions are not tied to a predefined set of anchor box shapes. Instead,
+the detector predicts bounding boxes and class scores directly from the feature maps. Compared with older anchor-based
+YOLO variants, this simplifies the detection pipeline and removes the need for dataset-specific anchor tuning.
+
+In an anchor-free detector, each spatial location on the feature map typically predicts:
+\begin{itemize}
+    \item whether an object is present,
+    \item the class scores,
+    \item the box coordinates or distances to the box boundaries.
+\end{itemize}
+
+The split head further separates the localization and classification tasks into distinct branches. This decoupling
+allows the model to optimize these tasks more effectively, since object localization and semantic classification
+impose different requirements on the learned feature representations.
+
+Another important component of the YOLOv8 detection formulation is its use of distribution-based box regression.
+The Ultralytics codebase includes a DFL module and the corresponding loss implementation, reflecting the use
+of Distribution Focal Loss for bounding box parameterization. This improves localization precision by modeling
+bounding box offsets as discrete probability distributions rather than relying solely on coarse direct regression.
+
+\paragraph{Relevance of YOLOv8 for this thesis}
+
+For a thesis focused on compiler-aware optimization of deep learning models for edge devices, YOLOv8, and especially
+YOLOv8n, represents a highly suitable case study.
+
+First, YOLOv8 offers a strong balance between detection accuracy and inference latency, which is one reason why
+later detectors continue to use it as a baseline. Second, YOLOv8 has a mature deployment ecosystem. Ultralytics
+supports export to a wide range of formats relevant for practical deployment, including ONNX, TensorRT, CoreML,
+OpenVINO, and TFLite. This makes the model especially attractive for evaluating compiler and runtime behavior across
+different hardware platforms.
+
+In addition, YOLOv8 is not limited to object detection alone. The model family also supports segmentation,
+classification, pose estimation, and oriented bounding box detection within the same software ecosystem.
+This is particularly relevant in applied edge AI research, where systems often evolve from simple object
+detection toward richer scene understanding tasks. As a result, YOLOv8 provides both architectural consistency
+and practical flexibility.
+
+For this thesis, YOLOv8n is of particular interest because it is small enough to run on many embedded platforms,
+while still being architecturally complex enough to expose realistic deployment bottlenecks. The model includes
+multiscale feature fusion, repeated tensor concatenations, SiLU activations, distribution-based box regression,
+and post-processing stages. These properties make it a meaningful test case for studying compiler optimizations,
+runtime scheduling, kernel efficiency, quantization behavior, and memory-system effects.
+
+Despite being the smallest variant, YOLOv8n is not automatically optimal for every edge target. Several practical
+challenges arise during deployment.
+
+First, a low parameter count does not necessarily translate into low latency on all hardware platforms. YOLOv8n still
+contains nontrivial tensor reshaping, concatenation, upsampling, and multiscale fusion operations. On desktop GPUs,
+such operations may be efficiently hidden by optimized kernels and memory systems, whereas on edge CPUs and lightweight
+accelerators the cost of memory movement can dominate the arithmetic workload. In such cases, the effective
+execution becomes memory-bound rather than compute-bound.
+
+Second, operator support and kernel efficiency vary significantly across deployment backends. Although YOLOv8 can
+be exported to ONNX, TensorRT, TFLite, and other runtimes, the achieved performance depends strongly on how well
+the target backend supports the specific operator set and graph structure of the model. In practice, operations
+such as SiLU, concatenation-heavy neck structures, and certain post-processing steps may be implemented with
+different levels of efficiency across frameworks. As a result, there is often a noticeable gap between the
+theoretical FLOP count of the model and the measured end-to-end latency.
+
+Third, post-processing introduces an additional deployment challenge. Standard YOLOv8 detection still relies on
+confidence filtering and non-maximum suppression after the forward pass. On GPU-based systems, this may require
+transferring relatively large tensors from the device to the host, followed by post-processing on the CPU. Such
+steps can add non-negligible latency and complicate the analysis of true end-to-end performance.
+
+Overall, YOLOv8 is an interesting subject for deployment-oriented research because it combines architectural
+complexity with competitive accuracy and speed. In particular, YOLOv8n remains highly relevant for edge AI studies:
+it is compact enough to be practical on constrained devices, yet sufficiently complex to reveal the impact of
+compiler transformations, runtime optimizations, operator fusion, and memory bottlenecks on real inference workloads.
 
 
-A bottleneck is a small stack of layers that:
-\begin{enumerate}
-    \item Compresses channels(make tensor narrower)
-    \item Does some work (spatial mixing)
-\item Expands channels back
-\end{enumerate}
-It helps to drop redundant features, while preserving important.
-
-SPPF = Spatial Pyramid Pooling – Fast
-
-It’s a context aggregation block used in YOLO (v5 → v8)
-
-\section{Performance Challenges in Machine Learning Deployment}
+\section{Challenges of edge deployment}
 
 Metrics:
     \begin{itemize}
@@ -331,13 +459,13 @@ These frameworks often use dynamic execution (for example, PyTorch’s eager mod
 That same flexibility comes at a cost:
 
 \begin{itemize}
-    \item Python interpreter overhead
+    \item \textbf{Python interpreter overhead:}
     Every operation goes through the Python interpreter, which is relatively slow.
-    \item Interpreter locks (e.g., the GIL)
+    \item \textbf{Interpreter locks (e.g., the GIL):}
     Python’s Global Interpreter Lock can limit parallel execution.
-    \item Object management
+    \item \textbf{Object management:}
     Tensors and operators are Python objects that need to be created, tracked, and destroyed.
-    \item Framework dispatch logic
+    \item \textbf{Framework dispatch logic:}
     Each operation requires the framework to decide which kernel to run, on which device,
     and how to manage memory.
 \end{itemize}
@@ -405,7 +533,7 @@ blocked layouts, so compilers can choose a single optimal layout, insert minimal
 avoid unnecessary transposes.
 
 
-\section{DNNs Complier Workflow}
+\section{ML compilers and inference runtimes}
 
 An ML model compiler takes a \textit{high-level model} (PyTorch / TensorFlow / ONNX)
 and turns it into efficient executable code for a \textit{specific target}
@@ -462,50 +590,28 @@ Stages:
     (allocation of memory for intermediate tensors), interfacing with hardware devices, task dispatching,
     and library integration.
 
-    Popular compilers and runtime stacks:
-        \begin{itemize}
-            \item TensorFlow/XLA (Accelerated Linear Algebra): compiles Tensorflow graphs via HLO IR;
-            \item PyTorch 2.x (TorchDynamo, AOTAutograd, Inductor): captures Python  bytecode
-                into FX graph representation;
-            \item Apache TVM: stack for optimizing models for CPU, GPU, microcontrollers, FPGAs and ASICS.
-            \item MLIR-based Stacks (e.g., IREE, TensorFlow MLIR)
-            \item ONNX Runtime
-        \end{itemize}
-
-\section{Performance Bottlenecks in ML Inference}
-
-A workload is compute-bound if increasing the raw processing power
-(e.g., higher clock speed, more compute units) directly leads to a proportional decrease
-in execution time, assuming memory and latency are not limiting factors.
-
-Inference for complex neural networks requires millions of multiply-accumulate (MAC) operations.
-If hardware is not fully utilized and code not map vectors/tensors effectively, the processing
-bottlenecks are created.
-
-Many ML operations are memory-bound.
-This means the execution time is dominated by the time spent
-transferring data between memory levels (e.g., DRAM to caches, cache levels, host-to-device
-memory) rather than the computation itself.
-
-Latency bounded operations: single-batch inference, overhear for dispatching operations,
-pipeline stalls.
-
-These strategies reduce dispatch overhead for frequently executed execution paths:
-
-\begin{itemize}
-    \item \textbf{Ahead-of-Time (AOT):} Compile the entire model before execution,
-    as in traditional C/C++ workflows and many edge deployment scenarios.
-    \item \textbf{Just-In-Time (JIT):} Compile code or computation graphs at runtime,
-    typically upon first execution, leveraging runtime information such as tensor
-    shapes, data types, and target hardware.
-\end{itemize}
+    Examples of modern compiler and runtime stacks for machine learning include:
+    \begin{itemize}
+        \item \textbf{TensorFlow/XLA}, which compiles TensorFlow programs through XLA using HLO-based intermediate
+            representations~\cite{tensorflow_xla_architecture,xla_hlo_tooling};
+        \item \textbf{PyTorch 2.x}, which combines TorchDynamo, AOTAutograd, and TorchInductor to capture and
+            optimize models for efficient execution~\cite{pytorch_torch_compile,pytorch_compile_faq,pytorch_2x};
+        \item \textbf{Apache TVM}, a compiler stack for optimizing models across heterogeneous targets including CPUs,
+            GPUs, and edge-oriented accelerators~\cite{apache_tvm_home, chen2018tvm};
+        \item \textbf{MLIR-based stacks}, such as IREE and TensorFlow MLIR, which use multi-level intermediate
+            representations to enable flexible lowering pipelines for heterogeneous systems
+            ~\cite{mlir_overview,tensorflow_mlir_overview,iree_home};
+        \item \textbf{ONNX Runtime}, a cross-platform inference engine that supports hardware-specific execution
+            providers for efficient deployment on diverse platforms
+            ~\cite{onnxruntime_home,onnxruntime_execution_providers}.
+    \end{itemize}
 
 
+%\section{Hailo Compiler}
 
-\section{Hailo Compiler}
 
-
-\section{Methods for Pruning Deep Neural Network}
+\section{Quantization and mixed precision}
+\section{Pruning and structural simplification}
 
     In a survey ~\cite{vadera2022methods} authors categorized over 150 studies of pruning
     neural networks.
@@ -977,6 +1083,37 @@ whether bottlenecks arise from the model graph itself, from suboptimal kernel im
 a mismatch between the deployed runtime and the target hardware.
 
 
+\section{TensorRT}
+
+\section{Performance Bottlenecks in ML Inference}
+
+A workload is compute-bound if increasing the raw processing power
+(e.g., higher clock speed, more compute units) directly leads to a proportional decrease
+in execution time, assuming memory and latency are not limiting factors.
+
+Inference for complex neural networks requires millions of multiply-accumulate (MAC) operations.
+If hardware is not fully utilized and code not map vectors/tensors effectively, the processing
+bottlenecks are created.
+
+Many ML operations are memory-bound.
+This means the execution time is dominated by the time spent
+transferring data between memory levels (e.g., DRAM to caches, cache levels, host-to-device
+memory) rather than the computation itself.
+
+Latency bounded operations: single-batch inference, overhear for dispatching operations,
+pipeline stalls.
+
+These strategies reduce dispatch overhead for frequently executed execution paths:
+
+\begin{itemize}
+    \item \textbf{Ahead-of-Time (AOT):} Compile the entire model before execution,
+    as in traditional C/C++ workflows and many edge deployment scenarios.
+    \item \textbf{Just-In-Time (JIT):} Compile code or computation graphs at runtime,
+    typically upon first execution, leveraging runtime information such as tensor
+    shapes, data types, and target hardware.
+\end{itemize}
+
+\section{Relation to this thesis}
 
 % ======= Theory =======
 \chapter{Theory}
