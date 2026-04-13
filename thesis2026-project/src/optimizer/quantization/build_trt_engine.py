@@ -32,7 +32,7 @@ Usage (run from project root)
       --precision int8 \\
       --calib-dir  datasets/coco_subset/train_1percent/images \\
       --calib-cache models/tensorrt_exports/int8_calib.cache \\
-      --n-calib 200
+      --n-calib 9999
 """
 from __future__ import annotations
 
@@ -72,48 +72,57 @@ def _letterbox(img: np.ndarray, target: int = 640) -> np.ndarray:
     return pad
 
 
-def _load_images(image_dir: str, n: int, imgsz: int) -> list[np.ndarray]:
-    """Return list of preprocessed float32 NCHW images (values in [0, 1])."""
+def _collect_image_paths(image_dir: str, n: int) -> list[str]:
+    """Return sorted list of up to n image paths — no loading, no RAM cost."""
     paths = sorted(
         glob.glob(os.path.join(image_dir, "*.jpg"))
         + glob.glob(os.path.join(image_dir, "*.png"))
     )[:n]
     if not paths:
         raise FileNotFoundError(f"No images found in {image_dir}")
-    _log(f"Loaded {len(paths)} calibration images from {image_dir}")
-    out = []
-    for p in paths:
-        img = cv2.imread(p)
-        if img is None:
-            continue
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = _letterbox(img, target=imgsz)
-        x = img.astype(np.float32) / 255.0
-        out.append(np.ascontiguousarray(np.transpose(x, (2, 0, 1))[np.newaxis]))  # NCHW
-    return out
+    _log(f"Found {len(paths)} calibration images in {image_dir}")
+    return paths
+
+
+def _load_one(path: str, imgsz: int) -> np.ndarray:
+    """Load, letterbox, and normalise a single image → float32 NCHW (1,3,H,W)."""
+    img = cv2.imread(path)
+    if img is None:
+        raise OSError(f"cv2 could not read: {path}")
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = _letterbox(img, target=imgsz)
+    x = img.astype(np.float32) / 255.0
+    return np.ascontiguousarray(np.transpose(x, (2, 0, 1))[np.newaxis])  # (1,3,H,W)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # INT8 calibrator — IInt8EntropyCalibrator2, torch device memory, no pycuda
+# Lazy loading: images are read from disk one at a time in get_batch(),
+# so RAM usage stays flat (~50 MB) regardless of dataset size.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TorchEntropyCalibrator(trt.IInt8EntropyCalibrator2):
-    """INT8 entropy calibrator backed by torch CUDA tensors (no pycuda)."""
+    """INT8 entropy calibrator backed by torch CUDA tensors (no pycuda).
+
+    Images are loaded lazily — only one image lives in RAM at a time.
+    """
 
     def __init__(
         self,
         image_dir: str,
         cache_file: str,
-        n_images: int = 200,
+        n_images: int = 9999,
         imgsz: int = 640,
         batch_size: int = 1,
     ):
         super().__init__()
         self._cache_file = cache_file
         self._batch_size = batch_size
-        self._images = _load_images(image_dir, n_images, imgsz)
+        self._imgsz = imgsz
+        # Store only file paths — no images loaded yet
+        self._paths = _collect_image_paths(image_dir, n_images)
         self._index = 0
-        # Persistent device buffer — avoids a new allocation on every get_batch call
+        # Persistent device buffer — one image slot, reused every get_batch call
         self._buf = torch.zeros(
             batch_size, 3, imgsz, imgsz, dtype=torch.float32, device="cuda"
         )
@@ -122,11 +131,13 @@ class TorchEntropyCalibrator(trt.IInt8EntropyCalibrator2):
         return self._batch_size
 
     def get_batch(self, names: list[str]):            # noqa: ARG002  (names unused)
-        if self._index >= len(self._images):
+        if self._index >= len(self._paths):
             return None                               # signals end of calibration
-        batch = self._images[self._index]
+        if self._index % 100 == 0:
+            _log(f"Calibrating image {self._index + 1}/{len(self._paths)} …")
+        arr = _load_one(self._paths[self._index], self._imgsz)
         self._index += 1
-        self._buf.copy_(torch.from_numpy(batch).cuda())
+        self._buf.copy_(torch.from_numpy(arr))        # arr already on CPU, buf on CUDA
         return [self._buf.data_ptr()]
 
     def read_calibration_cache(self):
@@ -263,8 +274,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--precision", choices=["fp32", "fp16", "int8"], default="fp32")
     ap.add_argument("--imgsz",   type=int,   default=640)
     ap.add_argument("--batch",   type=int,   default=1)
-    ap.add_argument("--workspace-gb", type=float, default=4.0,
-                    help="Builder workspace in GB (default: 4)")
+    ap.add_argument("--workspace-gb", type=float, default=1.0,
+                    help="Builder workspace in GB (default: 1)")
     ap.add_argument("--calib-dir",   default=None,
                     help="Directory of COCO calibration images (required for int8)")
     ap.add_argument("--calib-cache", default="models/tensorrt_exports/int8_calib.cache",
