@@ -129,3 +129,13 @@ backends:
   #   device: cpu
   #   tvm_device_type: cpu
   #   tvm_input_dtype: float16   # REQUIRED for fp16 compiled modules
+
+  # ── TVM GPU INT8 (Relax VirtualMachine, compiled from QDQ ONNX) ───────────
+  # Generate the .so with compile_tvm_int8.py before enabling this entry.
+  # The QDQ ONNX has a FLOAT32 graph boundary, so tvm_input_dtype stays float32.
+  # - name: tvm_gpu_int8
+  #   kind: tvm_int8
+  #   model: ../models/compiled_tvm_models/yolov8n_orin_gpu_int8_1pct.so
+  #   device: cuda:0
+  #   tvm_device_type: cuda
+  #   tvm_input_dtype: float32

@@ -1,0 +1,105 @@
+# gpu_int8_orin.yaml
+#
+# Config for: TVM INT8 compilation + benchmarking on Jetson Orin Nano (sm87)
+#
+# Used by:
+#   compile_tvm_int8.py    (tune / export)
+#   run.py                 (tune / export / bench)
+#   bench_rigorous.py      (--backends tvm tvm_int8 ort pytorch trt)
+#
+# Run from src/optimizer/tvm_runner/ :
+#   python compile_tvm_int8.py tune   --onnx ../../../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx \
+#                                     --output ../../../models/compiled_tvm_models/yolov8n_orin_gpu_int8_1pct.so \
+#                                     --db-dir out/tvm_tuning_logs/yolov8n_orin_gpu_int8_v1
+#   python compile_tvm_int8.py export --onnx ../../../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx \
+#                                     --output ../../../models/compiled_tvm_models/yolov8n_orin_gpu_int8_1pct.so \
+#                                     --db-dir out/tvm_tuning_logs/yolov8n_orin_gpu_int8_v1
+#
+#   python bench_rigorous.py --config configs/gpu_int8_orin.yaml \
+#                            --backends tvm tvm_int8 ort pytorch trt \
+#                            --repeats 5 --runs 200 --warmup 30
+
+run:
+  name: "yolov8n_orin_gpu_int8"
+  out_dir: "./out/experiments"
+  seed: 0
+
+# Primary model — FP32 ONNX used by run.py and _worker_tvm / _worker_ort / _worker_pytorch
+model:
+  onnx_path: "../../../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"
+  pt_path: "../../../models/yolov8n.pt"
+  imgsz: 640
+  batch: 1
+
+device:
+  kind: "cuda"
+  arch: "sm87"                           # Jetson Orin Nano GA10B
+  max_num_threads: 1024
+  max_threads_per_block: 1024
+  thread_warp_size: 32
+  max_shared_memory_per_block: 49152
+  registers_per_block: 65536
+  host:
+    kind: "llvm"
+    mtriple: "aarch64-linux-gnu"
+    mcpu: "cortex-a78"
+
+precision:
+  name: "fp32"                           # input tensor dtype for FP32 TVM / ORT / PyTorch workers
+
+# TVM FP32 compiled .so — used by _worker_tvm and bench/accuracy TVM entries
+tvm:
+  log_dir: "./out/tvm_tuning_logs/tuning_yolov8n_orin_gpu_03"
+  use_existing_db: true
+  max_trials_global: 10000
+  max_trials_per_task: 150
+  num_trials_per_iter: 64
+  timeout_builder_s: 300
+  timeout_runner_s: 300
+  export_path: "../../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v6.so"
+
+# TVM INT8 compiled .so — used by _worker_tvm_int8 in bench_rigorous
+# Generate this .so with:
+#   python compile_tvm_int8.py all \
+#       --onnx ../../../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx \
+#       --output ../../../models/compiled_tvm_models/yolov8n_orin_gpu_int8_1pct.so \
+#       --db-dir out/tvm_tuning_logs/yolov8n_orin_gpu_int8_v1
+tvm_int8:
+  export_path: "../../../models/compiled_tvm_models/yolov8n_orin_gpu_int8_1pct.so"
+  # onnx_path is optional: used only for input-dtype detection in the worker.
+  # For QDQ ONNX the input is always FLOAT32, so this can be omitted.
+  onnx_path: "../../../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx"
+
+# TVM Relay INT8 compiled .so — used by _worker_tvm_relay_int8 in bench_rigorous
+# Generate with:
+#   python compile_tvm_relay_int8.py all \
+#       --onnx ../../../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx \
+#       --calib-dir ../../../datasets/coco_subset/train_1percent/images \
+#       --output ../../../models/compiled_tvm_models/yolov8n_orin_relay_int8_1pct.so \
+#       --db-dir out/tvm_tuning_logs/yolov8n_relay_int8_v1
+tvm_relay_int8:
+  export_path: "../../../models/compiled_tvm_models/yolov8n_orin_relay_int8_1pct.so"
+  input_name: "images"                   # Relay input tensor name from ONNX frontend
+
+tvm_targeted_tuning:
+  enable: false
+  operations: null
+
+benchmark:
+  runs: 200
+  warmup: 30
+
+onnxruntime:
+  threads: 1
+  trt:
+    enable_engine_cache: true
+    engine_cache_path: "./out/trt_cache/trt_current"
+    fp16_enable: false
+  use_arena: true
+
+tensorrt:
+  engine_path: "./out/trt_cache/trt_current/TensorrtExecutionProvider_TRTKernel_graph_main_graph_12725355770372969813_0_0_sm87.engine"
+
+tflite:
+  model_path: "../../../models/quantized_models/yolov8n_tflite_int8/yolov8n_integer_quant.tflite"
+  threads: 4

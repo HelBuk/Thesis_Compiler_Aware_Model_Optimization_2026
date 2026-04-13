@@ -642,6 +642,110 @@ def _worker_torch_compile(cfg_raw: dict, runs: int, warmup: int) -> None:
     }))
 
 
+def _worker_tvm_relay_int8(cfg_raw: dict, runs: int, warmup: int) -> None:
+    """TVM Relay INT8 worker — loads a GraphExecutorFactoryModule .so compiled
+    by compile_tvm_relay_int8.py.
+
+    Unlike _worker_tvm which uses relax.VirtualMachine, Relay-compiled modules
+    use tvm.contrib.graph_executor.  The interface and timing approach are the
+    same; only the load/run calls differ.
+    """
+    import numpy as np
+    import tvm
+    from tvm.contrib import graph_executor
+
+    relay_cfg = cfg_raw.get("tvm_relay_int8", {})
+    if not relay_cfg.get("export_path"):
+        print(json.dumps({"error": "tvm_relay_int8.export_path not set in config"}),
+              file=__import__("sys").stderr)
+        raise SystemExit(1)
+
+    device_kind = cfg_raw.get("device", {}).get("kind", "cpu")
+    is_cuda = device_kind == "cuda"
+    if is_cuda:
+        os.environ.pop("TVM_NUM_THREADS", None)
+        os.environ.pop("OMP_NUM_THREADS", None)
+    else:
+        os.environ["TVM_NUM_THREADS"] = "4"
+        os.environ["OMP_NUM_THREADS"] = "4"
+
+    dev = tvm.cuda(0) if is_cuda else tvm.cpu(0)
+
+    lib = tvm.runtime.load_module(relay_cfg["export_path"])
+    m = graph_executor.GraphModule(lib["default"](dev))
+
+    batch = cfg_raw["model"].get("batch", 1)
+    imgsz = cfg_raw["model"].get("imgsz", 640)
+    x_np = np.ascontiguousarray(
+        np.random.randn(batch, 3, imgsz, imgsz).astype(np.float32))
+
+    input_name = relay_cfg.get("input_name", "images")
+
+    for _ in range(warmup):
+        m.set_input(input_name, x_np)
+        m.run()
+
+    if is_cuda:
+        tvm.cuda(0).sync()
+
+    pwr: List[float] = []
+    times: List[float] = []
+
+    if is_cuda:
+        for i in range(runs):
+            if i % _PWR_EVERY == 0:
+                p = _sample_power_mw()
+                if p is not None:
+                    pwr.append(p)
+            t0 = time.perf_counter()
+            m.set_input(input_name, x_np)
+            m.run()
+            tvm.cuda(0).sync()
+            t1 = time.perf_counter()
+            times.append((t1 - t0) * 1000.0)
+    else:
+        for i in range(runs):
+            if i % _PWR_EVERY == 0:
+                p = _sample_power_mw()
+                if p is not None:
+                    pwr.append(p)
+            t0 = time.perf_counter()
+            m.set_input(input_name, x_np)
+            m.run()
+            t1 = time.perf_counter()
+            times.append((t1 - t0) * 1000.0)
+
+    print(json.dumps({"backend": "TVM_RelayINT8", "device": device_kind,
+                      "times_ms": times, "power": _power_stats(pwr)}))
+
+
+def _worker_tvm_int8(cfg_raw: dict, runs: int, warmup: int) -> None:
+    """TVM INT8 worker — identical to _worker_tvm but loads the .so from
+    cfg_raw["tvm_int8"]["export_path"].
+
+    QDQ ONNX models have a FLOAT32 graph input even when compiled as INT8,
+    so np_dtype detection from the ONNX file still returns float32 correctly.
+    If cfg_raw["tvm_int8"]["onnx_path"] is set it overrides the ONNX used for
+    dtype detection (useful if the INT8 ONNX is in a different location).
+    """
+    int8_section = cfg_raw.get("tvm_int8", {})
+    if not int8_section.get("export_path"):
+        print(json.dumps({"error": "tvm_int8.export_path not set in config"}),
+              file=__import__("sys").stderr)
+        raise SystemExit(1)
+
+    # Patch the config so _worker_tvm picks up the INT8 .so path and,
+    # optionally, the INT8 ONNX for input-dtype detection.
+    patched = dict(cfg_raw)
+    patched["tvm"] = {**cfg_raw.get("tvm", {}),
+                      "export_path": int8_section["export_path"]}
+    if int8_section.get("onnx_path"):
+        patched["model"] = {**cfg_raw.get("model", {}),
+                            "onnx_path": int8_section["onnx_path"]}
+
+    _worker_tvm(patched, runs, warmup)
+
+
 def _worker_tflite(cfg_raw: dict, runs: int, warmup: int) -> None:
     import numpy as np
 
@@ -815,12 +919,14 @@ def _worker_trt(cfg_raw: dict, runs: int, warmup: int) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _WORKER_FN = {
-    "tvm"           : "_worker_tvm",
-    "ort"           : "_worker_ort",
-    "pytorch"       : "_worker_pytorch",
-    "tflite"        : "_worker_tflite",
-    "trt"           : "_worker_trt",
-    "torch_compile" : "_worker_torch_compile",
+    "tvm"              : "_worker_tvm",
+    "tvm_int8"         : "_worker_tvm_int8",
+    "tvm_relay_int8"   : "_worker_tvm_relay_int8",
+    "ort"              : "_worker_ort",
+    "pytorch"          : "_worker_pytorch",
+    "tflite"           : "_worker_tflite",
+    "trt"              : "_worker_trt",
+    "torch_compile"    : "_worker_torch_compile",
 }
 
 
@@ -945,12 +1051,14 @@ def print_summary(all_results: Dict[str, Dict]) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 BACKEND_LABELS = {
-    "tvm"          : "TVM",
-    "ort"          : "ONNXRuntime",
-    "pytorch"      : "PyTorch",
-    "tflite"       : "TFLite",
-    "trt"          : "TensorRT",
-    "torch_compile": "TorchCompile",
+    "tvm"            : "TVM_FP32",
+    "tvm_int8"       : "TVM_INT8_QDQ",
+    "tvm_relay_int8" : "TVM_RelayINT8",
+    "ort"            : "ONNXRuntime",
+    "pytorch"        : "PyTorch",
+    "tflite"         : "TFLite",
+    "trt"            : "TensorRT",
+    "torch_compile"  : "TorchCompile",
 }
 
 
@@ -1007,7 +1115,7 @@ def main() -> None:
                     help="Skip thermal cooldown between reps")
     ap.add_argument("--backends",        nargs="+",
                     default=["tvm", "ort", "pytorch"],
-                    choices=["tvm", "ort", "pytorch", "tflite", "trt", "torch_compile"])
+                    choices=["tvm", "tvm_int8", "tvm_relay_int8", "ort", "pytorch", "tflite", "trt", "torch_compile"])
     ap.add_argument("--set-performance", action="store_true",
                     help="Try sudo cpufreq-set -g performance before benchmarking")
     ap.add_argument("--out",             default=None,

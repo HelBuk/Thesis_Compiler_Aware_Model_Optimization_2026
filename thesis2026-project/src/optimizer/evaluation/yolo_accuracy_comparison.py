@@ -249,6 +249,90 @@ class TVMBackend(Backend):
 
 
 # ---------------------------------------------------------------------------
+# TVM Relay backend (graph_executor, produced by compile_tvm_relay_int8.py)
+# ---------------------------------------------------------------------------
+
+class TVMRelayBackend(Backend):
+    """TVM Relay GraphExecutor backend for YOLOv8n accuracy evaluation.
+
+    Loads a compiled Relay .so (produced by compile_tvm_relay_int8.py) and
+    runs inference through tvm.contrib.graph_executor.  This is the correct
+    loader for relay.build() output; do NOT use relax.VirtualMachine here.
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        imgsz: int,
+        conf: float,
+        iou: float,
+        max_det: int,
+        device: str,
+        tvm_device_type: str = "cuda",
+        input_name: str = "images",
+    ):
+        super().__init__(imgsz, conf, iou, max_det, device)
+
+        try:
+            import tvm
+            from tvm.contrib import graph_executor
+        except ImportError as exc:
+            raise ImportError("TVM is not installed.") from exc
+
+        self._tvm = tvm
+        self._device_type = tvm_device_type.lower()
+        self._input_name = input_name
+
+        if self._device_type == "cuda":
+            self._dev = tvm.cuda(0)
+        elif self._device_type == "cpu":
+            self._dev = tvm.cpu(0)
+        else:
+            raise ValueError(f"Unsupported TVM device type: {tvm_device_type!r}")
+
+        lib = tvm.runtime.load_module(model_path)
+        self._m = graph_executor.GraphModule(lib["default"](self._dev))
+        self._torch_device = "cpu"
+
+        # Probe once to verify the module loads correctly
+        probe = np.zeros((1, 3, imgsz, imgsz), dtype=np.float32)
+        self._m.set_input(self._input_name, probe)
+        self._m.run()
+        if self._device_type == "cuda":
+            self._dev.sync()
+        print(f"[TVMRelay] probe OK  model={Path(model_path).name}")
+
+    def infer_batch(self, imgs_bchw01: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
+        x_np = imgs_bchw01.detach().cpu().numpy().astype(np.float32)
+        preds = []
+        for i in range(x_np.shape[0]):
+            self._m.set_input(self._input_name, np.ascontiguousarray(x_np[i : i + 1]))
+            self._m.run()
+            if self._device_type == "cuda":
+                self._dev.sync()
+            y = self._m.get_output(0).numpy()
+            preds.append(
+                yolo8_output_to_preds_ultra(
+                    out=y,
+                    imgsz=self.imgsz,
+                    conf=self.conf,
+                    iou=self.iou,
+                    max_det=self.max_det,
+                    torch_device="cpu",
+                )
+            )
+        return preds
+
+    def close(self) -> None:
+        try:
+            if self._device_type == "cuda":
+                self._dev.sync()
+            del self._m
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # torch.compile backend
 # ---------------------------------------------------------------------------
 
@@ -383,7 +467,21 @@ def build_backend_from_spec(
             compile_mode=spec.compile_mode,
         )
 
-    if kind == "tvm":
+    if kind == "tvm_relay_int8":
+        return TVMRelayBackend(
+            model_path=spec.model,
+            imgsz=imgsz,
+            conf=conf,
+            iou=iou,
+            max_det=max_det,
+            device=device,
+            tvm_device_type=spec.tvm_device_type,
+            input_name=spec.extra.get("input_name", "images"),
+        )
+
+    if kind in ("tvm", "tvm_int8"):
+        # tvm_int8 uses the same TVMBackend: a QDQ-compiled .so accepts FLOAT32
+        # input (the QuantizeLinear is the first op inside the graph boundary).
         return TVMBackend(
             model_path=spec.model,
             imgsz=imgsz,
@@ -514,7 +612,7 @@ def _run_eval_isolated(
 
 
 # Kinds that MUST run in a subprocess due to unrecoverable CUDA context conflicts
-_ISOLATED_KINDS = frozenset({"tvm"})
+_ISOLATED_KINDS = frozenset({"tvm", "tvm_int8", "tvm_relay_int8"})
 
 
 # ---------------------------------------------------------------------------

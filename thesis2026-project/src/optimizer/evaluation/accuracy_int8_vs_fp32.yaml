@@ -1,0 +1,97 @@
+# accuracy_int8_vs_fp32.yaml
+#
+# Focused accuracy comparison: PyTorch FP32 baseline vs TVM INT8 and
+# ONNX-Runtime INT8 variants on Jetson Orin Nano (COCO val).
+#
+# Prerequisites:
+#   1. Generate the TVM INT8 .so first:
+#      python src/optimizer/tvm_runner/compile_tvm_int8.py all \
+#          --onnx models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx \
+#          --output models/compiled_tvm_models/yolov8n_orin_gpu_int8_1pct.so \
+#          --db-dir src/optimizer/tvm_runner/out/tvm_tuning_logs/yolov8n_orin_gpu_int8_v1
+#
+# Usage (run from project root):
+#   python src/optimizer/evaluation/yolo_accuracy_comparison.py \
+#       --config src/optimizer/evaluation/accuracy_int8_vs_fp32.yaml
+#
+# Quick sanity check (first 200 batches only):
+#   python src/optimizer/evaluation/yolo_accuracy_comparison.py \
+#       --config src/optimizer/evaluation/accuracy_int8_vs_fp32.yaml \
+#       --max_batches 200
+
+comparison:
+  data: datasets/coco/data.yaml          # Ultralytics dataset YAML (val split)
+  imgsz: 640
+  batch: 1
+  conf: 0.001                            # low conf for official mAP evaluation
+  iou: 0.7
+  max_det: 300
+  max_batches: 0                         # 0 = full val (~5000 images)
+  workers: 0
+  project: src/optimizer/evaluation/runs/accuracy_int8_vs_fp32
+  save_json: true
+  save_txt: false
+  plots: false
+  output_json: src/optimizer/evaluation/runs/accuracy_int8_vs_fp32/results.json
+
+backends:
+
+  # ── Baseline: PyTorch FP32 ────────────────────────────────────────────────
+  - name: pytorch_fp32
+    kind: torch
+    model: models/yolov8n.pt
+    device: cuda:0
+    baseline: true
+
+  # ── ORT CUDA FP32 (sanity check against PyTorch baseline) ─────────────────
+  - name: ort_fp32
+    kind: ort
+    model: models/quantized_models/onnx/yolov8n_opset17_fp32.onnx
+    device: cuda:0
+
+  # ── TVM GPU FP32 (compiled .so — verify no TVM compilation accuracy loss) ──
+  - name: tvm_fp32
+    kind: tvm
+    model: models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v6.so
+    device: cuda:0
+    tvm_device_type: cuda
+    tvm_input_dtype: float32
+
+  # ── ORT CUDA INT8 — QDQ 1% COCO calibration ───────────────────────────────
+  - name: ort_int8_qdq_1pct
+    kind: ort
+    model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx
+    device: cuda:0
+
+  # ── ORT CUDA INT8 — QDQ 0.1% COCO calibration ────────────────────────────
+  - name: ort_int8_qdq_0_1pct
+    kind: ort
+    model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_0_1percent_coco.onnx
+    device: cuda:0
+
+  # ── ORT CUDA INT8 — QDQ 10% COCO calibration ─────────────────────────────
+  - name: ort_int8_qdq_10pct
+    kind: ort
+    model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_10percent_coco.onnx
+    device: cuda:0
+
+  # ── TVM GPU INT8 via QDQ ONNX (compile_tvm_int8.py) ──────────────────────
+  # Uncomment once .so is generated.  Expected to be slower than FP32 because
+  # TVM Relax keeps Q/DQ nodes as separate kernels rather than fusing them.
+  # - name: tvm_int8_qdq_1pct
+  #   kind: tvm_int8
+  #   model: models/compiled_tvm_models/yolov8n_orin_gpu_int8_1pct.so
+  #   device: cuda:0
+  #   tvm_device_type: cuda
+  #   tvm_input_dtype: float32          # QDQ graph boundary is always FLOAT32
+
+  # ── TVM GPU INT8 via Relay quantization (compile_tvm_relay_int8.py) ───────
+  # This is the correct INT8 path: Relay produces native qnn.conv2d ops that
+  # MetaSchedule schedules with dp4a on sm87.  Expected speedup vs FP32: ~2-3×.
+  # Uncomment once .so is generated.
+  # - name: tvm_relay_int8_1pct
+  #   kind: tvm_relay_int8
+  #   model: models/compiled_tvm_models/yolov8n_orin_relay_int8_1pct.so
+  #   device: cuda:0
+  #   tvm_device_type: cuda
+  #   tvm_input_dtype: float32
