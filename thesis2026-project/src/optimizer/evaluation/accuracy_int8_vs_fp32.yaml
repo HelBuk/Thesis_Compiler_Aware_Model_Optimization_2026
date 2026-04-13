@@ -1,7 +1,11 @@
 # accuracy_int8_vs_fp32.yaml
 #
-# Focused accuracy comparison: PyTorch FP32 baseline vs TVM INT8 and
-# ONNX-Runtime INT8 variants on Jetson Orin Nano (COCO val).
+# Focused accuracy comparison: PyTorch FP32 baseline vs TensorRT INT8/FP16,
+# TVM INT8 and ONNX-Runtime INT8 variants on Jetson Orin Nano (COCO val).
+#
+# TRT engines must be built first with build_trt_engine.py.
+# Requires pycuda (for kind: trt_engine); install if missing:
+#   pip install pycuda
 #
 # Prerequisites:
 #   1. Generate the TVM INT8 .so first:
@@ -73,6 +77,26 @@ backends:
   - name: ort_int8_qdq_10pct
     kind: ort
     model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_10percent_coco.onnx
+    device: cuda:0
+
+  # ── TensorRT FP32 (native engine built by build_trt_engine.py) ───────────
+  - name: trt_fp32
+    kind: trt_engine
+    model: models/tensorrt_exports/yolov8n_fp32.engine
+    device: cuda:0
+
+  # ── TensorRT FP16 (native engine built by build_trt_engine.py) ───────────
+  - name: trt_fp16
+    kind: trt_engine
+    model: models/tensorrt_exports/yolov8n_fp16.engine
+    device: cuda:0
+
+  # ── TensorRT INT8 (native engine, 1% COCO calibration) ───────────────────
+  # Built with: python src/optimizer/quantization/build_trt_engine.py
+  #   --precision int8 --calib-dir datasets/coco_subset/train_1percent/images
+  - name: trt_int8
+    kind: trt_engine
+    model: models/tensorrt_exports/yolov8n_int8.engine
     device: cuda:0
 
   # ── TVM GPU INT8 via QDQ ONNX (compile_tvm_int8.py) ──────────────────────
