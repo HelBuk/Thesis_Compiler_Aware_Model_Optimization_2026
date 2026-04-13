@@ -30,6 +30,8 @@
 \usepackage{tikz}
 \usepackage{pgfplots}
 \pgfplotsset{compat=1.18}
+\usepackage[backend=biber,style=numeric,url=true]{biblatex}
+\addbibresource{refs.bib}
 \usepackage[acronym]{glossaries}
 \makeglossaries
 \lstdefinelanguage{json}{
@@ -621,9 +623,8 @@ Stages:
 \section{Quantization and mixed precision}
 \section{Pruning and structural simplification}
 
-    In a survey ~\cite{vadera2022methods} authors categorized over 150 studies of pruning
-    neural networks.
-    They chose 8 categories:
+    We can categorize studies of pruning
+    neural networks into 8 categories:
         \begin{itemize}
             \item \textbf{Sensitivity analysis methods (loss / gradient–aware pruning)}. These methods are
                 valuable as they prune what matters the most for the task and normally provide the
@@ -3197,8 +3198,9 @@ compiler-driven optimizations to better exploit the available GPU hardware resou
 
 % ======= References (Referanseliste) =======
 
-\bibliographystyle{ieeetr}  % or plain, unsrt, abbrv, IEEEtran, etc.
-\bibliography{refs}
+%\bibliographystyle{ieeetr}  % or plain, unsrt, abbrv, IEEEtran, etc.
+%\bibliography{refs}
+\printbibliography
 
 \cleardoublepage
 
