@@ -230,11 +230,13 @@ def build_engine(
     if serialized is None:
         raise RuntimeError("build_serialized_network returned None — check VERBOSE log above")
     elapsed = time.perf_counter() - t0
-    _log(f"Build complete in {elapsed:.1f}s  ({len(serialized) / 1e6:.1f} MB)")
+    # IHostMemory exposes .nbytes; convert to memoryview for file I/O
+    _log(f"Build complete in {elapsed:.1f}s  ({serialized.nbytes / 1e6:.1f} MB)")
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(serialized)
+    with open(out, "wb") as f:
+        f.write(memoryview(serialized))
     _log(f"Engine saved → {out}")
 
     # Quick deserialisation check — same as _worker_trt does at benchmark time
