@@ -111,6 +111,14 @@
 \newcommand{\ReportSubtitle}{}
 \newcommand{\CourseCode}{TTK4900 Master's Thesis}
 \newcommand{\ThesisDescription}{
+    Efficient deployment of deep learning models on embedded and edge platforms depends on
+    both model-level and system-level factors. In addition to model design, inference
+    performance is influenced by compiler support, runtime behavior, hardware
+    characteristics, numerical precision, and optimization techniques such as quantizatio
+    n and pruning. This thesis studies compiler-aware model optimization for edge AI,
+    with focus on real-time object detection. The aim is to evaluate how different
+    deployment configurations affect accuracy, latency, and resource usage, and to
+    identify the main bottlenecks that limit efficient execution on target hardware.
 }
 \newcommand{\TaskOne}{
     Develop a framework for evaluating deep learning models across deployment configurations in terms of accuracy, latency, and resource usage.
@@ -158,22 +166,22 @@
 
     \noindent
     \begin{tabular}{@{}p{4.5cm}p{12cm}@{}}
-        \textbf{Candidate:}              & \textbf{\AuthorName} \\[0.2cm]
-        \textbf{Course:}                & \textbf{\CourseCode} \\[0.4cm]
-        \textbf{Title (English):}   & \textbf{\ThesisTitleEng} \\[0.2cm]
-        \textbf{Title (Norwegian):} & \textbf{\ThesisTitleNor} \\[0.6cm]
+        \textbf{Candidate:}              & \textbf{\AuthorName} \\[0.1cm]
+        \textbf{Course:}                & \textbf{\CourseCode} \\[0.2cm]
+        \textbf{Title (English):}   & \textbf{\ThesisTitleEng} \\[0.1cm]
+        \textbf{Title (Norwegian):} & \textbf{\ThesisTitleNor} \\[0.4cm]
         \textbf{Thesis description:}     & \ThesisDescription \\[0.9cm]
         \textbf{The tasks will be:}      &
           \begin{minipage}[t]{10cm}
             \begin{enumerate}
               \item \TaskOne
               \item \TaskTwo
-              \item \TaskThree \\[0.5cm]
+              \item \TaskThree \\[0.1cm]
             \end{enumerate}
           \end{minipage} \\
-        \textbf{Start date:}             & \StartDate \\[0.2cm]
-        \textbf{Due date:}               & \DueDate \\[0.2cm]
-        \textbf{Thesis performed at:}    & \ThesisLocation \\[0.2cm]
+        \textbf{Start date:}             & \StartDate \\[0.1cm]
+        \textbf{Due date:}               & \DueDate \\[0.1cm]
+        \textbf{Thesis performed at:}    & \ThesisLocation \\[0.1cm]
         \textbf{Supervisor:}             & \SupervisorName \\
     \end{tabular}
 
@@ -2654,11 +2662,151 @@ FP16 precision. This finding has a direct practical implication: deploying
 FP16 models on edge CPU platforms without a compilation-based inference
 engine yields no latency benefit and may cause severe degradation.
 
-\section{Accuracy Influence of the alternative Frameworks Usage and conversion to FP16}
+\section{Accuracy Comparison Across Inference Frameworks}
+\label{sec:accuracy_comparison_frameworks}
+
+To verify that different inference frameworks preserve the predictive quality of the original model, YOLOv8n was
+evaluated across several backends and compared against the default PyTorch eager FP32 implementation. Since large
+multi-backend evaluation is memory-intensive, especially when repeatedly loading different runtimes and exported
+artifacts, the comparison was performed on a 1000-image subset of the validation set rather than on the full
+validation split. Although smaller than the full COCO validation set, this subset is sufficient to determine whether
+export, compilation, or reduced precision introduce any meaningful degradation in detection quality.
+
+All backends were evaluated using the same basic setup: image size $640 \times 640$, batch size $1$, confidence
+threshold $0.001$, IoU threshold $0.7$, and maximum number of detections $300$. Each backend was loaded and evaluated
+sequentially in isolation in order to reduce memory pressure and avoid interference between runtime environments.
+
+Because the GPU-oriented and CPU-oriented backends were evaluated in separate comparison runs, they are presented
+separately below. The small difference between the corresponding PyTorch FP32 baseline values should therefore be
+interpreted as run-to-run variation rather than as a framework effect.
+
+\subsubsection{GPU-Oriented Backends}
+
+The GPU-side comparison included PyTorch eager FP32/FP16, ONNX Runtime CUDA FP32/FP16, TensorRT FP32/FP16, and
+TVM GPU FP32/FP16. Absolute results are shown in Table~\ref{tab:acc_abs_gpu_backends}, and relative changes with
+respect to the PyTorch eager FP32 baseline of the same run are given in Table~\ref{tab:acc_rel_gpu_backends}.
+
+\begin{table}[ht]
+\centering
+\caption{Absolute detection metrics for GPU-oriented backends on 1000 validation images.}
+\label{tab:acc_abs_gpu_backends}
+\begin{tabular}{lcccc}
+\toprule
+Backend & Precision & Recall & mAP50 & mAP50--95 \\
+\midrule
+PyTorch eager FP32     & 0.6299 & 0.4878 & 0.5384 & 0.3899 \\
+PyTorch eager FP16     & 0.6301 & 0.4880 & 0.5385 & 0.3898 \\
+ONNX Runtime FP32      & 0.6283 & 0.4905 & 0.5386 & 0.3899 \\
+ONNX Runtime FP16      & 0.6300 & 0.4888 & 0.5387 & 0.3900 \\
+TensorRT FP32          & 0.6282 & 0.4893 & 0.5385 & 0.3899 \\
+TensorRT FP16          & 0.6248 & 0.4907 & 0.5385 & 0.3901 \\
+TVM GPU FP32           & 0.6319 & 0.4889 & 0.5390 & 0.3899 \\
+TVM GPU FP16           & 0.6290 & 0.4893 & 0.5381 & 0.3894 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Relative changes (\%) for GPU-oriented backends with respect to PyTorch eager FP32.}
+\label{tab:acc_rel_gpu_backends}
+\begin{tabular}{lcccc}
+\toprule
+Backend & $\Delta$ Precision (\%) & $\Delta$ Recall (\%) & $\Delta$ mAP50 (\%) & $\Delta$ mAP50--95 (\%) \\
+\midrule
+PyTorch eager FP16     & +0.03 & +0.03 & +0.02 & -0.01 \\
+ONNX Runtime FP32 & -0.25 & +0.54 & +0.05 & +0.02 \\
+ONNX Runtime FP16 & +0.02 & +0.19 & +0.06 & +0.02 \\
+TensorRT FP32          & -0.27 & +0.30 & +0.02 & +0.01 \\
+TensorRT FP16          & -0.81 & +0.58 & +0.03 & +0.07 \\
+TVM GPU FP32           & +0.32 & +0.23 & +0.12 & +0.00 \\
+TVM GPU FP16           & -0.14 & +0.29 & -0.05 & -0.12 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The GPU results show that all backends preserved accuracy very well. The observed changes in mAP50 and mAP50--95 were
+very small, indicating that export to ONNX Runtime, TensorRT, and TVM did not introduce any practically meaningful
+loss in detector quality. FP16 also remained stable overall. PyTorch FP16, ONNX Runtime CUDA FP16, and TensorRT FP16
+all stayed extremely close to the FP32 baseline. TVM GPU FP16 showed the largest negative deviation on the GPU side,
+but the absolute change remained small.
+
+\subsubsection{CPU-Oriented Backends}
+
+A separate CPU-side comparison included PyTorch eager FP32/FP16, ONNX Runtime CPU, TFLite CPU FP32/FP16, and
+TVM CPU FP32/FP16. Absolute results are shown in Table~\ref{tab:acc_abs_cpu_backends}, and relative changes with
+respect to the PyTorch eager FP32 baseline of that run are shown in Table~\ref{tab:acc_rel_cpu_backends}.
+
+\begin{table}[ht]
+\centering
+\caption{Absolute detection metrics for CPU-oriented backends on 1000 validation images.}
+\label{tab:acc_abs_cpu_backends}
+\begin{tabular}{lcccc}
+\toprule
+Backend & Precision & Recall & mAP50 & mAP50--95 \\
+\midrule
+PyTorch eager FP32  & 0.6291 & 0.4884 & 0.5384 & 0.3898 \\
+PyTorch eager FP16  & 0.6291 & 0.4884 & 0.5384 & 0.3898 \\
+ONNX Runtime CPU    & 0.6291 & 0.4884 & 0.5384 & 0.3898 \\
+TFLite FP32 CPU     & 0.6291 & 0.4884 & 0.5384 & 0.3898 \\
+TFLite FP16 CPU     & 0.6276 & 0.4905 & 0.5384 & 0.3899 \\
+TVM CPU FP32        & 0.6291 & 0.4884 & 0.5384 & 0.3898 \\
+TVM CPU FP16        & 0.6280 & 0.4894 & 0.5395 & 0.3900 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Relative changes (\%) for CPU-oriented backends with respect to PyTorch eager FP32.}
+\label{tab:acc_rel_cpu_backends}
+\begin{tabular}{lcccc}
+\toprule
+Backend & $\Delta$ Precision (\%) & $\Delta$ Recall (\%) & $\Delta$ mAP50 (\%) & $\Delta$ mAP50--95 (\%) \\
+\midrule
+PyTorch eager FP16 & +0.00 & +0.00 & +0.00 & +0.00 \\
+ONNX Runtime CPU   & -0.00 & +0.00 & +0.00 & +0.00 \\
+TFLite FP32 CPU    & -0.00 & -0.00 & +0.00 & +0.00 \\
+TFLite FP16 CPU    & -0.24 & +0.43 & +0.00 & +0.03 \\
+TVM CPU FP32       & -0.00 & -0.00 & +0.00 & +0.00 \\
+TVM CPU FP16       & -0.17 & +0.20 & +0.20 & +0.06 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The CPU results are similarly stable. PyTorch FP16, ONNX Runtime CPU, TFLite FP32 CPU, and TVM CPU FP32 reproduced
+the PyTorch FP32 baseline almost exactly. TFLite FP16 and TVM CPU FP16 introduced small shifts in the balance
+between precision and recall, but the aggregate mAP values remained effectively unchanged. In particular,
+TVM CPU FP16 slightly improved mAP50 and mAP50--95 while slightly reducing precision, again indicating only minor
+numerical variation rather than a meaningful change in model behavior.
+
+\subsubsection{Discussion}
+
+Across both GPU and CPU experiments, no framework caused a significant drop in detection quality. The most important
+result is that mAP50 and especially mAP50--95 remained very close to the corresponding PyTorch eager FP32 baselines
+in all successful runs. This shows that the predictive behavior of YOLOv8n is preserved well across
+the evaluated deployment frameworks.
+
+Because all backends execute the same trained model, the remaining small differences should not be interpreted
+as one framework being inherently more accurate than another. Instead, they are better explained by runtime-dependent
+numerical variation. Different inference frameworks may use different kernel implementations, operator fusion patterns,
+accumulation orders, and precision conversion paths. In object detection, even tiny numerical differences can slightly
+shift confidence scores or bounding box coordinates, which may then change whether a detection is kept or removed
+during thresholding and non-maximum suppression. This explains the recurring pattern that some FP16 configurations
+slightly reduce precision while slightly increasing recall, without materially changing the overall mAP.
+
+Overall, these results indicate that framework conversion and mixed-precision inference do not meaningfully
+degrade YOLOv8n accuracy in the evaluated setups. This justifies focusing the later comparison primarily on latency,
+throughput, and hardware efficiency, since accuracy was effectively preserved across both GPU-oriented and
+CPU-oriented backends.
 
 
 
 \section{Quantization Influence on YOLOv8n}
+
+Despite the idea of quantization being rather simple and the amount of research being present in the recent years,
+plactical quantisation remains a complex problem. A lot of already mentioned frameworks like TVM or ONNX do not
+provide support for the efficient quantization. At least in the version of 0.24.dev0.
 
 
 Statistical significance was evaluated with a paired bootstrap test on validation images (1000 resamples), and
@@ -2739,6 +2887,15 @@ Although these settings improve peak performance, they are not always appropriat
 
 A practical approach is to enable them for controlled benchmarking and disable them for routine development or
 power-constrained deployment.
+
+\section{Evaluation of YOLOv8n Pruning}
+
+The main caveat is that once YOLOv8n is converted into a TensorRT engine,
+TensorRT may fuse layers, insert reformats, and choose different
+kernels/tactics. So the “slow part” you see in TensorRT is not always
+a 1:1 match with the original YOLO PyTorch layers. NVIDIA explicitly
+notes that each TensorRT layer can launch multiple kernels, and extra
+reformat operations may appear as kernels or device-to-device copies.
 
 
 \section{GPU Kernel-Level Performance Analysis}
@@ -2997,17 +3154,8 @@ Future work should focus on reducing tensor layout conversion overhead, improvin
 compiler-driven optimizations to better exploit the available GPU hardware resources.
 
 
-
-\section{YOLO pruning}
-
-The main caveat is that once YOLOv8n is converted into a TensorRT engine,
-TensorRT may fuse layers, insert reformats, and choose different
-kernels/tactics. So the “slow part” you see in TensorRT is not always
-a 1:1 match with the original YOLO PyTorch layers. NVIDIA explicitly
-notes that each TensorRT layer can launch multiple kernels, and extra
-reformat operations may appear as kernels or device-to-device copies. 
-
-
+\section{Design and Implementation of a TensorRT Plugin for the C2f Block}
+\section{Evaluation of Activation Function Simplification: SiLU vs.\ ReLU}
 
 % Tables, figures; explain what the numbers mean.
 
