@@ -461,7 +461,17 @@ def _worker_pytorch(cfg_raw: dict, runs: int, warmup: int) -> None:
     batch = cfg_raw["model"].get("batch", 1)
     imgsz = cfg_raw["model"].get("imgsz", 640)
 
-    model = YOLO(cfg_raw["model"]["pt_path"]).model.eval().to(device)
+    # Guard: Ultralytics silently downloads a model from the internet when the
+    # path does not exist (it treats the filename as a model identifier).
+    # Fail loudly here so the benchmark always uses the exact intended weights.
+    pt_path = cfg_raw["model"]["pt_path"]
+    if not __import__("os").path.isfile(pt_path):
+        print(json.dumps({"error": f"PyTorch model not found: {pt_path}  "
+                                   f"(Ultralytics would silently download — refusing to proceed)"}),
+              file=__import__("sys").stderr)
+        raise SystemExit(1)
+
+    model = YOLO(pt_path).model.eval().to(device)
     if precision == "fp16":
         model = model.half()
     x = torch.randn(batch, 3, imgsz, imgsz, dtype=torch_dtype, device=device)
@@ -533,7 +543,14 @@ def _worker_torch_compile(cfg_raw: dict, runs: int, warmup: int) -> None:
     batch = cfg_raw["model"].get("batch", 1)
     imgsz = cfg_raw["model"].get("imgsz", 640)
 
-    model = YOLO(cfg_raw["model"]["pt_path"]).model.eval().to(device)
+    pt_path = cfg_raw["model"]["pt_path"]
+    if not __import__("os").path.isfile(pt_path):
+        print(json.dumps({"error": f"PyTorch model not found: {pt_path}  "
+                                   f"(Ultralytics would silently download — refusing to proceed)"}),
+              file=__import__("sys").stderr)
+        raise SystemExit(1)
+
+    model = YOLO(pt_path).model.eval().to(device)
     if precision == "fp16":
         model = model.half()
     x = torch.randn(batch, 3, imgsz, imgsz, dtype=torch_dtype, device=device)
