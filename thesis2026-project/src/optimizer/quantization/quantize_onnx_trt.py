@@ -44,13 +44,14 @@ from onnxruntime.quantization import (
 # Image preprocessing (letterbox, same as YOLOv8 / build_trt_engine.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
+_BILINEAR = getattr(Image, "Resampling", Image).BILINEAR  # Pillow ≥9.1 / <9.1
+
+
 def _letterbox(img: np.ndarray, target: int = 640) -> np.ndarray:
     h, w = img.shape[:2]
     scale = target / max(h, w)
     nh, nw = int(round(h * scale)), int(round(w * scale))
-    resized = np.array(
-        Image.fromarray(img).resize((nw, nh), Image.Resampling.BILINEAR)
-    )
+    resized = np.array(Image.fromarray(img).resize((nw, nh), _BILINEAR))
     canvas = np.full((target, target, 3), 114, dtype=np.uint8)
     dh, dw = (target - nh) // 2, (target - nw) // 2
     canvas[dh:dh + nh, dw:dw + nw] = resized
