@@ -110,85 +110,93 @@ class LazyImageReader(CalibrationDataReader):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _remove_bias_qdq(model: onnx.ModelProto) -> onnx.ModelProto:
+    """Remove DequantizeLinear (and optional preceding QuantizeLinear) nodes
+    that wrap bias tensors (1-D initializers).
+
+    ORT uses two patterns for bias quantization:
+      Pattern A — FP32 bias: fp32_init → QuantizeLinear → DequantizeLinear → Conv
+      Pattern B — INT32 bias: int32_init → DequantizeLinear → Conv
+                  (ORT pre-multiplies scale so bias is already in INT32; no Q node)
+
+    TRT rejects both because it does not support quantized biases at all.
+    Pattern A: rewire Conv directly to the original FP32 initializer.
+    Pattern B: dequantize the INT32 values back to FP32 and insert a new
+               FP32 initializer.
+    """
+    import onnx.numpy_helper as nph
+
     graph = model.graph
+    init_map  = {init.name: init for init in graph.initializer}
+    init_rank = {init.name: len(init.dims) for init in graph.initializer}
 
-    # Build lookup: tensor_name → initializer
-    init_map = {init.name: init for init in graph.initializer}
-
-    # Build lookup: output_name → node  (for tracing Q/DQ chains)
     output_to_node: dict[str, onnx.NodeProto] = {}
     for node in graph.node:
         for out in node.output:
             output_to_node[out] = node
 
-    # Collect names of all 1-D initializers (biases are always rank-1)
-    bias_init_names: set[str] = {
-        init.name
-        for init in graph.initializer
-        if len(init.dims) == 1
-    }
-
-    # For Conv/Gemm/ConvTranspose nodes, bias is input index 2.
-    # Walk: bias_input → DequantizeLinear → QuantizeLinear → original_init
-    # We want to replace the DQ output consumed by the op with the original init.
-    nodes_to_remove: set[str] = set()   # node names/ids to drop
-    remap: dict[str, str] = {}          # old_tensor → original_init_name
+    nodes_to_remove: set[int] = set()
+    remap: dict[str, str] = {}       # dq_output → replacement_init_name
+    new_inits: list = []
 
     for node in graph.node:
-        if node.op_type not in ("Conv", "ConvTranspose", "Gemm"):
-            continue
-        if len(node.input) < 3 or not node.input[2]:
+        if node.op_type != "DequantizeLinear":
             continue
 
-        bias_input = node.input[2]
+        dq_in    = node.input[0]
+        dq_scale = node.input[1] if len(node.input) > 1 else None
+        dq_zp    = node.input[2] if len(node.input) > 2 else None
+        dq_out   = node.output[0]
 
-        # Check if bias_input comes from a DequantizeLinear node
-        dq_node = output_to_node.get(bias_input)
-        if dq_node is None or dq_node.op_type != "DequantizeLinear":
+        # ── Pattern A: FP32_init → QuantizeLinear → (dq_in) → DequantizeLinear ──
+        q_node = output_to_node.get(dq_in)
+        if q_node is not None and q_node.op_type == "QuantizeLinear":
+            orig = q_node.input[0]
+            if init_rank.get(orig, -1) == 1:          # 1-D → bias
+                nodes_to_remove.add(id(node))
+                nodes_to_remove.add(id(q_node))
+                remap[dq_out] = orig
+                continue
+
+        # ── Pattern B: INT32/INT8_init → DequantizeLinear directly ──────────────
+        if init_rank.get(dq_in, -1) != 1:
+            continue                                   # not a 1-D bias initializer
+
+        scale_init = init_map.get(dq_scale) if dq_scale else None
+        if scale_init is None:
             continue
 
-        # The DQ node's first input should come from a QuantizeLinear node
-        q_input = dq_node.input[0]
-        q_node = output_to_node.get(q_input)
-        if q_node is None or q_node.op_type != "QuantizeLinear":
-            continue
+        q_arr  = nph.to_array(init_map[dq_in]).astype(np.float64)
+        s_arr  = nph.to_array(scale_init).astype(np.float64)
+        zp_arr = (nph.to_array(init_map[dq_zp]).astype(np.float64)
+                  if dq_zp and dq_zp in init_map else np.zeros(1, np.float64))
 
-        # The Q node's first input should be the original bias initializer
-        orig_bias = q_node.input[0]
-        if orig_bias not in bias_init_names:
-            continue
+        fp32_bias = ((q_arr - zp_arr) * s_arr).astype(np.float32)
+        fp32_name = dq_in + "_fp32_bias"
+        new_inits.append(onnx.numpy_helper.from_array(fp32_bias, name=fp32_name))
 
-        # Mark this QDQ pair for removal and record the remap
-        nodes_to_remove.add(id(dq_node))
-        nodes_to_remove.add(id(q_node))
-        remap[bias_input] = orig_bias
+        nodes_to_remove.add(id(node))
+        remap[dq_out] = fp32_name
 
     if not remap:
-        return model   # nothing to do
+        print("[strip_bias_qdq] no bias DQ nodes found — check graph structure")
+        return model
 
-    # Apply remap to all nodes that consume the DQ output
+    # Rewire consumers
     for node in graph.node:
         for i, inp in enumerate(node.input):
             if inp in remap:
                 node.input[i] = remap[inp]
 
-    # Remove the QDQ nodes
+    # Drop removed nodes
     new_nodes = [n for n in graph.node if id(n) not in nodes_to_remove]
     del graph.node[:]
     graph.node.extend(new_nodes)
 
-    # Remove the Q/DQ scale+zeropoint initializers that are now orphaned
-    # (keep the original bias initializers)
-    still_used: set[str] = set()
-    for node in graph.node:
-        still_used.update(node.input)
-    new_inits = [init for init in graph.initializer if init.name in still_used
-                 or init.name in bias_init_names]
-    del graph.initializer[:]
+    # Add dequantized FP32 bias initializers
     graph.initializer.extend(new_inits)
 
-    removed_pairs = len(nodes_to_remove) // 2
-    print(f"[strip_bias_qdq] removed {removed_pairs} QDQ pairs from bias tensors")
+    print(f"[strip_bias_qdq] rewired {len(remap)} bias tensors "
+          f"({len(nodes_to_remove)} Q/DQ nodes removed)")
     return model
 
 
