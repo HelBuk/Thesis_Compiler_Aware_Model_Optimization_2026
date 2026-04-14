@@ -24,7 +24,7 @@
 #       --max_batches 200
 
 comparison:
-  data: datasets/coco/data.yaml          # Ultralytics dataset YAML (val split)
+  data: ../datasets/coco/data.yaml          # Ultralytics dataset YAML (val split)
   imgsz: 640
   batch: 1
   conf: 0.001                            # low conf for official mAP evaluation
@@ -32,71 +32,71 @@ comparison:
   max_det: 300
   max_batches: 0                         # 0 = full val (~5000 images)
   workers: 0
-  project: src/optimizer/evaluation/runs/accuracy_int8_vs_fp32
+  project: optimizer/evaluation/runs/accuracy_int8_vs_fp32
   save_json: true
   save_txt: false
   plots: false
-  output_json: src/optimizer/evaluation/runs/accuracy_int8_vs_fp32/results.json
+  output_json: optimizer/evaluation/runs/accuracy_int8_vs_fp32/results.json
 
 backends:
 
   # ── Baseline: PyTorch FP32 ────────────────────────────────────────────────
   - name: pytorch_fp32
     kind: torch
-    model: models/yolov8n.pt
+    model: ../models/yolov8n.pt
     device: cuda:0
     baseline: true
 
   # ── ORT CUDA FP32 (sanity check against PyTorch baseline) ─────────────────
-  - name: ort_fp32
-    kind: ort
-    model: models/quantized_models/onnx/yolov8n_opset17_fp32.onnx
-    device: cuda:0
+  # - name: ort_fp32
+  #   kind: ort
+  #   model: models/quantized_models/onnx/yolov8n_opset17_fp32.onnx
+  #   device: cuda:0
 
   # ── TVM GPU FP32 (compiled .so — verify no TVM compilation accuracy loss) ──
-  - name: tvm_fp32
-    kind: tvm
-    model: models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v6.so
-    device: cuda:0
-    tvm_device_type: cuda
-    tvm_input_dtype: float32
+  # - name: tvm_fp32
+  #   kind: tvm
+  #   model: models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v6.so
+  #   device: cuda:0
+  #   tvm_device_type: cuda
+  #   tvm_input_dtype: float32
 
   # ── ORT CUDA INT8 — QDQ 1% COCO calibration ───────────────────────────────
-  - name: ort_int8_qdq_1pct
-    kind: ort
-    model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx
-    device: cuda:0
+  # - name: ort_int8_qdq_1pct
+  #   kind: ort
+  #   model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx
+  #   device: cuda:0
 
   # ── ORT CUDA INT8 — QDQ 0.1% COCO calibration ────────────────────────────
-  - name: ort_int8_qdq_0_1pct
-    kind: ort
-    model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_0_1percent_coco.onnx
-    device: cuda:0
+  # - name: ort_int8_qdq_0_1pct
+  #   kind: ort
+  #   model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_0_1percent_coco.onnx
+  #   device: cuda:0
 
   # ── ORT CUDA INT8 — QDQ 10% COCO calibration ─────────────────────────────
-  - name: ort_int8_qdq_10pct
-    kind: ort
-    model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_10percent_coco.onnx
-    device: cuda:0
+  # - name: ort_int8_qdq_10pct
+  #   kind: ort
+  #   model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_10percent_coco.onnx
+  #   device: cuda:0
 
   # ── TensorRT FP32 (native engine built by build_trt_engine.py) ───────────
   - name: trt_fp32
     kind: trt_engine
-    model: models/tensorrt_exports/yolov8n_fp32.engine
+    model: ../models/tensorrt_exports/yolov8n_fp32_trt.engine
     device: cuda:0
 
   # ── TensorRT FP16 (native engine built by build_trt_engine.py) ───────────
-  - name: trt_fp16
-    kind: trt_engine
-    model: models/tensorrt_exports/yolov8n_fp16.engine
-    device: cuda:0
+  # - name: trt_fp16
+  #   kind: trt_engine
+  #   model: models/tensorrt_exports/yolov8n_fp16.engine
+  #   device: cuda:0
 
   # ── TensorRT INT8 (native engine, 1% COCO calibration) ───────────────────
   # Built with: python src/optimizer/quantization/build_trt_engine.py
   #   --precision int8 --calib-dir datasets/coco_subset/train_1percent/images
   - name: trt_int8
     kind: trt_engine
-    model: models/tensorrt_exports/yolov8n_int8.engine
+    model: ../models/tensorrt_exports/yolov8n_int8_pinned_layers.engine
     device: cuda:0
 
   # ── TVM GPU INT8 via QDQ ONNX (compile_tvm_int8.py) ──────────────────────
