@@ -865,6 +865,9 @@ def parse_args() -> argparse.Namespace:
 
     ap.add_argument("--config", metavar="YAML",
                     help="Path to YAML comparison config (recommended)")
+    ap.add_argument("--backends", nargs="+", metavar="NAME", default=None,
+                    help="Run only these backend names (by 'name:' field in YAML). "
+                         "Useful for re-running a single backend without editing the YAML.")
 
     # Dataset / eval settings (CLI override or standalone)
     ap.add_argument("--data", help="Path to Ultralytics dataset YAML (e.g. coco.yaml)")
@@ -1014,6 +1017,16 @@ def main() -> None:
 
     if not cfg.backends:
         raise SystemExit("No backends defined. Check your config or --backend flags.")
+
+    # --backends filter: run only the named subset
+    if getattr(args, "backends", None):
+        allowed = set(args.backends)
+        unknown = allowed - {s.name for s in cfg.backends}
+        if unknown:
+            raise SystemExit(f"--backends: unknown backend name(s): {sorted(unknown)}\n"
+                             f"Available: {[s.name for s in cfg.backends]}")
+        cfg.backends = [s for s in cfg.backends if s.name in allowed]
+        print(f"[INFO] --backends filter active: running {[s.name for s in cfg.backends]}")
 
     if cfg.baseline not in {s.name for s in cfg.backends}:
         cfg.baseline = cfg.backends[0].name
