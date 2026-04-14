@@ -168,7 +168,15 @@ def build_engine(
     calib_dir: str | None,
     calib_cache: str,
     n_calib: int,
+    fp32_layer_keywords: list[str] | None = None,
 ) -> None:
+    """Build and serialize a TensorRT engine.
+
+    fp32_layer_keywords: list of substrings; any layer whose name contains one
+    of these strings is forced to FP32 precision.  Use this to keep sensitive
+    layers (e.g. the YOLO detect head "/model.22/") in FP32 while quantizing
+    the backbone/neck.  Default: ["/model.22/"] when precision="int8".
+    """
     _log(f"TensorRT {trt.__version__}  precision={precision}  onnx={onnx_path}")
 
     logger  = trt.Logger(trt.Logger.VERBOSE)
@@ -224,6 +232,21 @@ def build_engine(
         )
         config.int8_calibrator = calibrator
         _log(f"INT8 calibrator set  n_images={n_calib}  cache={calib_cache}")
+
+        # Per-layer FP32 override — keeps the detect head in FP32 to prevent
+        # recall collapse from quantization noise near the conf threshold.
+        if fp32_layer_keywords is None:
+            fp32_layer_keywords = ["/model.22/"]   # YOLOv8 Detect head default
+
+        if fp32_layer_keywords:
+            pinned = 0
+            for i in range(network.num_layers):
+                layer = network.get_layer(i)
+                if any(kw in layer.name for kw in fp32_layer_keywords):
+                    layer.precision = trt.DataType.FLOAT
+                    layer.set_output_type(0, trt.DataType.FLOAT)
+                    pinned += 1
+            _log(f"Pinned {pinned} layers to FP32 (keywords: {fp32_layer_keywords})")
 
     # Optimisation profile for dynamic batch/shape axes (if any)
     profile = builder.create_optimization_profile()
@@ -282,6 +305,10 @@ def parse_args() -> argparse.Namespace:
                     help="Path to read/write calibration cache")
     ap.add_argument("--n-calib", type=int, default=200,
                     help="Number of calibration images (default: 200)")
+    ap.add_argument("--fp32-layers", nargs="*", default=None, metavar="KEYWORD",
+                    help="Layer name substrings to force FP32 (INT8 only). "
+                         "Default: ['/model.22/'] (YOLO detect head). "
+                         "Pass --fp32-layers '' to disable (quantize everything).")
     return ap.parse_args()
 
 
@@ -290,6 +317,10 @@ def main() -> None:
 
     if not os.path.isfile(args.onnx):
         sys.exit(f"ONNX file not found: {args.onnx}")
+
+    # --fp32-layers with no values → empty list → disable pinning entirely
+    # --fp32-layers not given → None → use default ["/model.22/"]
+    fp32_kws = args.fp32_layers  # None | [] | [str, ...]
 
     build_engine(
         onnx_path=args.onnx,
@@ -301,6 +332,7 @@ def main() -> None:
         calib_dir=args.calib_dir,
         calib_cache=args.calib_cache,
         n_calib=args.n_calib,
+        fp32_layer_keywords=fp32_kws,
     )
 
 
