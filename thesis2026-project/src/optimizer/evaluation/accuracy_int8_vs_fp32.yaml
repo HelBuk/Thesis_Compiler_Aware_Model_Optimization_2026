@@ -91,12 +91,24 @@ backends:
   #   model: models/tensorrt_exports/yolov8n_fp16.engine
   #   device: cuda:0
 
-  # ── TensorRT INT8 (native engine, 1% COCO calibration) ───────────────────
-  # Built with: python src/optimizer/quantization/build_trt_engine.py
-  #   --precision int8 --calib-dir datasets/coco_subset/train_1percent/images
-  - name: trt_int8
+  # ── TensorRT INT8 implicit calibration (deprecated TRT 10.x path) ────────
+  # Kept for comparison only — expect ~10% mAP drop.
+  # - name: trt_int8_implicit
+  #   kind: trt_engine
+  #   model: ../models/tensorrt_exports/yolov8n_int8_pinned_layers.engine
+  #   device: cuda:0
+
+  # ── TensorRT INT8 via QDQ ONNX (TRT 10.x explicit quantization) ──────────
+  # TRT fuses QDQ pairs into native INT8 kernels; detect head stays FP32
+  # automatically (ONNX quantizer never placed QDQ nodes there).
+  # Build with:
+  #   python src/optimizer/quantization/build_trt_engine.py \
+  #     --onnx ../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx \
+  #     --output ../models/tensorrt_exports/yolov8n_int8_qdq.engine \
+  #     --precision int8
+  - name: trt_int8_qdq
     kind: trt_engine
-    model: ../models/tensorrt_exports/yolov8n_int8_pinned_layers.engine
+    model: ../models/tensorrt_exports/yolov8n_int8_qdq.engine
     device: cuda:0
 
   # ── TVM GPU INT8 via QDQ ONNX (compile_tvm_int8.py) ──────────────────────

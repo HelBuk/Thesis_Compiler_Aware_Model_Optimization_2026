@@ -220,49 +220,59 @@ def build_engine(
             _log("WARNING: platform does not report fast INT8 — building anyway")
         config.set_flag(trt.BuilderFlag.INT8)
 
-        if calib_dir is None:
-            raise ValueError("--calib-dir is required for INT8 precision")
+        if calib_dir is not None:
+            # Implicit calibration path (deprecated in TRT 10.1, use QDQ ONNX instead).
+            # Only used when the input ONNX has no QDQ nodes.
+            _log("WARNING: implicit INT8 calibration is deprecated in TRT 10.1+. "
+                 "Prefer passing a QDQ ONNX (--onnx yolov8n_int8_QDQ.onnx) "
+                 "and omitting --calib-dir.")
+            calibrator = TorchEntropyCalibrator(
+                image_dir=calib_dir,
+                cache_file=calib_cache,
+                n_images=n_calib,
+                imgsz=imgsz,
+                batch_size=batch,
+            )
+            config.int8_calibrator = calibrator
+            _log(f"INT8 calibrator set  n_images={n_calib}  cache={calib_cache}")
 
-        calibrator = TorchEntropyCalibrator(
-            image_dir=calib_dir,
-            cache_file=calib_cache,
-            n_images=n_calib,
-            imgsz=imgsz,
-            batch_size=batch,
-        )
-        config.int8_calibrator = calibrator
-        _log(f"INT8 calibrator set  n_images={n_calib}  cache={calib_cache}")
+            # Per-layer FP32 override (implicit path only) — keeps the detect head
+            # in FP32 to prevent recall collapse from quantization noise.
+            if fp32_layer_keywords is None:
+                fp32_layer_keywords = ["/model.22/"]   # YOLOv8 Detect head default
 
-        # Per-layer FP32 override — keeps the detect head in FP32 to prevent
-        # recall collapse from quantization noise near the conf threshold.
-        if fp32_layer_keywords is None:
-            fp32_layer_keywords = ["/model.22/"]   # YOLOv8 Detect head default
-
-        if fp32_layer_keywords:
-            pinned = 0
-            skipped = 0
-            for i in range(network.num_layers):
-                layer = network.get_layer(i)
-                if not any(kw in layer.name for kw in fp32_layer_keywords):
-                    continue
-                # Constant layers with integer weights (shape tensors, indices)
-                # cannot have their precision overridden — skip them.
-                if layer.type == trt.LayerType.CONSTANT:
-                    skipped += 1
-                    continue
-                # Only override output types that are actually float-compatible.
-                try:
-                    layer.precision = trt.DataType.FLOAT
-                    for j in range(layer.num_outputs):
-                        out = layer.get_output(j)
-                        if out.dtype in (trt.DataType.FLOAT, trt.DataType.HALF):
-                            layer.set_output_type(j, trt.DataType.FLOAT)
-                    pinned += 1
-                except Exception as e:
-                    _log(f"  Skipping layer {layer.name!r}: {e}")
-                    skipped += 1
-            _log(f"Pinned {pinned} layers to FP32, skipped {skipped} "
-                 f"(keywords: {fp32_layer_keywords})")
+            if fp32_layer_keywords:
+                pinned = 0
+                skipped = 0
+                for i in range(network.num_layers):
+                    layer = network.get_layer(i)
+                    if not any(kw in layer.name for kw in fp32_layer_keywords):
+                        continue
+                    # Constant layers with integer weights (shape tensors, indices)
+                    # cannot have their precision overridden — skip them.
+                    if layer.type == trt.LayerType.CONSTANT:
+                        skipped += 1
+                        continue
+                    # Only override output types that are actually float-compatible.
+                    try:
+                        layer.precision = trt.DataType.FLOAT
+                        for j in range(layer.num_outputs):
+                            out = layer.get_output(j)
+                            if out.dtype in (trt.DataType.FLOAT, trt.DataType.HALF):
+                                layer.set_output_type(j, trt.DataType.FLOAT)
+                        pinned += 1
+                    except Exception as e:
+                        _log(f"  Skipping layer {layer.name!r}: {e}")
+                        skipped += 1
+                _log(f"Pinned {pinned} layers to FP32, skipped {skipped} "
+                     f"(keywords: {fp32_layer_keywords})")
+        else:
+            # Explicit quantization path (TRT 10.x recommended):
+            # QDQ nodes already in the ONNX encode per-tensor scales.
+            # TRT fuses QuantizeLinear/DequantizeLinear pairs into native INT8 kernels.
+            # Layers without QDQ nodes (e.g. model.22 detect head) stay in FP32.
+            _log("No --calib-dir given — assuming QDQ ONNX (explicit quantization). "
+                 "TRT will fuse QDQ pairs into INT8 ops; unquantized layers stay FP32.")
 
     # Optimisation profile for dynamic batch/shape axes (if any)
     profile = builder.create_optimization_profile()
