@@ -26,8 +26,8 @@ run:
 
 # Primary model — FP32 ONNX used by run.py and _worker_tvm / _worker_ort / _worker_pytorch
 model:
-  onnx_path: "../../../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"
-  pt_path: "../../../models/yolov8n.pt"
+  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"
+  pt_path: "../models/yolov8n.pt"
   imgsz: 640
   batch: 1
 
@@ -56,7 +56,7 @@ tvm:
   num_trials_per_iter: 64
   timeout_builder_s: 300
   timeout_runner_s: 300
-  export_path: "../../../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v6.so"
+  export_path: "../models/compiled_tvm_models/tvm_yolov8n_gpu_one_round_66_tasks_v6.so"
 
 # TVM INT8 compiled .so — used by _worker_tvm_int8 in bench_rigorous
 # Generate this .so with:
@@ -65,10 +65,10 @@ tvm:
 #       --output ../../../models/compiled_tvm_models/yolov8n_orin_gpu_int8_1pct.so \
 #       --db-dir out/tvm_tuning_logs/yolov8n_orin_gpu_int8_v1
 tvm_int8:
-  export_path: "../../../models/compiled_tvm_models/yolov8n_orin_gpu_int8_1pct.so"
+  export_path: "../models/compiled_tvm_models/yolov8n_orin_gpu_int8_1pct.so"
   # onnx_path is optional: used only for input-dtype detection in the worker.
   # For QDQ ONNX the input is always FLOAT32, so this can be omitted.
-  onnx_path: "../../../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx"
+  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx"
 
 # TVM Relay INT8 compiled .so — used by _worker_tvm_relay_int8 in bench_rigorous
 # Generate with:
@@ -78,7 +78,7 @@ tvm_int8:
 #       --output ../../../models/compiled_tvm_models/yolov8n_orin_relay_int8_1pct.so \
 #       --db-dir out/tvm_tuning_logs/yolov8n_relay_int8_v1
 tvm_relay_int8:
-  export_path: "../../../models/compiled_tvm_models/yolov8n_orin_relay_int8_1pct.so"
+  export_path: "../models/compiled_tvm_models/yolov8n_orin_relay_int8_1pct.so"
   input_name: "images"                   # Relay input tensor name from ONNX frontend
 
 tvm_targeted_tuning:
@@ -98,8 +98,8 @@ onnxruntime:
   use_arena: true
 
 tensorrt:
-  engine_path: "./out/trt_cache/trt_current/TensorrtExecutionProvider_TRTKernel_graph_main_graph_12725355770372969813_0_0_sm87.engine"
+  engine_path: "../models/tensorrt_exports/yolov8n_int8_trt.engine" #"./out/trt_cache/trt_current/TensorrtExecutionProvider_TRTKernel_graph_main_graph_12725355770372969813_0_0_sm87.engine"
 
 tflite:
-  model_path: "../../../models/quantized_models/yolov8n_tflite_int8/yolov8n_integer_quant.tflite"
+  model_path: "../models/quantized_models/yolov8n_tflite_int8/yolov8n_integer_quant.tflite"
   threads: 4
