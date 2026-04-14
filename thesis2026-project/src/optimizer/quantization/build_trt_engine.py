@@ -240,13 +240,29 @@ def build_engine(
 
         if fp32_layer_keywords:
             pinned = 0
+            skipped = 0
             for i in range(network.num_layers):
                 layer = network.get_layer(i)
-                if any(kw in layer.name for kw in fp32_layer_keywords):
+                if not any(kw in layer.name for kw in fp32_layer_keywords):
+                    continue
+                # Constant layers with integer weights (shape tensors, indices)
+                # cannot have their precision overridden — skip them.
+                if layer.type == trt.LayerType.CONSTANT:
+                    skipped += 1
+                    continue
+                # Only override output types that are actually float-compatible.
+                try:
                     layer.precision = trt.DataType.FLOAT
-                    layer.set_output_type(0, trt.DataType.FLOAT)
+                    for j in range(layer.num_outputs):
+                        out = layer.get_output(j)
+                        if out.dtype in (trt.DataType.FLOAT, trt.DataType.HALF):
+                            layer.set_output_type(j, trt.DataType.FLOAT)
                     pinned += 1
-            _log(f"Pinned {pinned} layers to FP32 (keywords: {fp32_layer_keywords})")
+                except Exception as e:
+                    _log(f"  Skipping layer {layer.name!r}: {e}")
+                    skipped += 1
+            _log(f"Pinned {pinned} layers to FP32, skipped {skipped} "
+                 f"(keywords: {fp32_layer_keywords})")
 
     # Optimisation profile for dynamic batch/shape axes (if any)
     profile = builder.create_optimization_profile()
