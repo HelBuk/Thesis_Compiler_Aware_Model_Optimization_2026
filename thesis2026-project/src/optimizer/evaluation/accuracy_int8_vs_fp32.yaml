@@ -91,6 +91,23 @@ backends:
   #   model: models/tensorrt_exports/yolov8n_fp16.engine
   #   device: cuda:0
 
+  # ── ORT INT8 QDQ on CUDA (sanity check — ORT runs QDQ ONNX correctly) ─────
+  - name: ort_int8_qdq_1pct
+    kind: ort
+    model: ../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx
+    device: cuda:0
+
+  # ── ORT + TRT EP INT8 (ORT handles QDQ→TRT compatibility internally) ──────
+  # ORT builds and caches a TRT INT8 engine from the QDQ ONNX.
+  # This is the recommended path when native TRT QDQ parsing has issues.
+  - name: ort_trt_int8
+    kind: tensorrt
+    model: ../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx
+    device: cuda:0
+    trt_int8: true
+    trt_engine_cache: true
+    trt_engine_cache_path: ../models/tensorrt_exports/ort_trt_cache
+
   # ── TensorRT INT8 implicit calibration (deprecated TRT 10.x path) ────────
   # Kept for comparison only — expect ~10% mAP drop.
   # - name: trt_int8_implicit
