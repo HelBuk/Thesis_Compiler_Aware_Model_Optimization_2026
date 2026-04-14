@@ -202,6 +202,64 @@ def _remove_bias_qdq(model: onnx.ModelProto) -> onnx.ModelProto:
     return model
 
 
+def _remove_output_qdq(model: onnx.ModelProto) -> onnx.ModelProto:
+    """Remove QuantizeLinear/DequantizeLinear pairs that wrap network outputs.
+
+    TRT may produce wrong values when the final output tensor goes through QDQ
+    nodes (e.g. output0_QuantizeLinear → output0_DequantizeLinear).  Since the
+    consumer (evaluation code) expects raw FP32 values, we rewire graph outputs
+    directly to the tensor that feeds the QDQ pair.
+    """
+    graph = model.graph
+
+    # Names of actual graph outputs
+    output_names = {o.name for o in graph.output}
+
+    out2node: dict[str, onnx.NodeProto] = {}
+    for node in graph.node:
+        for out in node.output:
+            out2node[out] = node
+
+    nodes_to_remove: set[int] = set()
+    # output_value_info name → new upstream tensor name
+    output_remap: dict[str, str] = {}
+
+    for graph_out in graph.output:
+        out_name = graph_out.name
+        dq = out2node.get(out_name)
+        if dq is None or dq.op_type != "DequantizeLinear":
+            continue
+
+        dq_in = dq.input[0]
+        q = out2node.get(dq_in)
+        if q is not None and q.op_type == "QuantizeLinear":
+            # Q→DQ pair: rewire output to Q's input (the pre-quantization tensor)
+            nodes_to_remove.add(id(dq))
+            nodes_to_remove.add(id(q))
+            output_remap[out_name] = q.input[0]
+        else:
+            # Standalone DQ: rewire output directly to DQ's input
+            nodes_to_remove.add(id(dq))
+            output_remap[out_name] = dq_in
+
+    if not output_remap:
+        return model
+
+    # Update graph.output to point to the upstream tensors
+    for graph_out in graph.output:
+        if graph_out.name in output_remap:
+            new_name = output_remap[graph_out.name]
+            graph_out.name = new_name
+
+    # Remove the QDQ nodes
+    new_nodes = [n for n in graph.node if id(n) not in nodes_to_remove]
+    del graph.node[:]
+    graph.node.extend(new_nodes)
+
+    print(f"[strip_output_qdq] removed QDQ from {len(output_remap)} output tensor(s)")
+    return model
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
@@ -264,10 +322,11 @@ def main() -> None:
     )
     print(f"[quantize] ORT quantization done")
 
-    # TRT does not support quantized biases — strip QDQ pairs from bias tensors.
-    print(f"[quantize] Stripping bias QDQ nodes for TRT compatibility ...")
+    # TRT compatibility post-processing
+    print(f"[quantize] Post-processing for TRT compatibility ...")
     model = onnx.load(args.output)
-    model = _remove_bias_qdq(model)
+    model = _remove_bias_qdq(model)       # TRT cannot handle quantized biases
+    model = _remove_output_qdq(model)     # TRT output QDQ causes wrong values
     onnx.save(model, args.output)
 
     print(f"[quantize] Done → {args.output}")
