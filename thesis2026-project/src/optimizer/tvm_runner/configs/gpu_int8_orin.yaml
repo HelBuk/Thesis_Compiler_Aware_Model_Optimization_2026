@@ -26,7 +26,7 @@ run:
 
 # Primary model — FP32 ONNX used by run.py and _worker_tvm / _worker_ort / _worker_pytorch
 model:
-  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"
+  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_0_1percent_coco.onnx" #"../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"
   pt_path: "../models/yolov8n.pt"
   imgsz: 640
   batch: 1
@@ -98,7 +98,7 @@ onnxruntime:
   use_arena: true
 
 tensorrt:
-  engine_path: "../models/tensorrt_exports/yolov8n_int8_trt.engine" #"./out/trt_cache/trt_current/TensorrtExecutionProvider_TRTKernel_graph_main_graph_12725355770372969813_0_0_sm87.engine"
+  engine_path: "../models/tensorrt_exports/yolov8n_int8_qdq.engine" #"./out/trt_cache/trt_current/TensorrtExecutionProvider_TRTKernel_graph_main_graph_12725355770372969813_0_0_sm87.engine"
 
 tflite:
   model_path: "../models/quantized_models/yolov8n_tflite_int8/yolov8n_integer_quant.tflite"

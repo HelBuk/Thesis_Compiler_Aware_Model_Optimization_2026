@@ -62,22 +62,22 @@ backends:
   #   tvm_input_dtype: float32
 
   # ── ORT CUDA INT8 — QDQ 1% COCO calibration ───────────────────────────────
-  # - name: ort_int8_qdq_1pct
-  #   kind: ort
-  #   model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx
-  #   device: cuda:0
+  - name: ort_int8_qdq_1pct
+    kind: ort
+    model: ../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx
+    device: cuda:0
 
   # ── ORT CUDA INT8 — QDQ 0.1% COCO calibration ────────────────────────────
-  # - name: ort_int8_qdq_0_1pct
-  #   kind: ort
-  #   model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_0_1percent_coco.onnx
-  #   device: cuda:0
+  - name: ort_int8_qdq_0_1pct
+    kind: ort
+    model: ../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_0_1percent_coco.onnx
+    device: cuda:0
 
   # ── ORT CUDA INT8 — QDQ 10% COCO calibration ─────────────────────────────
-  # - name: ort_int8_qdq_10pct
-  #   kind: ort
-  #   model: models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_10percent_coco.onnx
-  #   device: cuda:0
+  - name: ort_int8_qdq_10pct
+    kind: ort
+    model: ../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_10percent_coco.onnx
+    device: cuda:0
 
   # ── TensorRT FP32 (native engine built by build_trt_engine.py) ───────────
   - name: trt_fp32
@@ -90,12 +90,6 @@ backends:
   #   kind: trt_engine
   #   model: models/tensorrt_exports/yolov8n_fp16.engine
   #   device: cuda:0
-
-  # ── ORT INT8 QDQ on CUDA (sanity check — ORT runs QDQ ONNX correctly) ─────
-  - name: ort_int8_qdq_1pct
-    kind: ort
-    model: ../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx
-    device: cuda:0
 
   # ── ORT + TRT EP INT8 (ORT handles QDQ→TRT compatibility internally) ──────
   # ORT builds and caches a TRT INT8 engine from the QDQ ONNX.
@@ -110,10 +104,10 @@ backends:
 
   # ── TensorRT INT8 implicit calibration (deprecated TRT 10.x path) ────────
   # Kept for comparison only — expect ~10% mAP drop.
-  # - name: trt_int8_implicit
-  #   kind: trt_engine
-  #   model: ../models/tensorrt_exports/yolov8n_int8_pinned_layers.engine
-  #   device: cuda:0
+  - name: trt_int8_implicit
+    kind: trt_engine
+    model: ../models/tensorrt_exports/yolov8n_int8_pinned_layers.engine
+    device: cuda:0
 
   # ── TensorRT INT8 via QDQ ONNX (TRT 10.x explicit quantization) ──────────
   # TRT fuses QDQ pairs into native INT8 kernels; detect head stays FP32
@@ -127,9 +121,9 @@ backends:
   #     --onnx ../models/quantized_models/onnx/yolov8n_int8_QDQ_sym_1pct.onnx \
   #     --output ../models/tensorrt_exports/yolov8n_int8_qdq.engine \
   #     --precision int8
-  - name: trt_int8_qdq
+  - name: yolov8n_int8_trt_full
     kind: trt_engine
-    model: ../models/tensorrt_exports/yolov8n_int8_qdq.engine
+    model: ../models/tensorrt_exports/yolov8n_int8_trt_full.engine
     device: cuda:0
 
   # ── TVM GPU INT8 via QDQ ONNX (compile_tvm_int8.py) ──────────────────────
