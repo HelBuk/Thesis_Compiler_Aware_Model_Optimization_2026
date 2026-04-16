@@ -1,0 +1,72 @@
+# cpu_fp32_pi5.yaml
+#
+# Latency + accuracy benchmarking on Raspberry Pi 5 (Cortex-A76, CPU-only).
+# No TensorRT, no CUDA — CPU inference only.
+#
+# Usage (run from project root src/ on the Pi):
+#   python -m optimizer.tvm_runner.bench_rigorous \
+#       --config optimizer/tvm_runner/configs/cpu_fp32_pi5.yaml \
+#       --backends pytorch ort ort_int8 tflite \
+#       --repeats 3 --runs 100 --warmup 10
+#
+# Accuracy (run from project root src/ on the Pi):
+#   python -m optimizer.evaluation.yolo_accuracy_comparison \
+#       --config optimizer/evaluation/accuracy_pi5.yaml \
+#       --backends pytorch_fp32 ort_fp32 ort_int8_qdq tflite_int8
+
+run:
+  name: "yolov8n_pi5_cpu"
+  out_dir: "./out/experiments"
+  seed: 0
+
+model:
+  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx"
+  pt_path:   "../models/yolov8n.pt"
+  imgsz: 640
+  batch: 1
+
+device:
+  kind: "cpu"
+  arch: "cortex-a76"              # Pi 5 CPU
+  host:
+    kind: "llvm"
+    mtriple: "aarch64-linux-gnu"
+    mcpu: "cortex-a76"
+    mattr: "+neon"                # NEON SIMD available on A76
+
+precision:
+  name: "fp32"
+
+# TVM FP32 compiled for Cortex-A76 — generate with:
+#   python src/optimizer/tvm_runner/compile_tvm_fp32_cpu.py \
+#       --onnx models/quantized_models/onnx/yolov8n_opset17_fp32.onnx \
+#       --output models/compiled_tvm_models/tvm_yolov8n_pi5_fp32.so \
+#       --target "llvm -mtriple=aarch64-linux-gnu -mcpu=cortex-a76 -mattr=+neon"
+tvm:
+  export_path: "../models/compiled_tvm_models/tvm_yolov8n_pi5_fp32.so"
+  log_dir:     "./out/tvm_tuning_logs/yolov8n_pi5_fp32_v1"
+  use_existing_db: true
+  max_trials_global: 2000
+  max_trials_per_task: 64
+  num_trials_per_iter: 32
+  timeout_builder_s: 120
+  timeout_runner_s:  120
+
+benchmark:
+  runs: 100
+  warmup: 10
+
+onnxruntime:
+  threads: 4                      # Pi 5 has 4 cores
+  use_arena: true
+  trt:
+    enable_engine_cache: false    # no TRT on Pi
+    fp16_enable: false
+
+# ORT INT8 QDQ — same ONNX as Orin, runs via CPU EP
+ort_int8:
+  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx"
+
+tflite:
+  model_path: "../models/quantized_models/yolov8n_tflite_int8/yolov8n_integer_quant.tflite"
+  threads: 4

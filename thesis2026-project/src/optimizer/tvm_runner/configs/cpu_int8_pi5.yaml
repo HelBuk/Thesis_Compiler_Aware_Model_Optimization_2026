@@ -1,0 +1,50 @@
+# cpu_int8_pi5.yaml
+#
+# Latency benchmarking on Raspberry Pi 5 (Cortex-A76, CPU-only) — INT8 backends.
+# Mirrors gpu_int8_orin.yaml but for CPU / Pi 5.
+#
+# Usage (run from project root src/ on the Pi):
+#   python -m optimizer.tvm_runner.bench_rigorous \
+#       --config optimizer/tvm_runner/configs/cpu_int8_pi5.yaml \
+#       --backends ort tflite \
+#       --repeats 3 --runs 100 --warmup 10
+
+run:
+  name: "yolov8n_pi5_cpu_int8"
+  out_dir: "./out/experiments"
+  seed: 0
+
+# model.onnx_path → INT8 QDQ ONNX (same as gpu_int8_orin.yaml pattern)
+# _worker_ort reads this directly, so --backends ort runs INT8 inference.
+model:
+  onnx_path: "../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx"
+  pt_path:   "../models/yolov8n.pt"
+  imgsz: 640
+  batch: 1
+
+device:
+  kind: "cpu"
+  arch: "cortex-a76"
+  host:
+    kind: "llvm"
+    mtriple: "aarch64-linux-gnu"
+    mcpu: "cortex-a76"
+    mattr: "+neon"
+
+precision:
+  name: "fp32"   # input tensor dtype (QDQ graph boundary is always float32)
+
+benchmark:
+  runs: 100
+  warmup: 10
+
+onnxruntime:
+  threads: 4                      # Pi 5 has 4 cores
+  use_arena: true
+  trt:
+    enable_engine_cache: false    # no TRT on Pi
+    fp16_enable: false
+
+tflite:
+  model_path: "../models/quantized_models/yolov8n_tflite_int8/yolov8n_integer_quant.tflite"
+  threads: 4

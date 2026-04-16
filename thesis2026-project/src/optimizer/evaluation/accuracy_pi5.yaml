@@ -1,0 +1,87 @@
+# accuracy_pi5.yaml
+#
+# mAP accuracy evaluation on Raspberry Pi 5 (Cortex-A76, CPU-only).
+# No TensorRT, no CUDA — CPU inference only.
+#
+# Prerequisites:
+#   pip install ultralytics onnxruntime tflite-runtime torch torchvision
+#   (see full install list in cpu_fp32_pi5.yaml header comments)
+#
+# Usage (run from project root src/ on the Pi):
+#   python -m optimizer.evaluation.yolo_accuracy_comparison \
+#       --config optimizer/evaluation/accuracy_pi5.yaml
+#
+# Quick sanity check (first 200 batches only):
+#   python -m optimizer.evaluation.yolo_accuracy_comparison \
+#       --config optimizer/evaluation/accuracy_pi5.yaml \
+#       --max_batches 200
+#
+# Single backend only:
+#   python -m optimizer.evaluation.yolo_accuracy_comparison \
+#       --config optimizer/evaluation/accuracy_pi5.yaml \
+#       --backends pytorch_fp32
+
+comparison:
+  data: ../datasets/coco/data.yaml          # Ultralytics dataset YAML (val split)
+  imgsz: 640
+  batch: 1
+  conf: 0.001                               # low conf for official mAP evaluation
+  iou: 0.7
+  max_det: 300
+  max_batches: 0                            # 0 = full val (~5000 images)
+  workers: 0                                # 0 = main process (saves RAM on Pi)
+  project: optimizer/evaluation/runs/accuracy_pi5
+  save_json: true
+  save_txt: false
+  plots: false
+  output_json: optimizer/evaluation/runs/accuracy_pi5/results.json
+
+backends:
+
+  # ── Baseline: PyTorch FP32 (CPU) ─────────────────────────────────────────
+  # Slowest option — only run once to get the ground-truth mAP baseline.
+  # Expect ~45-60s per image on Pi 5 without torch.compile.
+  - name: pytorch_fp32
+    kind: torch
+    model: ../models/yolov8n.pt
+    device: cpu
+    baseline: true
+
+  # ── ORT FP32 (CPU) ───────────────────────────────────────────────────────
+  # Primary accuracy reference for Pi 5; significantly faster than PyTorch.
+  - name: ort_fp32
+    kind: ort
+    model: ../models/quantized_models/onnx/yolov8n_opset17_fp32.onnx
+    device: cpu
+
+  # ── ORT INT8 QDQ (CPU) ───────────────────────────────────────────────────
+  # Same QDQ ONNX used on Orin; ORT CPU EP handles INT8 QDQ natively.
+  # Expect ~-1 to -3% mAP vs FP32 (ORT INT8 is well-calibrated on CPU).
+  - name: ort_int8_qdq
+    kind: ort
+    model: ../models/quantized_models/onnx/yolov8n_opset17_int8_QDQ_1percent_coco.onnx
+    device: cpu
+
+  # ── TFLite INT8 (CPU) ────────────────────────────────────────────────────
+  # TFLite uses XNNPACK delegate automatically on ARM; fastest INT8 option.
+  - name: tflite_int8
+    kind: tflite
+    model: ../models/quantized_models/yolov8n_tflite_int8/yolov8n_integer_quant.tflite
+    device: cpu
+    threads: 4
+
+  # ── TVM FP32 (Cortex-A76 compiled .so) ───────────────────────────────────
+  # Enable once the Pi 5 .so is compiled with compile_tvm_fp32_cpu.py.
+  # The .so must be built ON the Pi (or cross-compiled for aarch64-cortex-a76).
+  #
+  # Compile command (run from project root on the Pi):
+  #   python src/optimizer/tvm_runner/compile_tvm_fp32_cpu.py \
+  #       --onnx models/quantized_models/onnx/yolov8n_opset17_fp32.onnx \
+  #       --output models/compiled_tvm_models/tvm_yolov8n_pi5_fp32.so \
+  #       --target "llvm -mtriple=aarch64-linux-gnu -mcpu=cortex-a76 -mattr=+neon"
+  # - name: tvm_cpu_fp32
+  #   kind: tvm
+  #   model: ../models/compiled_tvm_models/tvm_yolov8n_pi5_fp32.so
+  #   device: cpu
+  #   tvm_device_type: cpu
+  #   tvm_input_dtype: float32
