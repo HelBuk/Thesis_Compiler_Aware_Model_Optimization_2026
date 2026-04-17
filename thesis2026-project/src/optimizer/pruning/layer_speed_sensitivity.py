@@ -207,13 +207,15 @@ class PersistentCOCOEvaluator:
     ):
         from ultralytics.models.yolo.detect.val import DetectionValidator
         from ultralytics.data.utils import check_det_dataset
-        from ultralytics.utils.torch_utils import select_device, de_parallel
+        from ultralytics.utils.torch_utils import select_device
         # get_cfg converts a plain dict into the IterableSimpleNamespace that
         # DetectionValidator expects.  Passing a raw dict causes silent failures
         # and falls back to the slow per-call YOLO.val() path.
         from ultralytics.cfg import get_cfg, DEFAULT_CFG
 
-        self._de_parallel = de_parallel
+        # de_parallel moved between Ultralytics versions — inline it directly.
+        # All it does is unwrap DataParallel/DistributedDataParallel.
+        self._de_parallel = lambda m: m.module if hasattr(m, "module") else m
         self._device = select_device(device)
 
         overrides: dict = dict(
@@ -322,7 +324,11 @@ def eval_model_no_train(
     """
     Fallback: evaluate via YOLO.val() (rebuilds dataloader every call).
     Prefer PersistentCOCOEvaluator for sweeps.
+    stdout is suppressed to avoid the per-call "Class Images Instances" spam.
     """
+    import io
+    import contextlib
+
     with open(data, "r") as f:
         d = yaml.safe_load(f) or {}
 
@@ -341,7 +347,9 @@ def eval_model_no_train(
     if val_fraction < 1.0:
         kwargs["fraction"] = val_fraction
 
-    m = y.val(**kwargs)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        m = y.val(**kwargs)
     return {
         "map50_95": float(m.box.map),
         "map50": float(m.box.map50),
@@ -759,8 +767,10 @@ def main() -> None:
             )
             base_acc = evaluator.eval(baseline.model)
         except Exception as e:
-            print(f"  [warn] PersistentCOCOEvaluator failed ({e}); "
-                  f"falling back to YOLO.val() per config")
+            import traceback as _tb
+            print(f"\n  [ERROR] PersistentCOCOEvaluator failed — full traceback:")
+            _tb.print_exc()
+            print(f"  [warn] falling back to YOLO.val() per config\n")
             evaluator = None
             base_eval_runner = YOLO(args.weights)
             base_acc = eval_model_no_train(
