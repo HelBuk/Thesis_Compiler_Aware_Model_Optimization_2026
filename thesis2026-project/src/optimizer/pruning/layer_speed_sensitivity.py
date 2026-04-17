@@ -260,7 +260,25 @@ class PersistentCOCOEvaluator:
         # ------------------------------------------------------------------ #
         print(f"  [PersistentEvaluator] preloading batches "
               f"(split={actual_split}, fraction={val_fraction:.3f}) ...")
-        dl = v.get_dataloader(v.data[actual_split], batch)
+        dl_orig = v.get_dataloader(v.data[actual_split], batch)
+
+        # Ultralytics enables pin_memory=True when CUDA is present; that makes
+        # pinning hundreds of images extremely slow on Orin.  Rebuild from the
+        # same dataset without pin_memory for the one-time preload.
+        import torch.utils.data as _tud
+        collate_fn = getattr(dl_orig, "collate_fn", None)
+        if collate_fn is None:
+            collate_fn = getattr(type(getattr(dl_orig, "dataset", None)),
+                                 "collate_fn", None)
+        dl = _tud.DataLoader(
+            dl_orig.dataset,
+            batch_size=batch,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False,
+            collate_fn=collate_fn,
+        )
+
         self._batches: list[dict] = []
         for b in dl:
             self._batches.append(
