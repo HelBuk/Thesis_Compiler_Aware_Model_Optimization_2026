@@ -262,16 +262,26 @@ class PersistentCOCOEvaluator:
               f"(split={actual_split}, fraction={val_fraction:.3f}) ...")
         dl_orig = v.get_dataloader(v.data[actual_split], batch)
 
-        # Ultralytics enables pin_memory=True when CUDA is present; that makes
-        # pinning hundreds of images extremely slow on Orin.  Rebuild from the
-        # same dataset without pin_memory for the one-time preload.
         import torch.utils.data as _tud
+
+        # Ultralytics 8.4 does NOT apply 'fraction' to the val split, so the
+        # full dataset is returned regardless.  Manually cap with Subset.
+        full_len = len(dl_orig.dataset)
+        n_keep = max(batch, round(full_len * val_fraction))
+        if n_keep < full_len:
+            dataset = _tud.Subset(dl_orig.dataset, list(range(n_keep)))
+            print(f"  [PersistentEvaluator] subset: {full_len} → {n_keep} images")
+        else:
+            dataset = dl_orig.dataset
+
+        # pin_memory=True (set by Ultralytics when CUDA is present) makes
+        # preloading very slow on Orin Nano.  Rebuild without it.
         collate_fn = getattr(dl_orig, "collate_fn", None)
         if collate_fn is None:
             collate_fn = getattr(type(getattr(dl_orig, "dataset", None)),
                                  "collate_fn", None)
         dl = _tud.DataLoader(
-            dl_orig.dataset,
+            dataset,
             batch_size=batch,
             shuffle=False,
             num_workers=0,
