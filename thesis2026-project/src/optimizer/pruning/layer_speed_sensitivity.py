@@ -182,16 +182,16 @@ def compute_val_fraction(data_yaml: str, split: str, batch: int, max_batches: in
 
 class PersistentCOCOEvaluator:
     """
-    Builds the Ultralytics DetectionValidator + COCO dataloader exactly
-    ONCE and reuses both for every eval() call.
+    Builds the Ultralytics DetectionValidator + dataset subset ONCE and
+    reuses them for every eval() call.
 
-    Benefits vs calling YOLO.val() per config:
-      - No repeated dataloader construction or worker startup
-      - No repeated weight loading from disk
-      - No per-call tqdm/rich output spam
-      - eval() runs only the inference+metrics loop (~pure GPU time)
-
-    Falls back to eval_model_no_train() if Ultralytics internals change.
+    On x86 with separate CPU/GPU RAM, batches can optionally be preloaded
+    into CPU RAM to eliminate per-eval disk IO.  On Orin Nano (and other
+    Jetson boards) CPU and GPU share the same 8 GB physical memory, so
+    preloading 1000 images (~1.2 GB) leaves too little for CUDA — use
+    preload=False on Jetson.  In that mode eval() wraps the dataset in a
+    fresh pin_memory=False DataLoader each call; construction is ~instant
+    because the dataset object (and its .cache index) already exists.
     """
 
     def __init__(
@@ -204,19 +204,18 @@ class PersistentCOCOEvaluator:
         split: str = "val",
         val_fraction: float = 1.0,
         project: str = ".",
+        preload: bool = True,
     ):
+        import torch.utils.data as _tud
         from ultralytics.models.yolo.detect.val import DetectionValidator
         from ultralytics.data.utils import check_det_dataset
         from ultralytics.utils.torch_utils import select_device
-        # get_cfg converts a plain dict into the IterableSimpleNamespace that
-        # DetectionValidator expects.  Passing a raw dict causes silent failures
-        # and falls back to the slow per-call YOLO.val() path.
         from ultralytics.cfg import get_cfg, DEFAULT_CFG
 
-        # de_parallel moved between Ultralytics versions — inline it directly.
-        # All it does is unwrap DataParallel/DistributedDataParallel.
         self._de_parallel = lambda m: m.module if hasattr(m, "module") else m
         self._device = select_device(device)
+        self._batch = batch
+        self._preload = preload
 
         overrides: dict = dict(
             model=weights,
@@ -231,41 +230,24 @@ class PersistentCOCOEvaluator:
             save=False,
             workers=0,
         )
-        if val_fraction < 1.0:
-            overrides["fraction"] = val_fraction
 
         cfg = get_cfg(DEFAULT_CFG, overrides)
         v = DetectionValidator(args=cfg)
-
-        # Silence the "Class  Images  Instances  Box(P  R  mAP50-95)" header
-        # that get_stats() triggers via print_results().
-        v.print_results = lambda: None
-
+        v.print_results = lambda: None  # silence per-eval "Class Images..." header
         v.data = check_det_dataset(data)
         v.device = self._device
 
-        # Resolve actual split key present in the YAML
         actual_split = split
         for candidate in (split, "valid", "val", "test"):
             if candidate in v.data:
                 actual_split = candidate
                 break
 
-        # ------------------------------------------------------------------ #
-        # Preload ALL batches into CPU RAM exactly once.                       #
-        # eval() iterates a plain Python list — no dataloader, no disk IO,    #
-        # no Ultralytics TQDM bar on subsequent calls.                         #
-        # Images stay as uint8 on CPU (~1 byte/pixel); preprocess() moves     #
-        # them to the device and converts to float32 per batch during eval.   #
-        # ------------------------------------------------------------------ #
-        print(f"  [PersistentEvaluator] preloading batches "
+        print(f"  [PersistentEvaluator] building dataset "
               f"(split={actual_split}, fraction={val_fraction:.3f}) ...")
         dl_orig = v.get_dataloader(v.data[actual_split], batch)
 
-        import torch.utils.data as _tud
-
-        # Ultralytics 8.4 does NOT apply 'fraction' to the val split, so the
-        # full dataset is returned regardless.  Manually cap with Subset.
+        # Ultralytics 8.4 ignores 'fraction' for val — apply manually via Subset.
         full_len = len(dl_orig.dataset)
         n_keep = max(batch, round(full_len * val_fraction))
         if n_keep < full_len:
@@ -274,52 +256,63 @@ class PersistentCOCOEvaluator:
         else:
             dataset = dl_orig.dataset
 
-        # pin_memory=True (set by Ultralytics when CUDA is present) makes
-        # preloading very slow on Orin Nano.  Rebuild without it.
         collate_fn = getattr(dl_orig, "collate_fn", None)
         if collate_fn is None:
-            collate_fn = getattr(type(getattr(dl_orig, "dataset", None)),
-                                 "collate_fn", None)
-        dl = _tud.DataLoader(
-            dataset,
-            batch_size=batch,
+            collate_fn = getattr(type(dl_orig.dataset), "collate_fn", None)
+
+        self._dataset = dataset
+        self._collate_fn = collate_fn
+        self._v = v
+
+        if preload:
+            # x86: load all batches into CPU RAM once — zero disk IO per eval.
+            dl = _tud.DataLoader(dataset, batch_size=batch, shuffle=False,
+                                 num_workers=0, pin_memory=False,
+                                 collate_fn=collate_fn)
+            self._batches: list[dict] = []
+            for b in dl:
+                self._batches.append(
+                    {k: (t.cpu() if isinstance(t, torch.Tensor) else t)
+                     for k, t in b.items()}
+                )
+            ram_mb = sum(b["img"].nbytes for b in self._batches) / 1e6
+            n_img = sum(b["img"].shape[0] for b in self._batches)
+            print(f"  [PersistentEvaluator] {n_img} images preloaded "
+                  f"({ram_mb:.0f} MB) — zero disk IO per eval")
+        else:
+            # Jetson/unified-memory: skip preload; DataLoader wraps dataset
+            # cheaply per eval using the already-cached index.
+            n_img = len(dataset)
+            print(f"  [PersistentEvaluator] {n_img} images ready "
+                  f"(no preload — unified memory device)")
+
+    def _make_dataloader(self):
+        import torch.utils.data as _tud
+        return _tud.DataLoader(
+            self._dataset,
+            batch_size=self._batch,
             shuffle=False,
             num_workers=0,
             pin_memory=False,
-            collate_fn=collate_fn,
+            collate_fn=self._collate_fn,
         )
 
-        self._batches: list[dict] = []
-        for b in dl:
-            self._batches.append(
-                {k: (v_.cpu() if isinstance(v_, torch.Tensor) else v_)
-                 for k, v_ in b.items()}
-            )
-
-        n_img = sum(b["img"].shape[0] for b in self._batches)
-        ram_mb = sum(b["img"].nbytes for b in self._batches) / 1e6
-        print(f"  [PersistentEvaluator] {n_img} images preloaded "
-              f"({ram_mb:.0f} MB RAM) — reused for every config, zero disk IO")
-
-        self._v = v
-
     def eval(self, model: nn.Module) -> dict[str, float]:
-        """Run one inference pass over preloaded batches. No Ultralytics output."""
         v = self._v
         m = model.float().eval().to(self._device)
-
         v.init_metrics(self._de_parallel(m))
         v.jdict = []
 
+        source = self._batches if self._preload else self._make_dataloader()
+
         with torch.inference_mode():
-            for raw in self._batches:
-                # preprocess() moves to device + normalises (uint8 → float32/255)
+            for raw in source:
                 batch = v.preprocess(raw)
                 preds = m(batch["img"])
                 preds = v.postprocess(preds)
                 v.update_metrics(preds, batch)
 
-        stats = v.get_stats()   # print_results patched to no-op above
+        stats = v.get_stats()
         try:
             v.finalize_metrics()
         except Exception:
@@ -747,6 +740,9 @@ def main() -> None:
     ap.add_argument("--max-val-batches", type=int, default=0,
                     help="Cap accuracy eval at this many batches (0 = full dataset). "
                          "E.g. 1000 with --eval-batch 1 evaluates ~1000 images.")
+    ap.add_argument("--no-preload", action="store_true",
+                    help="Do not preload val images into CPU RAM. Required on Jetson/"
+                         "Orin where CPU and GPU share the same physical memory pool.")
 
     args = ap.parse_args()
 
@@ -792,6 +788,7 @@ def main() -> None:
                 split=args.eval_split,
                 val_fraction=val_fraction,
                 project=args.project,
+                preload=not args.no_preload,
             )
             base_acc = evaluator.eval(baseline.model)
         except Exception as e:
