@@ -208,10 +208,13 @@ class PersistentCOCOEvaluator:
         from ultralytics.models.yolo.detect.val import DetectionValidator
         from ultralytics.data.utils import check_det_dataset
         from ultralytics.utils.torch_utils import select_device, de_parallel
+        # get_cfg converts a plain dict into the IterableSimpleNamespace that
+        # DetectionValidator expects.  Passing a raw dict causes silent failures
+        # and falls back to the slow per-call YOLO.val() path.
+        from ultralytics.cfg import get_cfg, DEFAULT_CFG
 
         self._de_parallel = de_parallel
         self._device = select_device(device)
-        self._device_str = str(device)
 
         overrides: dict = dict(
             model=weights,
@@ -229,7 +232,13 @@ class PersistentCOCOEvaluator:
         if val_fraction < 1.0:
             overrides["fraction"] = val_fraction
 
-        v = DetectionValidator(args=overrides)
+        cfg = get_cfg(DEFAULT_CFG, overrides)
+        v = DetectionValidator(args=cfg)
+
+        # Patch out print_results so that get_stats() / __call__ never writes
+        # "Class  Images  Instances  Box(P  R  mAP50  mAP50-95)" per config.
+        v.print_results = lambda: None
+
         v.data = check_det_dataset(data)
         v.device = self._device
 
