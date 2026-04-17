@@ -848,9 +848,23 @@ def main() -> None:
         "error",
     ]
 
-    with csv_path.open("w", newline="") as f:
+    # Resume: load already-completed (target, parity_mode, requested_keep) triples
+    done_keys: set[tuple[str, str, int]] = set()
+    if csv_path.exists():
+        with csv_path.open("r", newline="") as _rf:
+            for _row in csv.DictReader(_rf):
+                if _row.get("status") == "ok":
+                    try:
+                        done_keys.add((_row["target"], _row["parity_mode"], int(_row["requested_keep"])))
+                    except (KeyError, ValueError):
+                        pass
+        print(f"Resuming — {len(done_keys)} completed rows found in {csv_path}")
+
+    file_mode = "a" if done_keys else "w"
+    with csv_path.open(file_mode, newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
+        if file_mode == "w":
+            writer.writeheader()
 
         for target in targets:
             try:
@@ -866,6 +880,10 @@ def main() -> None:
                     )
 
                     for requested_keep in keep_counts:
+                        if (target, parity_mode, requested_keep) in done_keys:
+                            print(f"  skip (already done): target={target} parity={parity_mode} keep={requested_keep}")
+                            continue
+
                         row = {
                             "target": target,
                             "target_channels_before": channels,
