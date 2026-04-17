@@ -159,7 +159,6 @@ def _count_val_images(data_yaml: str, split: str) -> int:
     if not val_rel:
         return 0
 
-    # Try relative to the YAML's parent, then as absolute
     for base in (data_path.parent, Path(".")):
         val_dir = (base / val_rel).resolve()
         if val_dir.is_dir():
@@ -173,12 +172,115 @@ def compute_val_fraction(data_yaml: str, split: str, batch: int, max_batches: in
         return 1.0
     n_images = _count_val_images(data_yaml, split)
     if n_images <= 0:
-        print(f"  [warn] could not count val images; ignoring --max-val-batches")
+        print("  [warn] could not count val images; ignoring --max-val-batches")
         return 1.0
     cap = max_batches * batch
     frac = min(1.0, cap / n_images)
     print(f"  [val] {n_images} val images, capping at {cap} (fraction={frac:.4f})")
     return frac
+
+
+class PersistentCOCOEvaluator:
+    """
+    Builds the Ultralytics DetectionValidator + COCO dataloader exactly
+    ONCE and reuses both for every eval() call.
+
+    Benefits vs calling YOLO.val() per config:
+      - No repeated dataloader construction or worker startup
+      - No repeated weight loading from disk
+      - No per-call tqdm/rich output spam
+      - eval() runs only the inference+metrics loop (~pure GPU time)
+
+    Falls back to eval_model_no_train() if Ultralytics internals change.
+    """
+
+    def __init__(
+        self,
+        weights: str,
+        data: str,
+        imgsz: int,
+        device: str,
+        batch: int,
+        split: str = "val",
+        val_fraction: float = 1.0,
+        project: str = ".",
+    ):
+        from ultralytics.models.yolo.detect.val import DetectionValidator
+        from ultralytics.data.utils import check_det_dataset
+        from ultralytics.utils.torch_utils import select_device, de_parallel
+
+        self._de_parallel = de_parallel
+        self._device = select_device(device)
+        self._device_str = str(device)
+
+        overrides: dict = dict(
+            model=weights,
+            data=data,
+            imgsz=imgsz,
+            batch=batch,
+            device=str(self._device),
+            split=split,
+            project=project,
+            verbose=False,
+            plots=False,
+            save=False,
+            workers=0,
+        )
+        if val_fraction < 1.0:
+            overrides["fraction"] = val_fraction
+
+        v = DetectionValidator(args=overrides)
+        v.data = check_det_dataset(data)
+        v.device = self._device
+
+        # Resolve actual split key present in the YAML
+        actual_split = split
+        for candidate in (split, "valid", "val", "test"):
+            if candidate in v.data:
+                actual_split = candidate
+                break
+
+        print(f"  [PersistentEvaluator] building dataloader once "
+              f"(split={actual_split}, fraction={val_fraction:.3f}) ...")
+        self._dl = v.get_dataloader(v.data[actual_split], batch)
+        n_img = len(self._dl.dataset)
+        print(f"  [PersistentEvaluator] ready — {n_img} images, "
+              f"{len(self._dl)} batches (reused for every config)")
+
+        self._v = v
+
+    def eval(self, model: nn.Module) -> dict[str, float]:
+        """Swap the model and run one pass over the pre-built dataloader."""
+        v = self._v
+        m = model.float().eval().to(self._device)
+
+        v.init_metrics(self._de_parallel(m))
+        v.jdict = []
+
+        with torch.inference_mode():
+            for batch in self._dl:
+                batch = v.preprocess(batch)
+                preds = m(batch["img"])
+                preds = v.postprocess(preds)
+                v.update_metrics(preds, batch)
+
+        stats = v.get_stats()
+        try:
+            v.finalize_metrics()
+        except Exception:
+            pass
+
+        def _pick(d: dict, *keys: str) -> float:
+            for k in keys:
+                if k in d:
+                    return float(d[k])
+            return 0.0
+
+        return {
+            "map50_95": _pick(stats, "metrics/mAP50-95(B)", "metrics/mAP50-95"),
+            "map50":    _pick(stats, "metrics/mAP50(B)",    "metrics/mAP50"),
+            "lat_ms_val": 0.0,
+        }
 
 
 def eval_model_no_train(
@@ -193,8 +295,8 @@ def eval_model_no_train(
     val_fraction: float = 1.0,
 ) -> dict[str, float]:
     """
-    Evaluate current model weights/architecture with Ultralytics val(), no training.
-    Pass val_fraction < 1.0 to evaluate on a subset (e.g. 0.2 = 1000 of 5000 COCO val images).
+    Fallback: evaluate via YOLO.val() (rebuilds dataloader every call).
+    Prefer PersistentCOCOEvaluator for sweeps.
     """
     with open(data, "r") as f:
         d = yaml.safe_load(f) or {}
@@ -614,19 +716,38 @@ def main() -> None:
         use_half=args.use_half,
     )
 
+    # Build the persistent evaluator once (dataloader constructed here, reused for all configs).
+    # Falls back gracefully to per-call YOLO.val() if Ultralytics internals break.
+    evaluator: PersistentCOCOEvaluator | None = None
     base_acc = None
     if args.measure_accuracy:
-        base_eval_runner = YOLO(args.weights)
-        base_acc = eval_model_no_train(
-            base_eval_runner,
-            data=args.data,
-            imgsz=args.imgsz,
-            device=args.device,
-            batch=args.eval_batch,
-            split=args.eval_split,
-            project=args.project,
-            val_fraction=val_fraction,
-        )
+        try:
+            evaluator = PersistentCOCOEvaluator(
+                weights=args.weights,
+                data=args.data,
+                imgsz=args.imgsz,
+                device=args.device,
+                batch=args.eval_batch,
+                split=args.eval_split,
+                val_fraction=val_fraction,
+                project=args.project,
+            )
+            base_acc = evaluator.eval(baseline.model)
+        except Exception as e:
+            print(f"  [warn] PersistentCOCOEvaluator failed ({e}); "
+                  f"falling back to YOLO.val() per config")
+            evaluator = None
+            base_eval_runner = YOLO(args.weights)
+            base_acc = eval_model_no_train(
+                base_eval_runner,
+                data=args.data,
+                imgsz=args.imgsz,
+                device=args.device,
+                batch=args.eval_batch,
+                split=args.eval_split,
+                project=args.project,
+                val_fraction=val_fraction,
+            )
 
     targets = [t.strip() for t in args.targets.split(",") if t.strip()] if args.targets.strip() else list_prunable_targets(args.weights)
     if args.limit > 0:
@@ -750,19 +871,24 @@ def main() -> None:
 
                             # Accuracy eval in fp32
                             if args.measure_accuracy:
-                                eval_runner = YOLO(args.weights)
-                                eval_runner.model = copy.deepcopy(y.model).float().eval()
-
-                                acc = eval_model_no_train(
-                                    eval_runner,
-                                    data=args.data,
-                                    imgsz=args.imgsz,
-                                    device=args.device,
-                                    batch=args.eval_batch,
-                                    split=args.eval_split,
-                                    project=args.project,
-                                    val_fraction=val_fraction,
-                                )
+                                pruned_fp32 = copy.deepcopy(y.model).float().eval()
+                                if evaluator is not None:
+                                    # Fast path: reuse pre-built dataloader, no disk IO
+                                    acc = evaluator.eval(pruned_fp32)
+                                else:
+                                    # Fallback: full YOLO.val() (rebuilds dataloader each time)
+                                    eval_runner = YOLO(args.weights)
+                                    eval_runner.model = pruned_fp32
+                                    acc = eval_model_no_train(
+                                        eval_runner,
+                                        data=args.data,
+                                        imgsz=args.imgsz,
+                                        device=args.device,
+                                        batch=args.eval_batch,
+                                        split=args.eval_split,
+                                        project=args.project,
+                                        val_fraction=val_fraction,
+                                    )
 
                                 row["map50_95"] = round(acc["map50_95"], 6)
                                 row["map50"] = round(acc["map50"], 6)
