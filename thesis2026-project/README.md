@@ -39,7 +39,7 @@ sudo tegrastats
     kill -9 PID
 ```
 
-7. NVIDIA Nsight Compute NCU (timeline and GPU usega): 
+7. NVIDIA Nsight Compute NCU (per-kernel GPU metrics): 
 
 ```bash
 sudo HOME=HOME_DIR /usr/local/cuda-12.6/bin/ncu \ # Check with: readlink -f "$(which ncu)"

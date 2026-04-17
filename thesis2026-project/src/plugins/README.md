@@ -36,19 +36,19 @@ keeping intermediate buffers in a single workspace allocation.
 
 ## Requirements
 
-| Dependency        | JetPack 5.x (TRT 8.x) | JetPack 6.x (TRT 10.x) |
-|-------------------|----------------------|------------------------|
-| CUDA              | 11.4                 | 12.x                   |
-| TensorRT          | 8.5 / 8.6            | 10.x                   |
-| cuDNN             | 8.6.x                | 9.x                    |
-| CMake             | ≥ 3.18               | ≥ 3.18                 |
-| GCC               | 11                   | 12                     |
-| Python            | 3.8+                 | 3.10+                  |
-| ultralytics       | 8.x                  | 8.x                    |
-| onnx-graphsurgeon | latest               | latest                 |
+| Dependency        | JetPack 6.x (TRT 10.x) |
+|-------------------|------------------------|
+| CUDA              | 12.x                   |
+| TensorRT          | 10.x                  |
+| cuDNN             | 9.x                   |
+| CMake             | ≥ 3.18                |
+| GCC               | 12                    |
+| Python            | 3.10+                 |
+| ultralytics       | 8.x                   |
+| onnx-graphsurgeon | latest                |
 
-Target GPU: **NVIDIA Orin Nano / NX / AGX (GA10B, sm87)**. The CMakeLists sets
-`CUDA_ARCHITECTURES 87`. For A100/H100 change to 80/90.
+Target GPU: **NVIDIA Jetson Orin Nano**. The CMakeLists sets
+`CUDA_ARCHITECTURES 87`. 
 
 ### TRT version compatibility
 
@@ -240,23 +240,3 @@ Compare against `src/profiling/trt_fp32_profile_16032026_v1.txt`:
 | `Reformatting CopyNode … /model.2/…` | present | reduced |
 | `YoloC2fM2_TRT_0` enqueue | — | single kernel group |
 
----
-
-## Troubleshooting
-
-**`initialize()` returns 1 / plugin fails to load weights**
-- Check the `weights_path` attribute in the ONNX node matches the actual `.bin` file path at runtime (absolute or relative to the working directory where `trtexec` / Python is invoked).
-- Run `python export_model2_weights.py` again to regenerate the `.bin`.
-
-**`getOutputDimensions` gives wrong shape / engine build fails**
-- `mCout` is populated from the `.bin` file during `initialize()`.  If the engine is built before `initialize()` is called (rare), `getOutputDimensions` falls back to the input channel count. Re-export weights and rebuild the engine.
-
-**Plugin node not found in dumpLayerInfo**
-- Confirm the `.so` path passed to `--plugins` is correct and the file exists.
-- The plugin op-type must match exactly: `YoloC2fM2_TRT`.
-
-**cuDNN `CUDNN_STATUS_NOT_INITIALIZED`**
-- TRT may call `enqueue()` before `attachToContext()` on some versions. The plugin creates its own cuDNN handle in `initialize()` as a fallback — ensure `initialize()` succeeds first.
-
-**Compile error: `CUDNN_TF32_TENSOR_OP_MATH_ALLOW_CONVERSION` undeclared**
-- Requires cuDNN ≥ 8.0. On older cuDNN, replace with `CUDNN_TENSOR_OP_MATH`.

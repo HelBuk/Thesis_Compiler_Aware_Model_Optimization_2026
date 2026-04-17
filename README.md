@@ -1,8 +1,8 @@
 # Compiler-Aware Model Optimization — NTNU Master's Thesis 2026
 
-Performance optimization of YOLOv8n inference on NVIDIA Orin Nano (sm87) using
-TensorRT, custom CUDA plugins, quantization, pruning, and roofline-driven
-hardware analysis.
+Performance optimization of YOLOv8n inference on NVIDIA Orin Nano (sm87) and 
+Raspberry Pi 5 (8 GB) using TVM, ONNX Runtime, LiteRT, TensorRT, custom CUDA plugins,
+quantization, pruning, and roofline-driven hardware analysis.
 
 ---
 
@@ -27,48 +27,52 @@ hardware analysis.
 ## Project Overview
 
 This thesis investigates compiler-aware optimisation of deep neural network
-inference on NVIDIA Jetson (Orin family) embedded GPUs. The target model is
+inference on NVIDIA Jetson (Orin family) embedded GPUs and Raspberry Pi 5. The target model is
 **YOLOv8n** (object detection). Three orthogonal axes are explored:
 
-| Axis | Technique | Key files |
-|---|---|---|
-| **Precision** | INT8 / FP16 / FP32 quantization | `src/optimizer/quantization/` |
-| **Architecture** | Manual structured pruning | `src/optimizer/pruning/` |
-| **Kernel fusion** | Custom TensorRT plugin for model.2 C2f block | `src/plugins/c2f_m2/` |
+| Axis                        | Technique                                               | Key files                                |
+|-----------------------------|---------------------------------------------------------|------------------------------------------|
+| **Precision**               | FP32 / FP16 / INT8 quantization                         | `src/optimizer/quantization/`            |
+| **Architecture**            | Manual structured pruning                               | `src/optimizer/pruning/`                 |
+| **Kernel fusion**           | Custom TensorRT plugin for model.2 C2f block            | `src/plugins/c2f_m2/`                    |
+| **ReLU vs SiLU comparison** | Substitution of SiLU with ReLU for performance analysis | `src/optimizer/activation_substitution/` |
 
-All variants are benchmarked for latency, throughput, and mAP on COCO, with
-statistical significance tested via bootstrap confidence intervals.
+All variants are benchmarked for latency, throughput, and mAP on COCO.
 
 ---
 
 ## Hardware Target
 
-| Property | Value |
-|---|---|
-| Board | NVIDIA Orin Nano / NX / AGX |
-| GPU | Ampere GA10B — **sm87** |
-| RAM | 8 GB LPDDR5 unified (CPU + GPU) |
-| JetPack | 5.x (CUDA 11.4) / 6.x (CUDA 12.x) |
-| Measured BW | ~25 GB/s (DRAM), ~810 GFLOP/s (FP32 peak) |
+| Property | Value                                |
+|---|--------------------------------------|
+| Board | NVIDIA Jetson Orin Nano              |
+| GPU | Ampere **sm87**                      |
+| RAM | 8 GB LPDDR5 unified (CPU + GPU)      |
+| JetPack | 6.x (CUDA 12.x)                      |
 
-Secondary targets: Raspberry Pi 5 (TVM), A100 / H100 (baseline reference).
+
+
+| Property | Value                           |
+|----------|---------------------------------|
+| Board    | Raspberry Pi 5                  |
+| CPU      | 2.4 GHz quad-core Arm Cortex-A76 |
+| RAM      | 8 GB LPDDR4X-4267 SDRAM         |
+| OS       | Raspberry Pi OS (64-bit, Bookworm) |
 
 ---
 
 ## Software Stack
 
-| Component | Version | Role |
-|---|---|---|
-| PyTorch | 2.x | Baseline inference, pruning, training |
-| TensorRT | 8.6 / 10.x | Primary inference compiler |
-| ONNX | 1.20+ | Model serialization & graph surgery |
-| ONNX Runtime | 1.23-gpu | Alternative backend, INT8 calibration |
-| TensorFlow / TFLite | 2.20 | Quantization pipeline, TFLite backend |
-| Ultralytics | 8.4+ | YOLOv8 model loading, training, export |
-| cuDNN | 8.6 / 9.x | Convolution primitives (plugin) |
-| Apache TVM | 1.0+ | Experimental compiler backend |
-| thop | — | FLOPs estimation |
-| OpenCV | 4.13+ | Image I/O |
+| Component                    | Role                                   |
+|------------------------------|----------------------------------------|
+| PyTorch                      | Baseline inference, pruning, training  |
+| TensorRT                     | Primary inference compiler             |
+| ONNX                         | Model serialization & graph surgery    |
+| ONNX Runtime                 | Alternative backend, INT8 calibration  |
+| TensorFlow / TFLite / LiteRT | Quantization pipeline, TFLite backend  |
+| cuDNN                        | Convolution primitives (plugin)        |
+| Apache TVM                   | Compiler backend                       |
+| Ultralytics                  | YOLOv8 model loading, training, export |
 
 ---
 
@@ -91,15 +95,21 @@ thesis2026-project/
 │   │   │   ├── yolo_metrics.py               # Backend abstraction + NMS + mAP evaluation
 │   │   │   └── bootstrap_comparison.py       # Bootstrap CI & p-value significance testing
 │   │   ├── pruning/
-│   │   │   ├── manual_yolov8_pruner.py  # CSV-driven structured pruning
-│   │   │   ├── yolov8_pruning.py        # Magnitude/gradient-based pruning
-│   │   │   └── yolov8_retrain.py        # Fine-tuning after pruning
+│   │   │   ├── manual_yolov8_pruner.py       # CSV-driven structured pruning
+│   │   │   ├── layer_speed_sensitivity.py    # Per-layer pruning sweep → latency/mAP CSV
+│   │   │   ├── benchmark_pruned_edge.py      # Edge benchmark (Orin / RPi5): latency + mAP
+│   │   │   ├── OCSPrunner_test.py            # OCS sparsity-learning pruner (experimental)
+│   │   │   ├── yolov8_pruning.py             # Magnitude/gradient-based pruning
+│   │   │   └── yolov8_retrain.py             # Fine-tuning after pruning
 │   │   ├── tvm_runner/
-│   │   │   └── run.py                   # Apache TVM compilation (experimental)
+│   │   │   └── run.py                   # Apache TVM compilation
 │   │   └── utils/
 │   │       ├── download_from_roboflow.py
 │   │       ├── make_coco_subset.py       # Generate 0.1% / 1% / 10% COCO splits
 │   │       └── upload_to_roboflow.py
+│   ├── profiling/
+│   │   ├── trt_fp32_profile_16032026_v1.txt  # Baseline Nsight Systems profile (Orin, FP32)
+│   │   └── *.nsys-rep / *.sqlite / *.txt     # Additional profiling artefacts
 │   └── plugins/
 │       └── c2f_m2/                      # Custom TensorRT plugin — model.2 C2f fusion
 │           ├── CMakeLists.txt
@@ -139,14 +149,6 @@ thesis2026-project/
 ---
 
 ## Setup
-
-### Python environment
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
 
 ### Plugin build (on Orin)
 
@@ -198,7 +200,20 @@ python src/optimizer/quantization/tensorrt_compile_yolo.py
 
 ### 3. Pruning
 
-Define targets in a CSV, then prune and retrain:
+**Per-layer speed sensitivity sweep** — measures latency and mAP for every pruning ratio on every target layer; results written incrementally to CSV (resumes automatically if interrupted):
+
+```bash
+python -m src.optimizer.pruning.layer_speed_sensitivity \
+  --weights models/yolov8n.pt \
+  --data datasets/coco/data.yaml \
+  --device cuda:0 \
+  --step-pct 10 \
+  --max-val-batches 1000 \
+  --no-preload \
+  --csv-out src/optimizer/pruning/runs/layer_speed_sensitivity/results.csv
+```
+
+**Manual structured prune + fine-tune**:
 
 ```bash
 python -m src.optimizer.pruning.manual_yolov8_pruner \
@@ -207,6 +222,26 @@ python -m src.optimizer.pruning.manual_yolov8_pruner \
 
 python src/optimizer/pruning/yolov8_retrain.py \
   --model models/pruned_models/pruned_v1.pt
+```
+
+**Edge hardware benchmark** (latency + optional mAP injection for structurally-pruned checkpoints):
+
+```bash
+# Orin Nano — latency + accuracy
+python -m src.optimizer.pruning.benchmark_pruned_edge \
+  --stock  models/yolov8n.pt \
+  --pruned models/pruned_models/combo_17_layers_e50_v2.pt \
+  --data   datasets/coco/data.yaml \
+  --device cuda:0 \
+  --pruned-map50-95 0.3446 --pruned-map50 0.4897 \
+  --out    src/optimizer/pruning/runs/edge_pruning_orin.json
+
+# Raspberry Pi 5 — latency only (no COCO on device)
+python -m src.optimizer.pruning.benchmark_pruned_edge \
+  --stock  models/yolov8n.pt \
+  --pruned models/pruned_models/combo_17_layers_e50_v2.pt \
+  --device cpu --threads 4 --skip-val \
+  --out    src/optimizer/pruning/runs/edge_pruning_rpi5.json
 ```
 
 ### 4. Custom TensorRT Plugin (C2f Fusion)
