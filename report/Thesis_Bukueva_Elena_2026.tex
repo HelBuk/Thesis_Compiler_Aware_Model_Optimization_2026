@@ -18,10 +18,11 @@
 \usepackage{fancyhdr}
 \usepackage{amsmath}
 \usepackage{subcaption}
-\usepackage{url}
+%\usepackage{url}
+\usepackage{xurl}
 \usepackage{tabularx}
 \usepackage{amsfonts}
-\usepackage{nameref}
+%\usepackage{nameref}
 \usepackage{listings}
 \usepackage{minted}
 \usepackage{xcolor}
@@ -101,7 +102,7 @@
 
 % ======= Title Page Variables (edit these) =======
 \newcommand{\ThesisTitleEng}{Compiler-Aware Model Optimization for Edge AI}
-\newcommand{\ThesisTitleNor}{Kompilerbevisst optimaliseringfor Edge-AI}
+\newcommand{\ThesisTitleNor}{Kompilerbevisst optimalisering for Edge-AI}
 \newcommand{\AuthorName}{Bukueva Elena}
 \newcommand{\SupervisorName}{Professor Geir Mathisen, Dept. of Eng. Cybernetics}
 
@@ -198,6 +199,40 @@
 
 \chapter*{Abstract}
 \addcontentsline{toc}{chapter}{Abstract}
+
+Efficient deployment of deep learning models on edge hardware is not solely a question of model size. Inference
+performance is shaped by the joint interaction of model architecture, numerical precision, and the degree to which
+the inference framework can exploit the target hardware. This thesis presents a systematic, measurement-driven study
+of compiler-aware optimization for edge AI, using YOLOv8n object detection on two representative edge platforms - the
+NVIDIA Jetson Orin Nano and the Raspberry Pi 5 - as a concrete case study.
+
+A wide range of optimization strategies is evaluated, spanning five inference frameworks (TensorRT, Apache TVM with
+MetaSchedule autotuning, ONNX Runtime, Google LiteRT, and torch.compile), two reduced-precision paths (FP16 and INT8),
+structured channel pruning with retraining, and activation function substitution. The experimental design is rigorous:
+each benchmark uses isolated subprocess repetitions, warm-up, confidence intervals, and power measurements, enabling
+direct comparison across frameworks and hardware targets. Roofline analysis is used to classify per-layer execution
+regimes, and GPU kernel-level profiling with Nsight Systems and Nsight Compute is used to identify concrete hardware
+bottlenecks. These profiling findings directly motivated the development of a custom TensorRT plugin replacing the
+C2f block - a targeted engineering attempt to eliminate the layout conversion and split overhead that standard TensorRT
+export cannot fully resolve, and to demonstrate that knowledge of model internals can expose optimization headroom
+beyond what automated compilation alone achieves.
+
+The results reveal several non-obvious findings. On the Raspberry Pi 5, LiteRT INT8 achieves 31 ms inference -
+a $9.4\times$ reduction compared to the 290 ms PyTorch eager baseline - establishing that correct deployment choices
+matter far more than architectural modifications for this class of hardware. TVM MetaSchedule was the only framework
+capable of genuine FP16 acceleration on ARM CPU, reducing latency to 122 ms, while every other framework regressed
+or failed entirely due to missing half-precision convolution kernels. On the Orin Nano, TVM in FP16 achieved 12.5 ms
+through WMMA tensorisation, outperforming ONNX Runtime by 26\% and narrowing the gap to TensorRT (6.3 ms). Profiling
+further revealed that SiLU activations are not fused into convolutions by TensorRT, whereas ReLU is - a finding with
+direct implications for architecture design on resource-constrained targets where the choice of activation function
+affects not only accuracy but also the quality of kernel fusion. In contrast, structured channel pruning of YOLOv8n
+produced accuracy degradation that was disproportionate to the latency reduction achieved, suggesting that YOLO's
+architecture does not compress favorably under channel removal without architectural redesign.
+
+Taken together, the results demonstrate that deployment framework selection, precision strategy, and low-level hardware
+alignment - not model size alone - are the dominant factors governing inference efficiency on edge hardware.
+
+
 
 \begin{otherlanguage}{norwegian}
 \chapter*{Sammendrag}
@@ -441,7 +476,7 @@ compiler transformations, runtime optimizations, operator fusion, and memory bot
 
 Metrics:
     \begin{itemize}
-        \item \textbf{Latency}: The time needed to process one inference request (etc. picture, text query);
+        \item \textbf{Latency}: The time needed to process one inference request (e.g. picture, text query);
         \item \textbf{Throughput}: The number of inference requests processed per unit of time
             (e.g., inferences per second).
         \item \textbf{Power Consumption}: The energy required to perform inference
@@ -521,7 +556,7 @@ blocking, and scheduling strategies.
 These libraries were primarily developed to support large-scale training in data centers, where batch sizes
 of hundreds or thousands are common.
 So the default optimization targets of these libraries align better with large batches than with
-batch-1 inference, which is preferable for Real-time setups
+batch-1 inference, which is preferable for real-time setups
 
 Frameworks like PyTorch (in eager mode) execute operation by operation, where each op is dispatched independently;
 intermediate tensors are materialized in memory; the framework has limited visibility beyond the current operator.
@@ -538,7 +573,7 @@ With a full graph, compilers can:
     \item Eliminate dead branches or unused tensors
 \end{itemize}
 
-Furthermore, different hardware prefers different layouts, GPUs often prefer NCHW, Some accelerators prefer NHWC or
+Furthermore, different hardware prefers different layouts: GPUs often prefer NCHW, some accelerators prefer NHWC or
 blocked layouts, so compilers can choose a single optimal layout, insert minimal layout conversions,
 avoid unnecessary transposes.
 
@@ -714,7 +749,7 @@ Stages:
     adding a penalty term to the cost function, is better immediately after pruning, but that $L_2$ norm
     is better, when the weights of the pruned model are fine-tuned.
     Experiments also suggest that earlier layers are the most sensitive to pruning and that iterative
-    pruning is better that one-shot pruning (cutting the proportion of weights in one cycle).
+    pruning is better than one-shot pruning (cutting the proportion of weights in one cycle).
     Another observation from their work is that re-initialization of the weights is not enough
     to construct and accurate model.
     It is always better to fine-tune the weights of the pruned model.\\
@@ -741,7 +776,7 @@ Stages:
     to those obtained from later iteration of training can be beneficial when high levels
     of pruning are used (more than 30\%). \\
 
-    Another question arises is if these subnetworks are transferable to other tasks.
+    Another question that arises is whether these subnetworks are transferable to other tasks.
     Hubens et al. (2020) \cite{hubens2020experimental} show that when a network is trained on a larger data set,
     such as ImageNet, and transferred and fine-tuned for a different task, pruning can result in a smaller
     network than if it was trained from scratch on the new task.\\
@@ -773,7 +808,7 @@ Stages:
             while reducing the number of channels.\\
             The results from their experiments show that the variance based method is
             more effective than use of random pruning.
-        \item \textbf{Data independent pruning methods}. Relay on the assumption that properties of the
+        \item \textbf{Data independent pruning methods}. Rely on the assumption that properties of the
             filters and output channels, as the proportion of zeros, influence the structure's
             importance.\\
             Hu et al. (2016) ~\cite{hu2016network} propose APoZ-based network trimming, a pruning
@@ -785,7 +820,7 @@ Stages:
             is fine-tuned, and the authors report that fine-tuning yields better results than
             retraining the network from scratch. When evaluating the proposed method on VGG-16,
             the authors achieved a compression rate of 2.59 after six pruning iterations,
-            while  2-3\% higher Top-1/Top-5 accuracy than the original VGG-16 model.
+            while achieving 2-3\% higher Top-1/Top-5 accuracy than the original VGG-16 model.
         \item \textbf{Optimization based channel approximation pruning methods} propose to remove
             some channels and then re-optimize the remaining ones instead of deciding which channels
             are important, so that the layer behaves the same. \\
@@ -1109,7 +1144,7 @@ This means the execution time is dominated by the time spent
 transferring data between memory levels (e.g., DRAM to caches, cache levels, host-to-device
 memory) rather than the computation itself.
 
-Latency bounded operations: single-batch inference, overhear for dispatching operations,
+Latency bounded operations: single-batch inference, overhead for dispatching operations,
 pipeline stalls.
 
 These strategies reduce dispatch overhead for frequently executed execution paths:
@@ -1249,7 +1284,7 @@ of reading/writing to/from memory or the computational speed overall.
         of size $m \times k$ and $k \times n$, for which the floating-point operation count is given by:
 
             \begin{equation}
-                \mathrm{FLOPs} = 2 * m * k * n.
+                \mathrm{FLOPs} = 2 \times m \times k \times n.
             \end{equation}
 
         The sustained peak performance is then computed as
@@ -1506,6 +1541,10 @@ Figure~\ref{fig:thesis_scope} summarizes the scope of the study and the main exp
 % ======= 6 Testing / Results (Vår uttesting / Resultater) =======
 \chapter{Testing and Results}
 \noindent
+
+\textcolor{red}{This chapter is currently in draft form and requires further structuring,
+    formatting, and completion of the subsections: c2f-plugin, relu\_silu activation functions substitution and prunning.
+    Its final revision is planned for the concluding phase of the thesis work.}
 
 \section{Experimental Setup}
 
@@ -2587,7 +2626,7 @@ at approximately 7\,100\,ms — derived by scaling the FP32 ORT result by the
 same regression factor observed in PyTorch eager FP16. With 30 warm-up and 200
 timed iterations, the total subprocess time would reach approximately
 1\,630\,seconds, well above the timeout. This behaviour has been documented in
-the ONNX Runtime issue tracker~\cite{ort_fp16_issue_9731,ort_fp16_issue_13838}
+the ONNX Runtime issue tracker
 and reflects a fundamental gap in MLAS coverage rather than a configuration
 error.
 
@@ -2802,92 +2841,282 @@ throughput, and hardware efficiency, since accuracy was effectively preserved ac
 CPU-oriented backends.
 
 
+\section{Influence of Quantization on YOLOv8n}
+\label{sec:quantization_yolov8n}
 
-\section{Quantization Influence on YOLOv8n}
+Quantization is often presented as a direct way to improve inference efficiency by reducing numerical precision,
+model size, and memory bandwidth requirements. In practice, however, quantization remains a difficult deployment
+problem. Its final effect depends not only on the quantization method itself, but also on the maturity of the
+compiler or runtime stack, the target hardware, and the way quantized operators are represented in the exported
+graph.
 
-Despite the idea of quantization being rather simple and the amount of research being present in the recent years,
-plactical quantisation remains a complex problem. A lot of already mentioned frameworks like TVM or ONNX do not
-provide support for the efficient quantization. At least in the version of 0.24.dev0.
+\subsection{INT8 Inference on NVIDIA Orin Nano GPU}
+\label{sec:orin_int8_results}
 
+For this reason, the quantization study in this thesis focuses on practical deployment behavior rather than on
+theoretical INT8 speedup alone. The experiments were carried out on the Jetson Orin Nano GPU and compared FP32 and
+INT8 inference across several deployment paths. The PyTorch FP32 model served as the reference baseline. ONNX Runtime
+was evaluated using statically quantized QDQ graphs, while TensorRT was evaluated both with an implicit INT8
+calibration path starting from an FP32 ONNX model and with a QDQ-based INT8 ONNX graph.
 
-Statistical significance was evaluated with a paired bootstrap test on validation images (1000 resamples), and
-confidence intervals were computed using the percentile method. The results indicate that INT8 quantization causes
-a statistically significant decrease in detection accuracy.
+A first important observation is that efficient quantization support is not uniformly available across deployment
+frameworks. For example, while Apache TVM provides strong support for FP32 compilation and scheduling through
+MetaSchedule, the Relax-based quantization flow remains immature in the tested version. In practice, implementing a
+custom INT8 path would require calibration tooling, graph rewriting, requantization logic, and validated low-precision
+kernels, which is beyond the scope of the present thesis. By contrast, ONNX Runtime and TensorRT both provide
+deployable INT8 paths, but their practical outcomes differ substantially.
 
-\subsection{TensorRT FP32 vs INT8 Benchmarking on Jetson Orin}
-\label{subsec:tensorrt_fp32_int8_orin}
+ONNX Runtime static quantization inserts explicit \path{QuantizeLinear} and \path{DequantizeLinear} operators into
+the computational graph. Although this representation is portable, it may also introduce substantial overhead when
+these conversions are not fully fused away by the execution backend. In a convolution-heavy architecture such as
+YOLOv8n, this is especially problematic, since quantization boundaries may appear repeatedly throughout the network.
+TensorRT can ingest such QDQ graphs, but the resulting execution still contains additional quantization-related
+transformations, reformatting steps, and copy operations. An alternative TensorRT path is implicit INT8 calibration,
+where the engine is built from an FP32 ONNX model and calibrated directly for TensorRT's internal low-precision
+execution. This remains one of the most accessible hardware-native INT8 deployment mechanisms on Jetson-class devices.
 
-To compare TensorRT performance for FP32 and INT8 inference on Jetson Orin, two engines were exported from the same
-YOLOv8n model (FP32 and INT8) using Ultralytics export.
-Benchmarks used batch size $1$ and input size $640 \times 640$. Reported latency is end-to-end per-batch latency,
-including host invocation, device execution, synchronization, and output transfer.
+Table~\ref{tab:int8_accuracy_comparison} summarizes the detection accuracy results. All measurements were performed on
+the same set of 1000 images from the COCO validation split. TensorRT FP32 reproduces the PyTorch FP32 baseline almost
+exactly, confirming that TensorRT export by itself does not meaningfully affect model quality. In contrast, all
+evaluated INT8 paths reduce accuracy, but the magnitude of the degradation varies strongly. The ONNX Runtime QDQ
+models lead to a moderate drop of approximately 6--9\% in mAP, depending on the calibration subset. TensorRT implicit
+INT8 calibration performs worse in accuracy than the FP32 TensorRT engine and also remains less accurate than the
+previously evaluated FP16 TensorRT configuration, but it is still clearly more accurate than the TensorRT QDQ path.
 
-\paragraph{Export parameters.}
-\begin{itemize}
-  \item Model: \texttt{yolov8n.pt}
-  \item Input: \texttt{640 \(\times\) 640}, batch size \(=1\)
-  \item Device: GPU (\texttt{device=0})
-  \item TensorRT workspace: \(4\) GB
-  \item FP32 engine: \texttt{int8=False, half=False}
-  \item INT8 engine: \texttt{int8=True, half=False, data=DATA\_YAML, fraction=1.0, split="train"}
-\end{itemize}
-
-Early measurements showed strong sensitivity to benchmarking procedure. In particular, when both engines were loaded
-and benchmarked sequentially in one process, the second run often benefited from a warmer runtime state. To control
-this effect, additional experiments were performed with:
-\begin{itemize}
-  \item reversed engine order,
-  \item longer warmup ($500$ iterations),
-  \item fixed Jetson performance settings (\texttt{sudo nvpmodel -m 0}, \texttt{sudo jetson\_clocks}).
-\end{itemize}
+The TensorRT QDQ engine exhibits the largest accuracy degradation, with mAP50 decreasing by more than 25\% and
+mAP50--95 by nearly 42\%, which makes this variant impractical for deployment in the tested setup. A likely reason is
+that the ONNX QDQ graph requires additional adjustment before efficient TensorRT execution becomes possible. In
+particular, TensorRT does not support the default UINT8 zero-point convention commonly used in ONNX graphs, while the
+exported QDQ graph used here also quantizes bias tensors and final network outputs. As a result, the graph is not
+directly aligned with TensorRT's preferred low-precision execution path and requires extra transformations that can
+negatively affect both numerical behavior and final accuracy.
 
 \begin{table}[ht]
 \centering
-\small
-\begin{tabular}{llrrrrrr}
-\hline
-Phase & Run mode & FP32 ms & FP32 FPS & INT8 ms & INT8 FPS & INT8 gain \\
-\hline
-No clocks & dual (int8$\rightarrow$fp32) & 21.274 & 47.006 & 20.473 & 48.844 & 3.8\% \\
-No clocks & dual (fp32$\rightarrow$int8) & 21.067 & 47.469 & 15.545 & 64.330 & 26.2\% \\
-No clocks & separate runs & 23.122 & 43.248 & 20.249 & 49.385 & 12.4\% \\
-With clocks & dual (int8$\rightarrow$fp32) & 16.459 & 60.756 & 9.876 & 101.252 & 40.0\% \\
-With clocks & dual (fp32$\rightarrow$int8) & 16.768 & 59.639 & 9.655 & 103.569 & 42.4\% \\
-With clocks & separate runs & 16.588 & 60.284 & 10.068 & 99.328 & 39.3\% \\
-\hline
+\caption{Accuracy comparison of FP32 and INT8 YOLOv8n variants on the Jetson Orin Nano.}
+\label{tab:int8_accuracy_comparison}
+\begin{tabular}{lcccc}
+\toprule
+Backend & Precision & Recall & mAP50 & mAP50--95 \\
+\midrule
+PyTorch FP32                  & 0.6299 & 0.4878 & 0.5384 & 0.3899 \\
+ONNX Runtime INT8 QDQ (1\%)   & 0.6049 & 0.4573 & 0.5053 & 0.3548 \\
+ONNX Runtime INT8 QDQ (0.1\%) & 0.6122 & 0.4694 & 0.5067 & 0.3591 \\
+ONNX Runtime INT8 QDQ (10\%)  & 0.5872 & 0.4682 & 0.5001 & 0.3533 \\
+TensorRT FP32                 & 0.6288 & 0.4905 & 0.5386 & 0.3899 \\
+TensorRT INT8 implicit        & 0.5806 & 0.4418 & 0.4846 & 0.3481 \\
+TensorRT INT8 QDQ             & 0.4781 & 0.4162 & 0.4016 & 0.2264 \\
+\bottomrule
 \end{tabular}
-\caption{TensorRT YOLOv8n benchmark summary (batch=1, runs=1000, warmup=500).}
-\label{tab:trt_1000_500_summary}
 \end{table}
 
-Under locked-performance conditions, the INT8 engine achieved approximately $1.65\times$ higher throughput than FP32.
-Before locking power and clocks, the measured FP32--INT8 gap varied substantially with run order and process isolation.
-After enabling maximum performance mode and fixed clocks, measurements became more stable and the INT8 advantage
-increased. The resulting measurements are summarized in Table~\ref{tab:trt_1000_500_summary}.
+The same trend is visible in relative form in Table~\ref{tab:int8_accuracy_relative}. Among the ONNX Runtime QDQ
+runs, the 0.1\% calibration subset, corresponding to roughly 130 images, produced the least severe degradation, but
+the differences between the tested calibration splits are relatively small compared with the overall gap between INT8
+and FP32 execution. This suggests that calibration-set size alone is not the dominant factor in the observed loss.
+Instead, the larger issue appears to be the deployment path itself and the extent to which low-precision conversions
+are propagated and fused efficiently.
 
-This pattern suggests that earlier variability was dominated by DVFS and runtime warmup effects.
-In sequential same-process benchmarking, the later run can benefit from an already initialized CUDA runtime, warmed
-TensorRT execution context, and elevated GPU/memory clocks. These effects are especially pronounced on Jetson platforms.
+\begin{table}[ht]
+\centering
+\caption{Relative accuracy change (\%) of INT8 and TensorRT backends with respect to the PyTorch FP32 baseline.}
+\label{tab:int8_accuracy_relative}
+\begin{tabular}{p{4.7cm}rrrr}
+\toprule
+Backend & $\Delta$ Precision & $\Delta$ Recall & $\Delta$ mAP50 & $\Delta$ mAP50--95 \\
+\midrule
+ONNX Runtime INT8 QDQ (0.1\%) & -2.80 & -3.78 & -5.88  & -7.89 \\
+ONNX Runtime INT8 QDQ (1\%)   & -3.96 & -6.26 & -6.15  & -8.98 \\
+ONNX Runtime INT8 QDQ (10\%)  & -6.78 & -4.02 & -7.11  & -9.37 \\
+TensorRT FP32                 & -0.18 & +0.56 & +0.05  & +0.02 \\
+TensorRT INT8 implicit        & -7.83 & -9.43 & -9.98  & -10.71 \\
+TensorRT INT8 QDQ             & -24.10 & -14.68 & -25.40 & -41.93 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-Therefore, Jetson benchmarking should report not only numerical performance but also measurement protocol, warmup
-configuration, and device power state.
+Latency results, shown in Table~\ref{tab:int8_latency_comparison}, reveal an equally important deployment trade-off.
+The fastest configuration in the measured benchmark was TensorRT implicit INT8 quantization, achieving approximately
+5.34\,ms mean latency and 187.23 FPS. This is a substantial speedup over both PyTorch FP32 and ONNX Runtime INT8 QDQ.
+ONNX Runtime INT8 QDQ, despite using an INT8 graph, was actually slower than the PyTorch FP32 baseline in the
+presented experiment, reaching approximately 39.82\,ms per inference. TensorRT FP16, discussed in the previous section,
+already provides a strong optimized reference at 6.31\,ms, which means that the practical value of INT8 must be judged
+against both accuracy loss and the already highly optimized higher-precision TensorRT paths. The QDQ-based TensorRT
+engine reached 7.71\,ms, which is still faster than PyTorch and ONNX Runtime, but notably slower than the best
+TensorRT implicit INT8 result.
 
-\texttt{sudo nvpmodel -m 0} selects a high-performance power mode (power budget, online cores, and allowed
-CPU/GPU/EMC clock limits).
-\texttt{sudo jetson\_clocks} then fixes clocks near their maximum allowed values.
+\begin{table}[ht]
+\centering
+\caption{End-to-end YOLOv8n inference performance on the NVIDIA Jetson Orin Nano GPU. Values are reported as mean
+latency $\pm$ half-width of the 95\% confidence interval across 5 isolated repetitions, with 200 timed runs per
+repetition after 30 warm-up iterations.}
+\label{tab:int8_latency_comparison}
+\begin{tabular}{lccc}
+\toprule
+Backend & Latency (ms) & FPS mean & Median (ms) \\
+\midrule
+PyTorch FP32 (baseline) & 25.02 $\pm$ 0.18 & 39.96  & 25.10 \\
+ONNX Runtime INT8 QDQ   & 39.82 $\pm$ 0.21 & 25.11  & 39.82 \\
+TensorRT INT8 implicit  & 5.34 $\pm$ 0.05  & 187.23 & 5.34 \\
+TensorRT INT8 QDQ       & 7.71 $\pm$ 0.09  & 129.66 & 7.69 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-Although these settings improve peak performance, they are not always appropriate for continuous use:
-\begin{itemize}
-  \item higher power consumption,
-  \item increased heat and possible thermal throttling in long runs,
-  \item more fan noise,
-  \item lower realism for power-managed deployment scenarios,
-  \item reduced responsiveness for mixed workloads,
-  \item greater long-term thermal stress.
-\end{itemize}
+\begin{table}[ht]
+\centering
+\caption{Power and energy-efficiency results for selected YOLOv8n backends on the NVIDIA Jetson Orin Nano GPU.}
+\label{tab:int8_power_comparison}
+\begin{tabular}{lccc}
+\toprule
+Backend & Power mean (mW) & Power max (mW) & FPS/W \\
+\midrule
+PyTorch FP32 (baseline) & 25276 & 27646 & 1.58 \\
+ONNX Runtime INT8 QDQ   & 23941 & 27674 & 1.05 \\
+TensorRT INT8 implicit  & 18720 & 20466 & 10.00 \\
+TensorRT INT8 QDQ       & 19161 & 21678 & 6.77 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-A practical approach is to enable them for controlled benchmarking and disable them for routine development or
-power-constrained deployment.
+The profiling data helps explain why these differences occur. For the implicit TensorRT INT8 engine, the NVTX summary
+shows that execution is dominated by the TensorRT enqueue stage, while the GPU kernel summary is largely composed of
+INT8 GEMM and IMMA-style convolution kernels. This indicates that TensorRT is able to map a large fraction of the
+network to hardware-efficient INT8 kernels. At the same time, the profile still contains non-negligible reformat,
+copy, and permutation kernels, which shows that even the more successful implicit INT8 path does not achieve a fully
+clean low-precision execution pipeline.
+
+For QDQ-based deployment, the profile is substantially more cluttered with quantization-related operations. Many NVTX
+ranges explicitly include QuantizeLinear/DequantizeLinear stages together with clone, copy, and tensor-reformat
+operations. This confirms that a significant portion of the runtime is spent not on useful convolution or detection
+work, but on managing low-precision data transformations between operators. In a model with many convolutional blocks
+and concatenation-heavy structures such as YOLOv8n, these additional graph boundaries accumulate quickly and can
+dominate the practical cost of the supposed INT8 path.
+
+These results show that quantization cannot be evaluated only by checking whether a graph nominally uses INT8 values.
+What matters is whether the compiler and runtime can preserve low-precision execution through fused kernels and avoid
+repeated format conversions. In the present study, ONNX Runtime QDQ quantization produced limited or even negative
+efficiency benefits while still causing noticeable accuracy degradation. TensorRT QDQ improved latency relative to the
+PyTorch baseline, but the loss in accuracy was severe and the profile showed substantial conversion overhead. TensorRT
+implicit INT8 calibration produced the best speed among the tested INT8 approaches, but still degraded accuracy by
+roughly 10\% in mAP50 and mAP50--95 relative to the FP32 baseline.
+
+Overall, the results suggest that quantization for YOLOv8n on Jetson Orin Nano is highly deployment-path dependent. A
+naive or graph-heavy INT8 representation does not guarantee a practically useful result. In this work, the most
+effective TensorRT deployment path remained the standard optimized TensorRT engine in higher precision, while INT8
+became attractive only when the hardware-native implicit TensorRT calibration path was used. Even then, the speed gain
+came with a clear drop in predictive quality. Quantization therefore appears here as a deployment trade-off rather than
+as a universally beneficial optimization.
+
+Statistical significance was evaluated with a paired bootstrap test on validation images using 1000 resamples, and
+confidence intervals were computed with the percentile method. The bootstrap analysis confirmed that the evaluated INT8
+variants produced a statistically significant decrease in detection accuracy relative to the FP32 baseline, with the
+strongest degradation observed for the TensorRT QDQ path.
+
+\subsection{INT8 Inference on Raspberry Pi 5 CPU}
+\label{sec:pi5_int8_results}
+
+To evaluate the practical impact of integer quantization on an embedded CPU platform, additional
+benchmarks were performed on the Raspberry Pi 5 using INT8 YOLOv8n models. The comparison focused
+on two deployment frameworks that provided a usable CPU INT8 path in the present study: TFLite and
+ONNX Runtime. The experiments were executed with the same rigorous benchmarking procedure used in
+the previous sections: 5 isolated repetitions, 200 timed runs per repetition, 30 warm-up iterations,
+performance governor enabled, and active cooldown control between repetitions.
+
+The resulting latency and power measurements are summarized in Table~\ref{tab:pi5_int8_benchmark}.
+Accuracy was evaluated on a 1000-image subset of the COCO validation split and is summarized in
+Table~\ref{tab:pi5_int8_accuracy}. The PyTorch FP32 model is used as the accuracy baseline.
+
+\begin{table}[ht]
+\centering
+\caption{End-to-end INT8 YOLOv8n inference results on Raspberry Pi 5 CPU. Values are reported as
+mean latency $\pm$ half-width of the 95\% confidence interval across 5 isolated repetitions, with
+200 timed runs per repetition after 30 warm-up iterations.}
+\label{tab:pi5_int8_benchmark}
+\begin{tabular}{lcccc}
+\toprule
+Backend & Latency (ms) & FPS mean & Power (mW) & FPS/W \\
+\midrule
+TFLite INT8      & 31.05 $\pm$ 0.17 & 32.20 & 2340 & 13.76 \\
+ONNX Runtime INT8 & 133.81 $\pm$ 2.31 & 7.47  & 4394 & 1.70 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Accuracy of INT8 YOLOv8n variants on Raspberry Pi 5 CPU. Relative changes are computed
+with respect to the PyTorch FP32 baseline on the same 1000-image validation subset.}
+\label{tab:pi5_int8_accuracy}
+\begin{tabular}{lcccc}
+\toprule
+Backend & Precision & Recall & mAP50 & mAP50--95 \\
+\midrule
+PyTorch FP32 (baseline) & 0.6291 & 0.4884 & 0.5384 & 0.3898 \\
+ONNX Runtime INT8 QDQ   & 0.5729 & 0.4801 & 0.5052 & 0.3557 \\
+TFLite INT8             & 0.6172 & 0.4450 & 0.5042 & 0.3486 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The corresponding relative accuracy changes are shown in Table~\ref{tab:pi5_int8_accuracy_relative}.
+
+\begin{table}[ht]
+\centering
+\caption{Relative accuracy change of INT8 backends on Raspberry Pi 5 CPU with respect to the
+PyTorch FP32 baseline.}
+\label{tab:pi5_int8_accuracy_relative}
+\begin{tabular}{lcccc}
+\toprule
+Backend & $\Delta$ Prec. (\%) & $\Delta$ Rec. (\%) & $\Delta$ mAP50 (\%) & $\Delta$ mAP50--95 (\%) \\
+\midrule
+ONNX Runtime INT8 QDQ & -8.93 & -1.70 & -6.16 & -8.74 \\
+TFLite INT8           & -1.89 & -8.88 & -6.35 & -10.56 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A striking result is the large performance advantage of TFLite INT8. With a mean latency of only
+31.05\,ms, it is more than four times faster than ONNX Runtime INT8 and substantially faster than
+all previously evaluated FP32 and FP16 CPU configurations. Compared with the earlier TFLite FP32/FP16
+results (approximately 154\,ms), the INT8 TFLite model achieves roughly a 5$\times$ speedup. At the
+same time, it also delivers by far the best energy efficiency, reaching 13.76 FPS/W.
+
+This behavior is plausible on the Raspberry Pi 5 CPU. TFLite is strongly optimized for mobile and
+embedded processors and is able to execute quantized models using an efficient integer arithmetic
+path for a large portion of the network. In this case, both weights and activations are represented
+with lower precision, reducing memory traffic and improving cache utilization. On a CPU-bound platform
+such as Raspberry Pi 5, this can produce a much larger practical gain than would be expected from
+arithmetic reduction alone.
+
+By contrast, ONNX Runtime uses a QDQ representation in which explicit \path{QuantizeLinear} and
+\path{DequantizeLinear} operators are inserted into the graph. If these conversions are not fully
+eliminated or fused during execution, a significant part of the runtime may be spent on tensor
+conversions rather than on useful convolution work. In a model such as YOLOv8n, which contains many
+convolution blocks, concatenation operations, and detection-head transformations, these graph
+boundaries can accumulate and reduce the practical benefit of quantization. This explains why ONNX
+Runtime INT8 still improves over its FP32 CPU path, but only modestly compared with TFLite.
+
+From the accuracy perspective, both INT8 variants introduce a noticeable degradation relative to the
+PyTorch FP32 baseline. The mAP50 drop is similar for the two backends, around 6\%, while the
+mAP50--95 reduction reaches 8.74\% for ONNX Runtime and 10.56\% for TFLite. The error pattern is not
+identical: ONNX Runtime loses more precision, whereas TFLite preserves precision better but shows a
+larger drop in recall. This suggests that the two deployment paths affect confidence scores and box
+regression somewhat differently, even though both are based on INT8 inference.
+
+On Raspberry Pi 5 CPU, Linux perf profiling showed that TFLite INT8 inference spent most active execution
+time inside clearly identifiable XNNPACK quantized microkernels, such as IGEMM/GEMM and LUT-based kernels.
+In contrast, ONNX Runtime INT8 required substantially more total cycles and instructions, achieved a lower
+IPC, and exhibited a higher LLC miss rate. This indicates that, for this model and deployment path, TFLite
+provided a more efficient CPU execution path, likely due to better-optimized low-level kernels and/or lower
+runtime overhead.
+
+Overall, the Raspberry Pi 5 experiments show that quantization can deliver very large practical
+benefits on CPU, but only when the runtime can preserve a genuinely efficient integer execution path.
+In the evaluated setup, TFLite INT8 was the most effective deployment option by a large margin in
+both latency and energy efficiency. However, this gain came with a measurable reduction in detection
+accuracy, which means that INT8 deployment remains a trade-off between efficiency and predictive
+quality rather than a universally beneficial optimization.
 
 \section{Evaluation of YOLOv8n Pruning}
 
@@ -3200,7 +3429,8 @@ compiler-driven optimizations to better exploit the available GPU hardware resou
 
 %\bibliographystyle{ieeetr}  % or plain, unsrt, abbrv, IEEEtran, etc.
 %\bibliography{refs}
-\printbibliography
+%\printbibliography
+\printbibliography[heading=bibintoc,title={References}]
 
 \cleardoublepage
 
