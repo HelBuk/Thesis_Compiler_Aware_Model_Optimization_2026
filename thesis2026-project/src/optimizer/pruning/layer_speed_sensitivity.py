@@ -235,8 +235,8 @@ class PersistentCOCOEvaluator:
         cfg = get_cfg(DEFAULT_CFG, overrides)
         v = DetectionValidator(args=cfg)
 
-        # Patch out print_results so that get_stats() / __call__ never writes
-        # "Class  Images  Instances  Box(P  R  mAP50  mAP50-95)" per config.
+        # Silence the "Class  Images  Instances  Box(P  R  mAP50-95)" header
+        # that get_stats() triggers via print_results().
         v.print_results = lambda: None
 
         v.data = check_det_dataset(data)
@@ -249,17 +249,32 @@ class PersistentCOCOEvaluator:
                 actual_split = candidate
                 break
 
-        print(f"  [PersistentEvaluator] building dataloader once "
+        # ------------------------------------------------------------------ #
+        # Preload ALL batches into CPU RAM exactly once.                       #
+        # eval() iterates a plain Python list — no dataloader, no disk IO,    #
+        # no Ultralytics TQDM bar on subsequent calls.                         #
+        # Images stay as uint8 on CPU (~1 byte/pixel); preprocess() moves     #
+        # them to the device and converts to float32 per batch during eval.   #
+        # ------------------------------------------------------------------ #
+        print(f"  [PersistentEvaluator] preloading batches "
               f"(split={actual_split}, fraction={val_fraction:.3f}) ...")
-        self._dl = v.get_dataloader(v.data[actual_split], batch)
-        n_img = len(self._dl.dataset)
-        print(f"  [PersistentEvaluator] ready — {n_img} images, "
-              f"{len(self._dl)} batches (reused for every config)")
+        dl = v.get_dataloader(v.data[actual_split], batch)
+        self._batches: list[dict] = []
+        for b in dl:
+            self._batches.append(
+                {k: (v_.cpu() if isinstance(v_, torch.Tensor) else v_)
+                 for k, v_ in b.items()}
+            )
+
+        n_img = sum(b["img"].shape[0] for b in self._batches)
+        ram_mb = sum(b["img"].nbytes for b in self._batches) / 1e6
+        print(f"  [PersistentEvaluator] {n_img} images preloaded "
+              f"({ram_mb:.0f} MB RAM) — reused for every config, zero disk IO")
 
         self._v = v
 
     def eval(self, model: nn.Module) -> dict[str, float]:
-        """Swap the model and run one pass over the pre-built dataloader."""
+        """Run one inference pass over preloaded batches. No Ultralytics output."""
         v = self._v
         m = model.float().eval().to(self._device)
 
@@ -267,13 +282,14 @@ class PersistentCOCOEvaluator:
         v.jdict = []
 
         with torch.inference_mode():
-            for batch in self._dl:
-                batch = v.preprocess(batch)
+            for raw in self._batches:
+                # preprocess() moves to device + normalises (uint8 → float32/255)
+                batch = v.preprocess(raw)
                 preds = m(batch["img"])
                 preds = v.postprocess(preds)
                 v.update_metrics(preds, batch)
 
-        stats = v.get_stats()
+        stats = v.get_stats()   # print_results patched to no-op above
         try:
             v.finalize_metrics()
         except Exception:
