@@ -1,0 +1,78 @@
+{
+  "model_a": {
+    "name": "baseline",
+    "path": "../detect/optimizer/pruning/runs/manual_prune/combo_17_e50/combo_17_layers_e50/weights/best.pt",
+    "device": "cuda:0",
+    "benchmark": {
+      "batch": 1,
+      "runs": 200,
+      "warmup": 30,
+      "mean_ms_per_batch": 6.003299974836409,
+      "median_ms_per_batch": 5.9935785830020905,
+      "std_ms_per_batch": 0.028783721864667617,
+      "p90_ms_per_batch": 6.049660523422062,
+      "p95_ms_per_batch": 6.062780297361314,
+      "p99_ms_per_batch": 6.087451244238764,
+      "fps_batches": 166.57505108717314,
+      "fps_images": 166.57505108717314,
+      "throughput_images_per_s": 166.49042739640373,
+      "total_wall_ms": 1201.2702659703791
+    },
+    "accuracy": {
+      "metrics/precision(B)": 0.622170503639286,
+      "metrics/recall(B)": 0.46108971278129635,
+      "metrics/mAP50(B)": 0.49899924704080434,
+      "metrics/mAP50-95(B)": 0.35427200953073146,
+      "fitness": 0.35427200953073146
+    },
+    "accuracy_ultralytics": {
+      "metrics/precision(B)": 0.6172074401699557,
+      "metrics/recall(B)": 0.4634849099000614,
+      "metrics/mAP50(B)": 0.5066644413833368,
+      "metrics/mAP50-95(B)": 0.3588088680218101,
+      "fitness": 0.3588088680218101,
+      "speed/preprocess_ms": 0.18354962281882764,
+      "speed/inference_ms": 3.8476062967441975,
+      "speed/loss_ms": 0.007825606781989337,
+      "speed/postprocess_ms": 0.6135455083567649
+    }
+  },
+  "model_b": {
+    "name": "pruned",
+    "path": "../detect/optimizer/pruning/runs/manual_prune/combo_17_e50_v2/combo_17_layers_e50_v2/weights/best.pt",
+    "device": "cuda:0",
+    "benchmark": {
+      "batch": 1,
+      "runs": 200,
+      "warmup": 30,
+      "mean_ms_per_batch": 5.849853581748903,
+      "median_ms_per_batch": 5.844152998179197,
+      "std_ms_per_batch": 0.027596245121845626,
+      "p90_ms_per_batch": 5.8645881013944745,
+      "p95_ms_per_batch": 5.8888409403152755,
+      "p99_ms_per_batch": 5.9681616188026965,
+      "fps_batches": 170.94444946791896,
+      "fps_images": 170.94444946791896,
+      "throughput_images_per_s": 170.87769833150696,
+      "total_wall_ms": 1170.4277500975877
+    },
+    "accuracy": {
+      "metrics/precision(B)": 0.6026140853947366,
+      "metrics/recall(B)": 0.4486077840500723,
+      "metrics/mAP50(B)": 0.48474370923295285,
+      "metrics/mAP50-95(B)": 0.3415433791175975,
+      "fitness": 0.3415433791175975
+    },
+    "accuracy_ultralytics": {
+      "metrics/precision(B)": 0.5996713405252174,
+      "metrics/recall(B)": 0.4511241716483415,
+      "metrics/mAP50(B)": 0.489722837694917,
+      "metrics/mAP50-95(B)": 0.3446317368706157,
+      "fitness": 0.3446317368706157,
+      "speed/preprocess_ms": 0.18357146186754109,
+      "speed/inference_ms": 3.7632223441731183,
+      "speed/loss_ms": 0.007841725600883365,
+      "speed/postprocess_ms": 0.6200347843114287
+    }
+  }
+}
