@@ -15,19 +15,36 @@ import torch
 import torch.nn as nn
 from ultralytics import YOLO
 
-from optimizer.pruning.manual_yolov8_pruner import (
-    _block_input_wrapper,
-    _block_output_wrapper,
-    _set_wrapper_input_channels,
-    _prune_wrapper_output_channels,
-    _sync_bottleneck_add,
-    _c2f_cv2_input_keep_for_bn_prune,
-    _build_old_out_channels,
-    _sources,
-    _concat_input_keep_idx,
-    fp32_param_mb,
-    params_count,
-)
+try:
+    # Works when run as: python -m src.optimizer.pruning.layer_speed_sensitivity
+    from .manual_yolov8_pruner import (
+        _block_input_wrapper,
+        _block_output_wrapper,
+        _set_wrapper_input_channels,
+        _prune_wrapper_output_channels,
+        _sync_bottleneck_add,
+        _c2f_cv2_input_keep_for_bn_prune,
+        _build_old_out_channels,
+        _sources,
+        _concat_input_keep_idx,
+        fp32_param_mb,
+        params_count,
+    )
+except ImportError:
+    # Fallback: run from src/ as: python -m optimizer.pruning.layer_speed_sensitivity
+    from optimizer.pruning.manual_yolov8_pruner import (  # type: ignore[no-redef]
+        _block_input_wrapper,
+        _block_output_wrapper,
+        _set_wrapper_input_channels,
+        _prune_wrapper_output_channels,
+        _sync_bottleneck_add,
+        _c2f_cv2_input_keep_for_bn_prune,
+        _build_old_out_channels,
+        _sources,
+        _concat_input_keep_idx,
+        fp32_param_mb,
+        params_count,
+    )
 
 
 # -----------------------------
@@ -129,6 +146,41 @@ def adjust_keep_count(requested: int, max_channels: int, parity_mode: str) -> Ke
 # Accuracy evaluation
 # -----------------------------
 
+_IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
+
+def _count_val_images(data_yaml: str, split: str) -> int:
+    """Count images in the validation split directory (best-effort)."""
+    data_path = Path(data_yaml)
+    with open(data_path, "r") as f:
+        d = yaml.safe_load(f) or {}
+
+    val_rel = d.get(split) or d.get("val") or d.get("valid") or ""
+    if not val_rel:
+        return 0
+
+    # Try relative to the YAML's parent, then as absolute
+    for base in (data_path.parent, Path(".")):
+        val_dir = (base / val_rel).resolve()
+        if val_dir.is_dir():
+            return sum(1 for p in val_dir.rglob("*") if p.suffix.lower() in _IMG_EXTS)
+    return 0
+
+
+def compute_val_fraction(data_yaml: str, split: str, batch: int, max_batches: int) -> float:
+    """Return the dataset fraction that corresponds to at most max_batches batches."""
+    if max_batches <= 0:
+        return 1.0
+    n_images = _count_val_images(data_yaml, split)
+    if n_images <= 0:
+        print(f"  [warn] could not count val images; ignoring --max-val-batches")
+        return 1.0
+    cap = max_batches * batch
+    frac = min(1.0, cap / n_images)
+    print(f"  [val] {n_images} val images, capping at {cap} (fraction={frac:.4f})")
+    return frac
+
+
 def eval_model_no_train(
     y: YOLO,
     data: str,
@@ -138,9 +190,11 @@ def eval_model_no_train(
     *,
     split: str = "val",
     project: str = "./optimizer/pruning/runs/layer_speed_sensitivity",
+    val_fraction: float = 1.0,
 ) -> dict[str, float]:
     """
     Evaluate current model weights/architecture with Ultralytics val(), no training.
+    Pass val_fraction < 1.0 to evaluate on a subset (e.g. 0.2 = 1000 of 5000 COCO val images).
     """
     with open(data, "r") as f:
         d = yaml.safe_load(f) or {}
@@ -148,7 +202,7 @@ def eval_model_no_train(
     if split == "val" and d.get("val") is None and d.get("valid") is not None:
         split = "valid"
 
-    m = y.val(
+    kwargs: dict = dict(
         data=data,
         imgsz=imgsz,
         device=device,
@@ -157,6 +211,10 @@ def eval_model_no_train(
         project=project,
         verbose=False,
     )
+    if val_fraction < 1.0:
+        kwargs["fraction"] = val_fraction
+
+    m = y.val(**kwargs)
     return {
         "map50_95": float(m.box.map),
         "map50": float(m.box.map50),
@@ -379,6 +437,8 @@ def apply_exact_keep_to_target(model: nn.Module, target: str, keep_count: int) -
 def cuda_sync(device: str) -> None:
     if str(device).startswith("cuda") and torch.cuda.is_available():
         torch.cuda.synchronize()
+    elif str(device) == "mps" and torch.backends.mps.is_available():
+        torch.mps.synchronize()
 
 
 def benchmark_forward_latency_ms(
@@ -514,13 +574,28 @@ def main() -> None:
     ap.add_argument("--targets", type=str, default="", help="Optional comma-separated subset of targets")
     ap.add_argument("--parity-modes", type=str, default="any,even,odd")
     ap.add_argument("--use-half", action="store_true", help="Benchmark in fp16 on CUDA")
+    ap.add_argument("--threads", type=int, default=0,
+                    help="CPU threads (torch.set_num_threads). Only used when --device cpu.")
 
     ap.add_argument("--data", type=str, default="../datasets/coco/data.yaml")
     ap.add_argument("--eval-batch", type=int, default=16)
     ap.add_argument("--eval-split", type=str, default="val")
     ap.add_argument("--measure-accuracy", action="store_true")
+    ap.add_argument("--max-val-batches", type=int, default=0,
+                    help="Cap accuracy eval at this many batches (0 = full dataset). "
+                         "E.g. 1000 with --eval-batch 1 evaluates ~1000 images.")
 
     args = ap.parse_args()
+
+    if args.device == "cpu" and args.threads > 0:
+        torch.set_num_threads(args.threads)
+
+    # Pre-compute val fraction once (reads the val dir to count images)
+    val_fraction = 1.0
+    if args.measure_accuracy and args.max_val_batches > 0:
+        val_fraction = compute_val_fraction(
+            args.data, args.eval_split, args.eval_batch, args.max_val_batches
+        )
 
     csv_path = Path(args.csv_out)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -550,6 +625,7 @@ def main() -> None:
             batch=args.eval_batch,
             split=args.eval_split,
             project=args.project,
+            val_fraction=val_fraction,
         )
 
     targets = [t.strip() for t in args.targets.split(",") if t.strip()] if args.targets.strip() else list_prunable_targets(args.weights)
@@ -685,6 +761,7 @@ def main() -> None:
                                     batch=args.eval_batch,
                                     split=args.eval_split,
                                     project=args.project,
+                                    val_fraction=val_fraction,
                                 )
 
                                 row["map50_95"] = round(acc["map50_95"], 6)
