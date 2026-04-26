@@ -487,8 +487,8 @@ compiler transformations, runtime optimizations, operator fusion, and memory bot
 With the growing interest in on-device deployment, a clear gap has emerged between the training and inference
 stages of machine learning models. While large models are typically trained in data centers using powerful GPUs,
 inference is performed across a wide variety of environments subject to strict constraints on memory, latency,
-and power consumption. These environments span heterogeneous hardware platforms — CPUs, GPUs, TPUs, NPUs,
-and FPGAs — each differing in instruction sets, memory hierarchies, and supported data types. As a result,
+and power consumption. These environments span heterogeneous hardware platforms - CPUs, GPUs, TPUs, NPUs,
+and FPGAs - each differing in instruction sets, memory hierarchies, and supported data types. As a result,
 model performance depends heavily on how well the deployment is adapted to the target hardware.
 
 \noindent Deployment efficiency is characterized along four principal dimensions:
@@ -510,26 +510,36 @@ hardware.
 Machine learning models are typically developed in high-level Python frameworks such as TensorFlow or
 PyTorch, which use dynamic execution: operations are dispatched immediately, control flow is resolved at
 runtime, and tensors are created and destroyed on the fly. This flexibility comes at a cost. Every operation
-passes through the Python interpreter; the Global Interpreter Lock (GIL) limits parallel execution; tensors
-and operators are heap-allocated Python objects; and each kernel dispatch requires the framework to resolve
+passes through the Python interpreter; the Global Interpreter Lock (GIL)~\cite{python_capi_gil} limits parallel execution;
+tensors and operators are heap-allocated Python objects; and each kernel dispatch requires the framework to resolve
 device placement and memory management at runtime. Individually these overheads are small, but across a deep
 network with thousands of operations they accumulate into a non-trivial fraction of end-to-end latency.
 
 In deployment, models are therefore not run inside Python at all. Instead, they are executed by C++-based
 runtimes, hardware-specific inference engines, or precompiled binaries targeting accelerators such as GPUs,
-NPUs, and FPGAs. These runtimes execute pre-compiled computation graphs, call highly optimized kernels
+NPUs, and FPGAs~\cite{chen2018tvm,onnxruntime_execution_providers,nvidia_tensorrt_docs}. These runtimes execute
+pre-compiled computation graphs, call highly optimized kernels
 directly, and avoid Python entirely. However, simply exporting a model out of Python does not automatically
 guarantee speedups. To fully benefit, the model must first be compiled into a static or semi-static graph,
 then optimized through operator fusion, memory planning, quantization, and layout transformations, and
 finally adapted to the instruction set and memory hierarchy of the target hardware. Without this compilation
 step, a deployed runtime may still execute inefficient kernels or suboptimal data flows.
 
-A further challenge is that standard kernel libraries such as cuDNN and oneDNN were primarily designed for
-throughput-oriented, large-batch training workloads. Large batches improve cache efficiency by reusing
-weights across many samples and provide enough parallel work to justify complex tiling and scheduling
-strategies in GEMM-based kernels. At batch size~1, which is standard for real-time edge inference, these
-assumptions break down: memory access patterns become less regular, kernel occupancy drops, and launch
-overhead contributes a larger share of total latency.
+A further challenge is that highly optimized kernel libraries such as cuDNN and oneDNN are not
+automatically optimal for all deployment regimes. Although these libraries support both training and
+inference, many of their fastest implementations rely on sufficient arithmetic intensity, data reuse,
+vectorization, and parallel work to amortize scheduling and dispatch overheads. These conditions are
+often easier to satisfy in training or high-throughput inference, where larger batches allow weights and
+activation tiles to be reused across multiple samples.
+
+In real-time edge inference, however, batch size is often fixed to one in order to minimize response
+latency. Under this regime, the computation may expose less parallelism and less reuse per invocation.
+On GPUs, this can reduce occupancy and make CUDA kernel-launch overhead, memory traffic, and
+operator fragmentation more visible in the end-to-end latency. On CPUs, the analogous issue is not GPU
+occupancy but reduced SIMD utilization, less effective cache blocking, thread-management overhead,
+and layout-conversion overheads. As a result, batch-size-one inference can be limited not only by peak
+compute throughput, but also by memory movement, runtime overhead, and the ability of the compiler or
+runtime to fuse operators and select kernels specialized for small-batch execution.
 
 Graph-level compilers address this by operating on the entire computation graph rather than dispatching one
 operator at a time. With global visibility over operators, data dependencies, and tensor lifetimes,
@@ -541,23 +551,31 @@ avoiding the unnecessary transposes that arise when operators from different lib
 
 \section{ML compilers and inference runtimes}
 
-An ML model compiler takes a high-level model representation — expressed in a framework such as PyTorch,
-TensorFlow, or as an ONNX graph — and translates it into efficient executable code for a specific target
-hardware (CPU, GPU, NPU, FPGA, or a dedicated ASIC). This translation process is orchestrated by a
-compiler and runtime stack, illustrated in Figure~\ref{fig:compflow}.
+Deep learning compilers specialize traditional compiler ideas for tensor programs and neural-network graphs
+~\cite{li2020deep, zhang2023compiler, thangamani2024survey, zhang2026new}.
+They address the gap between high-level model definitions and heterogeneous deployment targets
+by lowering neural-network graphs through one or more intermediate representations, applying graph-level and
+operator-level optimizations, and generating target-specific code or calls to optimized backend libraries.
+So the code, expressed in a framework such as PyTorch,
+TensorFlow, or as an ONNX graph, is translated into efficient executable code for a specific target
+hardware (CPU, GPU, NPU, FPGA, or a dedicated ASIC).
 
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=1.0\linewidth]{pics/compiler_structure_custom.pdf}
-    \caption{Flow of an ML model from definition through compilation and runtime execution on hardware.}
-    \label{fig:compflow}
-\end{figure}
 
-Compilation proceeds through several stages. The frontend ingests the model from its source
-framework (PyTorch, TensorFlow, or JAX), typically via an exported intermediate format such as ONNX,
-TorchScript, or StableHLO, and converts it into the compiler's internal representation (IR) while
-normalizing operator variants and control flow. The graph optimization stage then applies
-framework-agnostic transformations: operator fusion and simplification, constant folding, dead-branch
+
+Most ML compilers follow a layered structure, illustrated in Figure~\ref{fig:compflow}.
+
+Compilation proceeds through several stages. The frontend first captures or imports the model
+from a source framework such as PyTorch~\cite{paszke2019pytorch},
+TensorFlow~\cite{abadi2016tensorflow}, or JAX~\cite{frostig2019compiling}. In practical
+deployment pipelines, this step is often mediated by an exported representation such as
+ONNX~\cite{microsoft2017onnx}, while framework-specific or compiler-oriented representations
+such as TorchScript (obsolete), FX graphs~\cite{reed2022torch},
+High Level Optimizer (HLO, the IR of XLA)~\cite{openxla_hlo_to_thunks_docs}, or
+StableHLO~\cite{openxla_stablehlo_docs} are used in
+particular compiler ecosystems.
+The imported program is then converted into the compiler's internal intermediate representation.
+The graph optimization stage then applies framework-agnostic transformations: operator fusion
+and simplification, constant folding, dead-branch
 elimination, and memory planning. The resulting high-level IR is subsequently lowered to a
 loop-level representation where tiling, vectorization, and memory-access scheduling are applied for the
 specific target. Finally, the code generation backend performs instruction selection, register
@@ -567,16 +585,225 @@ Once compiled, the model is managed by an ML runtime, which handles execution or
 (loading the compiled artifact and scheduling its execution), memory allocation for intermediate tensors,
 hardware interfacing, and integration with vendor libraries.
 
+Overall, the architecture of a deep-learning compiler can be viewed as a pipeline composed of a
+frontend, one or more intermediate representations, and a backend. The IR connects these stages and often appears
+at multiple levels of abstraction, ranging from high-level graph IR to low-level operator or tensor IR.
+
+\paragraph{The high-level IR (Graph IR)} represents the computation graph of a deep-learning model
+at a level above hardware-specific code generation. It captures operators, tensors, data dependencies,
+and in some systems also control flow, while remaining mostly hardware-independent. Its purpose is
+to provide a representation on which the compiler frontend can perform graph-level optimizations
+before lowering the model to a lower-level IR for scheduling, code generation, and hardware-specific
+optimization~\cite{li2020deep}.
+
+A common representation is a directed acyclic graph (DAG)(see listing~\ref{lst:dag_graph_ir}), where nodes correspond
+to neural-network
+operators such as convolution, pooling, reshape, or activation functions, and edges correspond to tensors
+flowing between operators. This representation allows the compiler to analyze dependencies between
+operators and apply optimizations. However, pure DAG-based representations
+can be limited when the computation scope or control flow must be represented explicitly. For this reason,
+some compiler IRs also use let-binding (see listing~\ref{lst:let_binding_ir}), which represents each intermediate
+tensor as a named binding,
+or functional representations (see listing~\ref{lst:function_based_ir}), which views computation
+as a collection of functions, where each function contains
+operations/instructions and has explicit inputs and outputs. For example, TVM Relay combines
+DAG-style graph representation with let-binding ideas, while XLA HLO uses a function-based representation
+organized around modules, computations, and instructions~\cite{li2020deep}.
+
+The high-level IR must also encode tensor-specific information that is essential for deep-learning
+optimization. This includes tensor shapes, possibly dynamic dimensions, data layouts such as NCHW or
+NHWC, broadcasting rules, reduction operations, and support for custom operators. This information is
+needed to infer valid transformations, select efficient layouts, and preserve correctness when the graph is
+later lowered to backend-specific code. Thus, the high-level IR acts as the bridge between framework-level
+model definitions and lower-level compiler stages: it is expressive enough to describe deep-learning
+models, but abstract enough to enable hardware-independent graph optimization.
+
+\begin{listing}[htbp]
+\begin{minted}[fontsize=\small, breaklines=true]{text}
+DAG-based graph IR:
+
+x ----\
+       conv2d ----> z ----> relu ----> a ----\
+w ----/                                      add ----> y
+bias ---------------------------------------/
+
+Nodes:
+  conv2d, relu, add
+
+Edges:
+  x, w, z, a, bias, y
+\end{minted}
+\caption{Example of a DAG-based graph IR representation.}
+\label{lst:dag_graph_ir}
+\end{listing}
+
+\begin{listing}[htbp]
+\begin{minted}[fontsize=\small, breaklines=true]{text}
+Let-binding-based IR:
+
+let z = conv2d(x, w) in
+let a = relu(z) in
+let y = add(a, bias) in
+return y
+\end{minted}
+\caption{Example of a let-binding-based IR representation.}
+\label{lst:let_binding_ir}
+\end{listing}
+
+\begin{listing}[htbp]
+\begin{minted}[fontsize=\small, breaklines=true]{text}
+Function-based IR:
+
+function forward(x, w, bias):
+    z = conv2d(x, w)
+    a = relu(z)
+    y = add(a, bias)
+    return y
+\end{minted}
+\caption{Example of a function-based IR representation.}
+\label{lst:function_based_ir}
+\end{listing}
+
+
+\paragraph{The low-level IR}
+The low-level IR represents the computation of a deep-learning model in a more fine-grained form
+than the high-level graph IR. While the high-level IR is mainly used to describe operators, tensors,
+and graph-level dependencies, the low-level IR is closer to the actual implementation of each
+operator or fused subgraph. It exposes loop structure, memory accesses, tensor indexing,
+scheduling decisions, and target-specific information, making it the main interface for
+hardware-dependent optimizations and code generation~\cite{li2020deep}.
+
+A common design in low-level IRs is to separate the description of what is computed from
+how it is computed. Halide-inspired IRs, used for example in TVM, follow this idea by
+separating the tensor computation from its schedule. The computation defines the mathematical
+operation, while the schedule controls implementation choices such as tiling, loop reordering,
+vectorization, parallelization, memory placement, and unrolling. This separation is useful because
+the same operator can be mapped differently depending on the target hardware, such as an ARM
+CPU, an NVIDIA GPU, or a specialized accelerator.
+
+Another important family is polyhedral-based IRs. These represent loop nests and memory
+accesses using mathematical sets, affine transformations, and dependence relations. Such
+representations are well suited for optimizing regular tensor computations, because they make it
+possible to reason about loop transformations such as fusion, tiling, skewing, mapping, and
+parallelization. However, polyhedral approaches are most effective when loop bounds and memory
+accesses can be described statically and regularly, which can limit their applicability for highly
+dynamic or irregular model structures.
+
+Some compiler systems use their own low-level IRs instead of directly adopting Halide- or
+polyhedral-style representations. For example, Glow~\cite{rotem2018glow} uses an instruction-based low-level IR over
+explicit memory regions, while MLIR~\cite{mlir_overview} provides a multi-level compiler infrastructure based on
+dialects, allowing tensor, linear algebra, affine, LLVM~\cite{lattner2004llvm}, and hardware-specific
+abstractions to coexist in the same framework.
+XLA HLO can also serve both high-level and lower-level roles, since it is
+fine-grained enough to express many target-specific optimization decisions while still preserving
+tensor-level semantics.
+
+The low-level IR is eventually lowered to executable code or runtime calls, often through mature
+compiler infrastructures such as LLVM, CUDA, OpenCL, or vendor-specific code generators. This
+stage may be performed just-in-time (JIT), where code is generated at runtime using available
+shape and hardware information, or ahead-of-time (AOT), where executable binaries are generated
+before deployment. In edge-AI deployment, the low-level IR is especially important because
+performance depends strongly on hardware-specific choices such as memory hierarchy usage,
+vector width, cache behavior, tensor layout, and available accelerator instructions.
+
+\paragraph{Frontend Optimizations}
+It is easier to identify optimization opportunities when the machine learning model is represented
+as a complete computation graph rather than as isolated operators. Frontend optimizations are
+therefore applied at the graph or high-level IR level, before the model is lowered to hardware-specific
+backend code. These transformations are mostly hardware-independent: they simplify the graph,
+remove redundant operations, expose fusion opportunities, and reduce memory traffic, but they do
+not yet define how each operation is implemented on a particular CPU, GPU, or accelerator.
+
+Li et al.~\cite{li2020deep} classify frontend optimizations in deep-learning compilers into three
+main categories: node-level, block-level, and dataflow-level optimizations.
+
+\begin{itemize}
+    \item \textbf{Node-level optimizations} operate on individual graph nodes. They include
+    node elimination and node replacement, where unnecessary or expensive nodes are removed
+    or replaced by cheaper equivalent operations. Examples include removing identity operations,
+    eliminating padding nodes with zero padding width, or replacing a redundant reshape with
+    direct tensor forwarding.
+
+    \item \textbf{Block-level optimizations} operate on small local subgraphs. They include
+    algebraic simplification, strength reduction, constant folding, operator fusion, and operator
+    sinking. For example, a sequence such as convolution, bias addition, and activation can be
+    fused into a single higher-level operation, reducing intermediate tensors and kernel-launch
+    overhead.
+
+    \item \textbf{Dataflow-level optimizations} operate globally across the computation graph.
+    They include common sub-expression elimination, dead code elimination, static memory
+    planning, and layout transformation. These optimizations exploit the global graph structure
+    to avoid recomputation, remove unused branches, reuse memory buffers, and select tensor
+    layouts that are more suitable for later backend execution.
+\end{itemize}
+
+Figure~\ref{fig:frontend_optimization_examples} illustrates representative examples of these
+frontend graph transformations.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{pics/frontend_optimization_examples.pdf}
+    \caption{Representative examples of frontend graph optimizations in deep-learning compilers.
+    Node-level optimizations remove or replace individual redundant nodes, block-level optimizations
+    simplify or fuse local subgraphs, and dataflow-level optimizations exploit the global computation
+    graph to remove redundant computation or reuse memory buffers.}
+    \label{fig:frontend_optimization_examples}
+\end{figure}
+
+\paragraph{Backend Optimizations}
+
+Backend optimizations form the target-specific part of a deep-learning compiler. After the model
+has been represented in a graph or tensor-level IR, the backend lowers this representation to
+executable code, optimized kernels, or calls into vendor libraries. In practice, high performance is
+often achieved by combining library-based execution, such as cuDNN, MIOpen, oneDNN, or BLAS
+kernels, with compiler-generated transformations that specialize the computation for the target
+architecture. These transformations include mapping low-level IR patterns to hardware intrinsics
+or optimized micro-kernels, assigning intermediate tensors to appropriate memory scopes, improving
+data locality through cooperative fetching and explicit memory allocation, hiding memory latency
+through scheduling and hardware thread switching, and applying loop transformations such as
+fusion, tiling, reordering, unrolling, and sliding-window optimizations. The backend also exposes
+parallelism at multiple granularities, including SIMD vectorization, CPU multi-threading, GPU
+thread/block parallelism, and accelerator-specific execution units.
+Figure~\ref{fig:hardware_specific_optimizations_dl_compilers}
+summarizes several representative backend-level optimization techniques used in deep-learning
+compilers.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{pics/overview_of_hardware_spec_optimizations_applied.pdf}
+    \caption{Overview of hardware-specific optimizations applied in deep-learning compilers.
+    Reproduced from Li et al.~\cite{li2020deep}.}
+    \label{fig:hardware_specific_optimizations_dl_compilers}
+\end{figure}
+
+
+A central difficulty is that these optimizations create a large, hardware-dependent search space.
+Even for a single convolution or matrix multiplication, the compiler may need to choose tile sizes,
+loop orders, memory layouts, vector widths, thread/block mappings, unrolling factors, and intrinsic
+implementations. The best configuration depends on the target architecture, cache hierarchy,
+memory bandwidth, register pressure, available parallelism, and supported instruction set. As a
+result, many deep-learning compilers incorporate auto-tuning mechanisms. Auto-tuning defines a
+space of valid schedules and searches for high-performing implementations using empirical
+measurements, analytical or learned cost models, and heuristic search methods such as genetic
+algorithm (GA)~\cite{Goldberg1989}, reinforcement learning (RL)~\cite{mnih2015human_level_control},
+simulated annealing (SA)~\cite{bertsimas1993simulated}, or evolutionary search~\cite{ashouri2018survey}.
+
+Although many standard deep-learning kernels are highly optimized, model development often progresses faster than
+backend kernel support. New architectures can introduce operators or computation patterns that are not yet available
+as optimized library kernels or compiler-generated implementations. In such cases, the computation may fall back to
+unfused operator sequences or generic implementations, causing additional kernel launches, intermediate memory traffic,
+reduced locality, and significant runtime overhead.
+
 Examples of modern compiler and runtime stacks for machine learning include:
 \begin{itemize}
-    \item \textbf{TensorFlow/XLA}, which compiles TensorFlow programs through XLA using HLO-based
+    \item \textbf{TensorFlow XLA}, which compiles TensorFlow programs through XLA using HLO-based
         intermediate representations~\cite{tensorflow_xla_architecture,xla_hlo_tooling};
     \item \textbf{PyTorch 2.x}, which combines TorchDynamo, AOTAutograd, and TorchInductor to capture
         and optimize models for efficient execution~\cite{pytorch_torch_compile,pytorch_compile_faq,pytorch_2x};
     \item \textbf{Apache TVM}, a compiler stack for optimizing models across heterogeneous targets
         including CPUs, GPUs, and edge-oriented
         accelerators~\cite{apache_tvm_home, chen2018tvm};
-    \item \textbf{MLIR-based stacks}, such as IREE and TensorFlow MLIR, which use multi-level
+    \item \textbf{MLIR-based stacks~\cite{lattner2021mlir}}, such as IREE and TensorFlow MLIR, which use multi-level
         intermediate representations to enable flexible lowering pipelines for heterogeneous
         systems~\cite{mlir_overview,tensorflow_mlir_overview,iree_home};
     \item \textbf{ONNX Runtime}, a cross-platform inference engine that supports hardware-specific
@@ -584,10 +811,17 @@ Examples of modern compiler and runtime stacks for machine learning include:
         platforms~\cite{onnxruntime_home,onnxruntime_execution_providers}.
 \end{itemize}
 
-
 %\section{Hailo Compiler}
 
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=1.0\linewidth]{pics/compiler_structure_custom.pdf}
+    \caption{Flow of an ML model from definition through compilation and runtime execution on hardware.}
+    \label{fig:compflow}
+\end{figure}
 
+
+\cleardoublepage
 \section{Quantization and mixed precision}
 
 \textcolor{red}{TODO}
@@ -2188,11 +2422,29 @@ available in this deployment setting. This setup was chosen to reduce
 short-term variance and to provide a stable estimate of sustained inference
 performance under controlled CPU conditions.
 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{pics/benchmarks/pi5_fp32/pi5_yolov8n_cpu_results_dark_sunset.pdf}
+    \caption{YOLOv8n inference performance and power consumption on the Raspberry Pi 5 CPU across the
+    evaluated FP32 backends.
+    Subfigure~(a) shows the mean end-to-end inference latency with 95\% confidence interval error bars.
+    Subfigure~(b) reports mean board power consumption, with error bars indicating standard deviation.
+    Subfigure~(c) summarizes the latency--power trade-off, where lower latency and lower power are
+    preferable.
+    Subfigure~(d) shows energy efficiency in terms of throughput per watt.
+    LiteRT achieves the lowest latency and the highest energy efficiency, while TVM and ONNX Runtime
+    exhibit similar latency but substantially higher power consumption.}
+    \label{fig:pi5_yolov8n_cpu_results}
+\end{figure}
+
 The evaluated CPU backends were TVM, ONNX Runtime, TorchCompile, Google AI Edge
 LiteRT, and PyTorch eager mode used as a baseline. ONNX Runtime was evaluated
 with the \path{CPUExecutionProvider}. Table~\ref{tab:pi5_backend_benchmark}
 summarises the measured latency and throughput, while
-Table~\ref{tab:pi5_backend_power} summarises power results.
+Table~\ref{tab:pi5_backend_power} summarises power results. These measurements
+are further visualised in Figure~\ref{fig:pi5_yolov8n_cpu_results}, which compares
+latency, power consumption, the latency--power trade-off, and throughput per watt
+across the evaluated CPU backends.
 
 \begin{table}[ht]
 \centering
@@ -2298,6 +2550,22 @@ TVM, ONNX Runtime, TensorRT, PyTorch eager mode, and
 isolated repetitions in order to reduce interference between backends.
 Table~\ref{tab:orin_backend_benchmark} summarises the measured latency and
 throughput, while Table~\ref{tab:orin_backend_power} summarises power results.
+These measurements are further visualised in Figure~\ref{fig:orin_yolov8n_fp32_results},
+which compares latency, power consumption, the latency--power trade-off, and
+throughput per watt across the evaluated GPU backends.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{pics/benchmarks/orin_fp32/orin_gpu_fp32_yolov8n_results_dark_sunset.pdf}
+    \caption{YOLOv8n FP32 inference performance and power consumption on the NVIDIA Jetson Orin Nano GPU.
+    Subfigure\~(a) shows mean end-to-end inference latency with 95\% confidence interval error bars.
+    Subfigure\~(b) reports mean board power consumption, with error bars indicating standard deviation.
+    Subfigure\~(c) summarizes the latency--power trade-off, where lower latency and lower power are preferable.
+    Subfigure\~(d) shows energy efficiency in terms of throughput per watt.
+    TensorRT achieves the lowest latency and the highest energy efficiency among the evaluated FP32 GPU backends,
+        while torch.compile is substantially slower despite lower power draw.}
+    \label{fig:orin_yolov8n_fp32_results}
+\end{figure}
 
 \begin{table}[ht]
 \centering
@@ -2516,11 +2784,30 @@ the remaining performance gap to the most specialised deployment backend.
 GPU experiments were also conducted on the NVIDIA Jetson Orin Nano using the
 full YOLOv8n model in FP16 precision with batch size~1. The evaluated backends
 were TVM, ONNX Runtime, TensorRT, PyTorch eager mode, and
-\path{torch.compile}. As in the previous benchmark sections, the comparison
+\texttt{torch.compile}. As in the previous benchmark sections, the comparison
 was performed using isolated repetitions in order to reduce interference between
 frameworks. Table~\ref{tab:orin_fp16_backend_benchmark} summarises the measured
 latency and throughput, while Table~\ref{tab:orin_fp16_backend_power}
-summarises power results.
+summarises power results. Figure~\ref{fig:orin_fp32_vs_fp16_results} further
+compares the FP16 measurements against the corresponding FP32 results, showing
+the latency, FP16 speedup, power consumption, and energy efficiency for each
+backend.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{pics/benchmarks/fp16_vs_fp32/orin_gpu_fp32_vs_fp16_successful_runs_dark_sunset.pdf}
+    \caption{FP32 versus FP16 YOLOv8n inference on the NVIDIA Jetson Orin Nano GPU.
+    Subfigure~(a) compares mean end-to-end latency for each backend, with error bars indicating the half-width of
+    the 95\% confidence interval.
+    Subfigure~(b) reports the FP16 latency speedup relative to FP32 for the same backend, where values above
+        $1.0\times$ indicate that FP16 is faster.
+    Subfigure~(c) compares mean board power consumption, and Subfigure~(d) compares energy efficiency in terms of
+        throughput per watt.
+    TensorRT and TVM obtain the strongest FP16 latency improvements, while \texttt{torch.compile} and PyTorch eager
+        mode do not benefit from FP16 in this experiment.}
+    \label{fig:orin_fp32_vs_fp16_results}
+\end{figure}
+
 
 \begin{table}[ht]
 \centering
@@ -2653,8 +2940,27 @@ consistent with the theoretical $2\times$ benefit from halving the element
 width within a fixed 128-bit register.
 
 \paragraph{End-to-End Benchmark Results.}
+Figure~\ref{fig:pi5_fp32_vs_fp16_results} visualises the successful FP16 runs
+against their corresponding FP32 measurements on the Raspberry Pi~5 CPU,
+including latency, FP16 speedup, power consumption, and energy efficiency.
 Table~\ref{tab:pi5_fp32_fp16} presents the full benchmark comparison between
-FP32 and FP16 precision across all backends on the Raspberry Pi~5.
+FP32 and FP16 precision across all backends on the Raspberry Pi~5, including
+the unsuccessful or fallback FP16 cases.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{pics/benchmarks/fp16_vs_fp32/pi5_cpu_fp32_vs_fp16_successful_runs_dark_sunset.pdf}
+    \caption{FP32 versus FP16 YOLOv8n inference on the Raspberry Pi~5 CPU for backends with successful FP16 runs.
+    Subfigure~(a) compares mean end-to-end latency, with error bars indicating the half-width of the 95\% confidence
+    interval where available.
+    Subfigure~(b) reports the FP16 latency speedup relative to FP32 for the same backend, where values above
+        $1.0\times$ indicate that FP16 is faster.
+    Subfigure~(c) compares mean board power consumption, and Subfigure~(d) compares energy efficiency in terms of
+        throughput per watt.
+    TVM is the only backend that shows a clear FP16 latency improvement on the Raspberry Pi~5 CPU, while TFLite
+        remains nearly unchanged and TorchCompile becomes substantially slower.}
+    \label{fig:pi5_fp32_vs_fp16_results}
+\end{figure}
 
 \begin{table}[ht]
 \centering
@@ -3013,15 +3319,36 @@ TensorRT INT8 QDQ             & -24.10 & -14.68 & -25.40 & -41.93 \\
 \end{tabular}
 \end{table}
 
-Latency results, shown in Table~\ref{tab:int8_latency_comparison}, reveal an equally important deployment trade-off.
-The fastest configuration in the measured benchmark was TensorRT implicit INT8 quantization, achieving approximately
-5.34\,ms mean latency and 187.23 FPS. This is a substantial speedup over both PyTorch FP32 and ONNX Runtime INT8 QDQ.
-ONNX Runtime INT8 QDQ, despite using an INT8 graph, was actually slower than the PyTorch FP32 baseline in the
-presented experiment, reaching approximately 39.82\,ms per inference. TensorRT FP16, discussed in the previous section,
-already provides a strong optimized reference at 6.31\,ms, which means that the practical value of INT8 must be judged
-against both accuracy loss and the already highly optimized higher-precision TensorRT paths. The QDQ-based TensorRT
-engine reached 7.71\,ms, which is still faster than PyTorch and ONNX Runtime, but notably slower than the best
-TensorRT implicit INT8 result.
+
+Figure~\ref{fig:orin_int8_speedup_results} visualises the INT8 benchmark results
+on the NVIDIA Jetson Orin Nano GPU, including latency, speedup relative to the
+PyTorch FP32 eager baseline, power consumption, and energy efficiency.
+Latency results, shown numerically in Table~\ref{tab:int8_latency_comparison},
+reveal an equally important deployment trade-off.
+The fastest configuration in the measured benchmark was TensorRT implicit INT8
+quantization, achieving approximately 5.34\,ms mean latency and 187.23 FPS.
+This corresponds to a $4.69\times$ speedup over the PyTorch FP32 eager baseline.
+ONNX Runtime INT8 QDQ, despite using an INT8 graph, was actually slower than the
+PyTorch FP32 baseline in the presented experiment, reaching approximately
+39.82\,ms per inference, or only $0.63\times$ of the baseline speed.
+TensorRT FP16, discussed in the previous section, already provides a strong
+optimized reference at 6.31\,ms, which means that the practical value of INT8
+must be judged against both accuracy loss and the already highly optimized
+higher-precision TensorRT paths. The QDQ-based TensorRT engine reached
+7.71\,ms, which is still faster than PyTorch and ONNX Runtime, but notably
+slower than the best TensorRT implicit INT8 result.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{pics/benchmarks/int8_comp/orin_gpu_int8_speedup_vs_pytorch_fp32_dark_sunset.pdf}
+    \caption{INT8 YOLOv8n inference performance on the NVIDIA Jetson Orin Nano GPU.
+    Subfigure~(a) shows mean end-to-end latency with error bars indicating the half-width of the 95\% confidence interval.
+    Subfigure~(b) reports speedup relative to the PyTorch FP32 eager baseline, where values above $1.0\times$ indicate faster execution than the baseline.
+    Subfigure~(c) compares mean board power consumption, and Subfigure~(d) shows energy efficiency in terms of throughput per watt.
+    TensorRT implicit INT8 achieves the best result, reaching the lowest latency, the highest speedup, and the highest throughput per watt.
+    ONNX Runtime INT8 QDQ is slower than the PyTorch FP32 baseline despite using INT8 quantization.}
+    \label{fig:orin_int8_speedup_results}
+\end{figure}
 
 \begin{table}[ht]
 \centering
