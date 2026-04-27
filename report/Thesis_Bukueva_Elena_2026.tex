@@ -556,23 +556,21 @@ Deep learning compilers specialize traditional compiler ideas for tensor program
 They address the gap between high-level model definitions and heterogeneous deployment targets
 by lowering neural-network graphs through one or more intermediate representations, applying graph-level and
 operator-level optimizations, and generating target-specific code or calls to optimized backend libraries.
-So the code, expressed in a framework such as PyTorch,
-TensorFlow, or as an ONNX graph, is translated into efficient executable code for a specific target
-hardware (CPU, GPU, NPU, FPGA, or a dedicated ASIC).
+So the code, expressed in a framework such as PyTorch, TensorFlow, JAX, or
+as an ONNX graph is transformed into an executable form suitable for a particular target, such as a CPU,
+GPU, NPU, FPGA, or dedicated accelerator.
 
+Most ML compiler stacks follow a layered structure, illustrated in Figure~\ref{fig:compflow}.
+The frontend first captures or imports the model from a source framework such as
+PyTorch~\cite{paszke2019pytorch}, TensorFlow~\cite{abadi2016tensorflow}, or
+JAX~\cite{frostig2019compiling}. In practical deployment pipelines, this import step is often
+mediated by an exchange format such as ONNX~\cite{microsoft2017onnx}. Other representations are
+more closely tied to particular compiler ecosystems: TorchScript was historically used for PyTorch
+graph capture and deployment, FX graphs are used in the PyTorch 2.x compilation pipeline
+~\cite{reed2022torch}, HLO is the central IR in XLA~\cite{openxla_hlo_to_thunks_docs}, and
+StableHLO provides a more portable HLO-based representation in the OpenXLA/MLIR ecosystem
+~\cite{openxla_stablehlo_docs}.
 
-
-Most ML compilers follow a layered structure, illustrated in Figure~\ref{fig:compflow}.
-
-Compilation proceeds through several stages. The frontend first captures or imports the model
-from a source framework such as PyTorch~\cite{paszke2019pytorch},
-TensorFlow~\cite{abadi2016tensorflow}, or JAX~\cite{frostig2019compiling}. In practical
-deployment pipelines, this step is often mediated by an exported representation such as
-ONNX~\cite{microsoft2017onnx}, while framework-specific or compiler-oriented representations
-such as TorchScript (obsolete), FX graphs~\cite{reed2022torch},
-High Level Optimizer (HLO, the IR of XLA)~\cite{openxla_hlo_to_thunks_docs}, or
-StableHLO~\cite{openxla_stablehlo_docs} are used in
-particular compiler ecosystems.
 The imported program is then converted into the compiler's internal intermediate representation.
 The graph optimization stage then applies framework-agnostic transformations: operator fusion
 and simplification, constant folding, dead-branch
@@ -584,6 +582,32 @@ allocation, and emits target-specific machine code.
 Once compiled, the model is managed by an ML runtime, which handles execution orchestration
 (loading the compiled artifact and scheduling its execution), memory allocation for intermediate tensors,
 hardware interfacing, and integration with vendor libraries.
+
+Modern systems differ mainly in where they place the boundary between compilation, runtime
+dispatch, and vendor-specific libraries. For example, TensorFlow XLA lowers TensorFlow or JAX-style
+computations through HLO-based representations and uses XLA backends to generate efficient
+target-specific execution~\cite{tensorflow_xla_architecture,xla_hlo_tooling}. PyTorch 2.x follows a
+different route: TorchDynamo captures Python-level execution into FX graphs, AOTAutograd handles
+ahead-of-time graph extraction for training-related graphs, and TorchInductor lowers the resulting
+graphs to optimized CPU or GPU code~\cite{pytorch_torch_compile,pytorch_compile_faq,pytorch_2x}.
+Apache TVM exposes a more explicit compiler stack for heterogeneous deployment, combining
+graph-level optimization with tensor-level scheduling and auto-tuning for CPUs, GPUs, and
+edge-oriented targets~\cite{apache_tvm_home, chen2018tvm}. MLIR-based systems, including IREE
+and TensorFlow MLIR, use multiple IR dialects to represent computation at different abstraction
+levels and to support flexible lowering pipelines for heterogeneous systems
+~\cite{lattner2021mlir,mlir_overview,tensorflow_mlir_overview,iree_home}. ONNX Runtime, in
+contrast, is primarily an inference runtime built around the ONNX format; it performs graph
+optimizations and delegates execution to hardware-specific execution providers such as CPU, CUDA,
+TensorRT, OpenVINO, CoreML, or other backends~\cite{onnxruntime_home,onnxruntime_execution_providers}.
+
+These systems therefore solve overlapping but not identical problems. TVM and XLA are closer to
+full compiler stacks with explicit IR lowering and code generation, TensorRT is a vendor-specific
+inference compiler and runtime for NVIDIA GPUs, PyTorch 2.x integrates compilation into an eager
+framework workflow, MLIR-based systems provide reusable infrastructure for building compiler
+pipelines, and ONNX Runtime emphasizes portable model execution through execution providers.
+For edge-AI deployment, this distinction is important because performance depends not only on the
+model architecture, but also on the chosen representation, compiler lowering path, operator coverage,
+precision support, runtime overhead, and the quality of the target-specific backend.
 
 Overall, the architecture of a deep-learning compiler can be viewed as a pipeline composed of a
 frontend, one or more intermediate representations, and a backend. The IR connects these stages and often appears
@@ -794,23 +818,6 @@ as optimized library kernels or compiler-generated implementations. In such case
 unfused operator sequences or generic implementations, causing additional kernel launches, intermediate memory traffic,
 reduced locality, and significant runtime overhead.
 
-Examples of modern compiler and runtime stacks for machine learning include:
-\begin{itemize}
-    \item \textbf{TensorFlow XLA}, which compiles TensorFlow programs through XLA using HLO-based
-        intermediate representations~\cite{tensorflow_xla_architecture,xla_hlo_tooling};
-    \item \textbf{PyTorch 2.x}, which combines TorchDynamo, AOTAutograd, and TorchInductor to capture
-        and optimize models for efficient execution~\cite{pytorch_torch_compile,pytorch_compile_faq,pytorch_2x};
-    \item \textbf{Apache TVM}, a compiler stack for optimizing models across heterogeneous targets
-        including CPUs, GPUs, and edge-oriented
-        accelerators~\cite{apache_tvm_home, chen2018tvm};
-    \item \textbf{MLIR-based stacks~\cite{lattner2021mlir}}, such as IREE and TensorFlow MLIR, which use multi-level
-        intermediate representations to enable flexible lowering pipelines for heterogeneous
-        systems~\cite{mlir_overview,tensorflow_mlir_overview,iree_home};
-    \item \textbf{ONNX Runtime}, a cross-platform inference engine that supports hardware-specific
-        execution providers for efficient deployment on diverse
-        platforms~\cite{onnxruntime_home,onnxruntime_execution_providers}.
-\end{itemize}
-
 %\section{Hailo Compiler}
 
 \begin{figure}[h]
@@ -822,181 +829,475 @@ Examples of modern compiler and runtime stacks for machine learning include:
 
 
 \cleardoublepage
-\section{Quantization and mixed precision}
+\section{Quantization and Mixed Precision}
 
-\textcolor{red}{TODO}
+Quantization is one of the main techniques used to reduce the cost of neural-network inference on
+resource-constrained hardware. A trained neural network is usually represented using floating-point
+parameters and activations. Assume that a network has $L$ layers with learnable parameters
+$\{W_1, W_2, \ldots, W_L\}$, and let $\theta$ denote the collection of all trainable parameters.
+For a supervised learning problem, the model is trained by minimizing the empirical risk
 
-\section{Pruning and structural simplification}
+\begin{equation}
+\mathcal{L}(\theta) = \frac{1}{N} \sum_{i=1}^{N} l(x_i, y_i; \theta),
+\end{equation}
 
-    We can categorize studies of pruning neural networks into 8 categories:
-        \begin{itemize}
-            \item \textbf{Sensitivity analysis methods (loss / gradient–aware pruning)}. These methods are
-                valuable as they prune what matters the most for the task and normally provide the
-                highest accuracy-compression trade-off (50-90\% accuracy with 1-2\% accuracy drop).\\
-                Important works in this category:
-                \begin{itemize}
-                    \item Taylor Pruning ~\cite{molchanov2016pruning};
-                    \item SNIP (Single-shot Network Pruning) ~\cite{lee2018snip};
-                    \item GraSP (Gradient Signal Preservation) ~\cite{wang2020picking};
-                    \item Movement Pruning ~\cite{gordon2018morphnet}
-                \end{itemize}
-            Although sensitivity-based pruning methods often achieve high unstructured sparsity
-            (50–90\%), such sparsity is difficult to exploit on general-purpose hardware due to
-            irregular memory access and limited compiler support, resulting in limited real-world
-            speedups. Consequently, structured pruning methods remain more practical for deployment
-            across diverse hardware platforms.
-            \item \textbf{Knowledge distillation methods (teacher–student compression)}.
-                Knowledge Distillation (KD) is a model compression paradigm in which a large, high-capacity
-                model (Teacher) transfers knowledge to a smaller, more efficient model (Student).
-                Instead of training the student solely on hard labels, KD trains it to match the teacher’s
-                output behavior, typically using soft targets (probability distributions or logits).
-                KD differs fundamentally from standard understanding of pruning: pruning removes parameters or
-                structures, but KD transfers behavior. By doing this KD is normally does both: improves
-                the accuracy by few percent compared to the baseline and reduces the number of parameters
-                 up to 120 times.
-                Important works:
-                    \begin{itemize}
-                        \item Knowledge Distillation ~\cite{hinton2015distilling};
-                        \item DCP ~\cite{zhuang2018discrimination};
-                        \item AutoCompress ~\cite{liu2020autocompress};
-                    \end{itemize}
-                Knowledge distillation is a powerful model compression paradigm that transfers predictive
-                behavior from a large teacher model to a compact student model using soft supervision.
-                While classical distillation operates at the output level, recent works extend this idea
-                to intermediate representations and pruning-aware settings. Methods such as
-                discrimination-aware channel pruning integrate auxiliary losses to preserve
-                discriminative power during structured pruning, achieving strong accuracy retention.
-                However, distillation-based approaches are inherently task-dependent, require access
-                to labeled data and a strong teacher, and introduce additional training complexity,
-                limiting their applicability in representation-centric or hardware-agnostic compression scenarios.
-            \item \textbf{Similarity and clustering methods}
-                Similarity and clustering–based pruning methods aim to remove redundant filters or channels rather
-                than filters that are individually “unimportant”. The core assumption is that modern CNNs are
-                over-parameterized and contain filters whose functionality can be approximated or replaced by others
-                with minimal impact on accuracy. Instead of ranking filters solely by magnitude or sensitivity,
-                these methods explicitly model correlation, similarity, or representational overlap among filters.
-                Representative methods include:
-                \begin{itemize}
-                    \item FilterSketch by Lin et al. ~\cite{lin2021filter},
-                    \item Geometric Median Pruning by He et al. ~\cite{he2019filter},
-                    \item ThiNet by Lu et al. ~\cite{luo2017thinet}
-                \end{itemize}
-            \item \textbf{Low rank methods} are mostly theoretically grounded methods, effective in
-                convolution-heavy models; Best methods:
-                Show moderate speedups and faster accuracy degradation at
-                high compression
-            \item \textbf{Magnitude based pruning methods} are considered simple and cheap to implement
-                models, however, they have limited compression and higher accuracy drops, compared to
-                more complex structures; Best examples are L1 filter pruning (Li et al., 2017)
-                ~\cite{li2016pruning}, APoZ (Activation sparsity) ~\cite{hu2016network}.
+where $(x_i, y_i)$ denotes an input sample and its corresponding label, $l(x_i, y_i; \theta)$ is
+the loss function, and $N$ is the number of training samples. After training, the parameters
+$\theta$ are typically stored in floating-point precision, and inference also produces intermediate
+activation tensors between layers.
 
-            \item \textbf{Architectural design methods (NAS, RL search)}.
-                examples: AMC, AutoSlim, Once-for-All (OFA)
-            \item \textbf{Hybrid methods}
-            \item \textbf{Quantization methods}: are not exactly pruning methods.
-                They are usually combined with pruning.
-                Mostly based on a transformation of weights from floating point to integer.
-                Important works: Quantization-Aware Training (QAT) ~\cite{jacob2018quantization},
-                Binary / Ternary Networks (XNOR, TWN) ~\cite{rastegari2016xnor}
-        \end{itemize}
+The goal of quantization is to represent these floating-point weights and activations using
+lower-precision numerical formats, most commonly 8-bit integers. This can reduce model size,
+memory bandwidth requirements, cache pressure, and arithmetic cost, which is especially important
+for edge devices and accelerators with limited memory and power budgets. In practical terms,
+quantization defines a mapping from a real-valued tensor to a discrete set of representable values.
+If this mapping is chosen carefully, the model can run with substantially lower computational and
+memory cost while preserving most of its original accuracy.
 
+Surveys by Gholami et al.~\cite{gholami2022survey} and Rokh et al.~\cite{rokh2023comprehensive}
+provide broad taxonomies of quantization methods, including post-training quantization,
+quantization-aware training, uniform and non-uniform quantization, and mixed-precision
+approaches. Practical integer-only inference is commonly associated with the work of
+Jacob et al.~\cite{jacob2018quantization}, which describes how neural networks can be executed
+using integer arithmetic during inference. Later post-training methods, such as
+AdaRound~\cite{nagel2020up}, further improve quantized model accuracy by optimizing the
+rounding decisions used when mapping floating-point weights to low-precision values.
 
-    Magnitude based Pruning Methods are methods based on removing weights, reducing amount of inbound
-    and outbound filters and nodes based on a measure of magnitude of the effect these filters
-    have on the network.
-    Pruning iteration is repeated until the accuracy is starting to drop.
-    First works in this field were adopting the idea of removing the weight lower than
-    a particular threshold. \\
+Gholami et al.~\cite{gholami2022survey} defines a function that can quantize NN weight and activations to a finite
+set of values:
 
-    Han et al. \cite{han2015learning} carried out several experiments on LeNet-300-100 and Lenet-5,
-    both trained on MNIST dataset, and showed that weight could be reduced by this method by a
-    factor of 12 without significant drops in accuracy.
-    Experiments based on AlexNet and VGG16 trained on ImageNet show the factor of 9 and 12 respectively.
-    Han et al. note that $L_1$ regularization, a technique used in machine learning to prevent overfitting by
-    adding a penalty term to the cost function, is better immediately after pruning, but that $L_2$ norm
-    is better, when the weights of the pruned model are fine-tuned.
-    Experiments also suggest that earlier layers are the most sensitive to pruning and that iterative
-    pruning is better than one-shot pruning (cutting the proportion of weights in one cycle).
-    Another observation from their work is that re-initialization of the weights is not enough
-    to construct and accurate model.
-    It is always better to fine-tune the weights of the pruned model.\\
+\begin{equation}
+Q(r) = \operatorname{Int}(r / S) - Z,
+\end{equation}
 
-    Later work by Guo et al. \cite{guo2016dynamic} notes that magnitude pruning can lead to premature removal
-    of weight that can become important given removal of other weights.
-    They propose a method called Dynamic Network Surgery to keep track of pruned weights and restore them
-    if they turn to be important.
-    For AlexNet on ImageNet they reach a factor of 17 without compromising accuracy. \\
+where $Q$ is the quantization operator, $r$ is a real valued input (activation or weight), $S$ is a real valued scaling
+factor, and $Z$ is an integer zero point. So the function $Q(r)$ is mapping a real value to an integer value through a
+rounding operation. This method is a uniform quantization, as quantization levels are uniformely spaced.
 
-    The other method proposed by the Frankle and Carbin (2018) is the lottery ticket
-    hypothesis proposed by ~\cite{frankle2018lottery} and further continued by Frankle et al. (2019) in
-    ~\cite{frankle2019stabilizing}.
-    It formulates a statement, that a trained network contains a subnetwork, which can be trained to be at
-    least as accurate as the original network using no more than the number of epochs used for training the
-    original network.
-    This subnetwork is a so-called winning lottery ticket.
-    Authors test two pruning methods.
-    The first is a magnitude pruning (p\% of the weights), after which the remaining weights are reset to
-    their initial values and are retrained.
-    The second method is using an alternative pruning to iteratively prune $p^{\frac{1}{n}}$ of the weights
-    in $n$ cycles.
-    They experimented on VGG and ResNet and on some bigger models suggested that setting of the weights
-    to those obtained from later iteration of training can be beneficial when high levels
-    of pruning are used (more than 30\%). \\
+Real values  $r$ can be recovered form the the quantized values $Q(r)$ through an operation that is referred to as
+dequantization:
 
-    Another question that arises is whether these subnetworks are transferable to other tasks.
-    Hubens et al. (2020)~\cite{hubens2020experimental} show that when a network is trained on a larger data set,
-    such as ImageNet, and transferred and fine-tuned for a different task, pruning can result in a smaller
-    network than if it was trained from scratch on the new task.\\
+\begin{equation}
+\tilde{r} = S \bigl(Q(r) + Z\bigr)
+\end{equation}
 
-    Despite the experiments proving that some unstructured pruning methods allow a significant drop
-    of weights, not all hardware can process sparse weight matrices and support speed up inference.
-    Pruning of higher granularity structures (filters and channels) or so-called structured pruning
-    helps to avoid this problem, as many existing toolkits support it.
-    Survey ~\cite{vadera2022methods} suggests three main directions of structured pruning research:
+Because the operator $\operatorname{Int}(\cdot)$ involves rounding, the dequantized value
+$\tilde{r}$ is generally only an approximation of the original floating-point value $r$. The difference
+between them is the quantization error. For uniform quantization, the quantization levels are
+equally spaced, so the error is controlled mainly by the scale $S$, the zero point $Z$, and the
+range of values that is mapped into the available integer domain. A smaller scale gives finer
+resolution, but only over a smaller real-valued range; a larger scale covers a wider range, but
+with coarser quantization steps. Thus, quantization introduces a trade-off between clipping error
+and rounding error.
 
-    \begin{itemize}
-        \item \textbf{Data dependent channel pruning methods}. A useful channel should respond differently to
-            different inputs. A channel that barely changes for any input is potentially useless. \\
-            Polyak \& Wolf (2015) ~\cite{polyak2015channel} propose two methods - inbound pruning (to reduce the amount of input
-            channels) and \enquote{Reduce and Reuse} pruning (to cut output channels). \\
-            The assessment of input channels is performed by applying the network to a sample of images
-            and measuring the variance in a feature map.
-            These measures are ranked and those below a threshold are pruned. \\
-            The \enquote{Reduce and Reuse} method targets a reduction in the number of output channels
-            produced by a convolutional layer. The underlying assumption is that output
-            channels exhibiting low variation are less informative and can therefore be removed with
-            minimal impact on performance. A key challenge of pruning output channels is that each
-            removed channel is expected as an input by subsequent layers. To address this issue, the
-            Reduce and Reuse method approximates the removed channels as linear combinations of the
-            remaining ones. This approximation is obtained by solving a least-squares optimization
-            problem that minimizes the reconstruction error between the original and approximated
-            outputs. The resulting transformation is implemented as an additional $1 \times 1$
-            convolutional layer, allowing the network to preserve representational capacity
-            while reducing the number of channels.\\
-            The results from their experiments show that the variance based method is
-            more effective than use of random pruning.
-        \item \textbf{Data independent pruning methods}. Rely on the assumption that properties of the
-            filters and output channels, as the proportion of zeros, influence the structure's
-            importance.\\
-            Hu et al. (2016) ~\cite{hu2016network} propose APoZ-based network trimming, a pruning
-            strategy that does not rely on data-driven measures such as feature map variance or
-            entropy. Instead, their method is based on the observation that a large number of zero
-            activations in an output feature map indicates redundancy. Specifically, they introduce
-            the Average Percentage of Zeros (APoZ) as a metric to quantify the weakness of a filter,
-            with higher APoZ values suggesting lower importance. After each pruning step, the network
-            is fine-tuned, and the authors report that fine-tuning yields better results than
-            retraining the network from scratch. When evaluating the proposed method on VGG-16,
-            the authors achieved a compression rate of 2.59 after six pruning iterations,
-            while achieving 2-3\% higher Top-1/Top-5 accuracy than the original VGG-16 model.
-        \item \textbf{Optimization based channel approximation pruning methods} propose to remove
-            some channels and then re-optimize the remaining ones instead of deciding which channels
-            are important, so that the layer behaves the same. \\
-            One representative approach is FilterSketch, proposed by Lin et al. (2021) in ~\cite{lin2021filter}.
-            Experimental results demonstrate that FilterSketch consistently outperforms
-            first-order magnitude-based pruning methods, FilterSketch removes around 41.5\% of
-            the FLOPs and parameters while keeping the top-1 accuracy at 93.19\%. Compared to
-            93.26\% by the pre-trained model, the accuracy drop is negligible on CIFAR-10.
-    \end{itemize}
+A central design choice is the clipping range $[\alpha, \beta]$, which defines the range of real
+values represented by the quantizer. For a $b$-bit integer representation, a common scale choice is
+
+\begin{equation}
+S = \frac{\beta - \alpha}{2^b - 1},
+\end{equation}
+
+where $\alpha$ and $\beta$ are the lower and upper clipping bounds. Values outside this interval
+are clipped before quantization, while values inside the interval are rounded to the nearest
+available quantization level. Choosing the clipping range is often called calibration. A
+simple calibration method uses the minimum and maximum observed values, but this can be
+sensitive to outliers: a few extreme activation values may enlarge the range and reduce the
+effective resolution for the majority of values. Alternative calibration methods therefore use
+percentiles, mean-squared-error minimization, or divergence-based criteria to choose a range that
+better preserves the distribution of the tensor~\cite{gholami2022survey}.
+
+\paragraph{Symmetric and asymmetric quantization}
+Uniform quantization can be either symmetric or asymmetric. In symmetric quantization, the
+clipping range is centered around zero, so $\alpha = -\beta$. This usually allows the zero point to
+be removed:
+
+\begin{equation}
+Q(r) = \operatorname{Int}\left(\frac{r}{S}\right).
+\end{equation}
+
+This form is attractive because it simplifies the arithmetic and is especially common for weight
+quantization. For example, matrix multiplication and convolution can be implemented more
+efficiently when the zero point is zero, since fewer correction terms are needed during integer
+accumulation. However, symmetric quantization may waste representational levels when the tensor
+distribution is strongly skewed. This often happens for activations after ReLU, where the values
+are non-negative. In such cases, asymmetric quantization can use the available integer range more
+efficiently by allowing a non-zero zero point $Z$ and a clipping interval that is not centered around
+zero. Figure~\ref{fig:symmetric_asymmetric_quantization} illustrates the difference between symmetric
+and asymmetric quantization.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=1.1\textwidth]{pics/sym_nonsym_quantization.pdf}
+    \caption{Illustration of symmetric and asymmetric quantization. In symmetric quantization,
+    the real-valued clipping range is centered around zero, so the zero point can be set to
+    $Z=0$. In asymmetric quantization, the clipping range is shifted to better match an
+    imbalanced tensor distribution, such as non-negative activations after ReLU. Adapted from
+    Gholami et al.~\cite{gholami2022survey}.}
+    \label{fig:symmetric_asymmetric_quantization}
+\end{figure}
+
+For symmetric quantization, there are also different conventions for mapping the real-valued
+range into the integer range. A full-range INT8 scheme uses the interval $[-128,127]$, while a
+restricted-range scheme uses $[-127,127]$. The corresponding scale can be written as
+
+\begin{equation}
+S_{\mathrm{full}} = \frac{2\max(|r|)}{2^n - 1},
+\end{equation}
+
+or, for the restricted symmetric range,
+
+\begin{equation}
+S_{\mathrm{restricted}} = \frac{\max(|r|)}{2^{n-1} - 1}.
+\end{equation}
+
+The full-range scheme uses one additional representable value, while the restricted scheme keeps
+the positive and negative ranges balanced. In practice, the best convention depends on the
+hardware backend, the runtime format, and the kernels used by the inference engine.
+
+\paragraph{Static and dynamic quantization}
+Another important distinction is when the quantization parameters are determined. For weights,
+the range can usually be computed statically, because trained parameters are fixed during
+inference. Activations are more difficult because their distributions depend on the input sample.
+In dynamic quantization, activation ranges are computed at runtime for each input or batch.
+This can improve accuracy because each tensor is quantized using its actual observed range, but
+it adds overhead from computing statistics such as minimum and maximum values during
+inference. In static quantization, activation ranges are estimated before deployment using a
+small calibration dataset and then kept fixed during inference. This avoids runtime calibration
+overhead and is therefore more attractive for low-latency deployment, but it can reduce accuracy
+if the calibration set does not represent the true deployment distribution well. Gholami et al.
+summarize this trade-off: dynamic quantization often provides better accuracy, while static
+quantization is more commonly used in practice because it avoids the cost of computing activation
+ranges during inference~\cite{gholami2022survey}.
+
+\paragraph{Quantization granularity}
+The scale and zero point may be shared over different parts of a tensor. In layer-wise
+quantization, one scale is used for all weights in a layer. This is simple and efficient, but it can be
+inaccurate if different channels have very different value ranges. A channel with a narrow
+distribution may lose resolution because another channel with a wider distribution determines the
+shared scale. Channel-wise quantization assigns a separate scale to each output channel or filter,
+which usually improves accuracy for convolutional layers because each kernel receives its own
+clipping range. Group-wise quantization lies between these two extremes by assigning scales to
+groups of channels. The main disadvantage of finer granularity is implementation overhead:
+additional scales must be stored and applied, and not all hardware kernels support arbitrary
+granularities efficiently. For convolutional weights, channel-wise quantization is widely used
+because it often gives a good accuracy improvement with modest overhead, whereas very fine
+sub-channel quantization can be harder to deploy efficiently~\cite{gholami2022survey}.
+
+\paragraph{Uniform and non-uniform quantization}
+The formulas above describe uniform quantization, where adjacent quantization levels are equally
+spaced. Non-uniform quantization relaxes this constraint and allows the quantization levels and
+thresholds to be distributed unevenly. A general form is
+
+\begin{equation}
+Q(r) = X_i, \qquad \text{if } r \in [\Delta_i, \Delta_{i+1}),
+\end{equation}
+
+where $X_i$ is a quantization level and $\Delta_i$ are the corresponding thresholds. Non-uniform
+quantization can better match non-uniform tensor distributions, for example by allocating more
+levels to dense regions of the distribution and fewer levels to rarely occurring values. This can
+reduce quantization error for a fixed bit width. However, it is less convenient for general-purpose
+hardware because integer arithmetic units usually assume uniformly spaced numerical values.
+As a result, non-uniform quantization can require lookup tables, custom kernels, or additional
+decode logic. For this reason, uniform quantization remains the dominant choice in practical CPU,
+GPU, and edge inference pipelines, even though non-uniform methods can be attractive from an
+accuracy perspective~\cite{gholami2022survey}.
+
+A related form of non-uniform quantization is clustering-based quantization. In this approach,
+weights are grouped into clusters and all weights in the same cluster are represented by a shared
+centroid. Instead of storing every full-precision weight, the model stores a compact cluster index
+and a codebook of centroids. This can reduce model size and adapt the quantization levels to the
+actual weight distribution. However, clustering-based quantization is less attractive for efficient
+deployment because codebook reconstruction adds overhead and weights belonging to the same
+cluster are not necessarily contiguous in memory, which can lead to irregular memory accesses.
+For this reason, clustering-based methods are mainly used for weight compression and are less
+suitable for activation quantization, where values change at runtime~\cite{rokh2023comprehensive}.
+
+\paragraph{Post-training quantization and quantization-aware training}
+Quantization methods are commonly divided into post-training quantization (PTQ) and
+quantization-aware training (QAT). In PTQ, a pretrained floating-point model is quantized after
+training. The calibration data is used to estimate clipping ranges, scales, and zero points, but the
+model parameters are not retrained. PTQ is attractive because it is fast, easy to apply, and can
+often be performed with only a small calibration set. Its main limitation is that it may lead to
+noticeable accuracy degradation, especially at low bit widths, for sensitive layers, or when the
+calibration data is not representative.
+
+QAT addresses this by simulating quantization during training or fine-tuning. The forward pass
+includes fake-quantization operations so that the model learns parameters that are robust to the
+rounding and clipping effects of low-precision inference. Since the rounding operator is
+non-differentiable and has zero gradient almost everywhere, QAT usually relies on the
+straight-through estimator (STE), which approximates the gradient of the quantizer as if it were
+the identity function. QAT usually gives better accuracy than PTQ, particularly for aggressive
+low-bit quantization, but it requires training data, additional computation, and careful
+hyperparameter tuning. Therefore, PTQ is often preferred for rapid deployment, while QAT is
+used when accuracy is critical and retraining cost is acceptable. Figure~\ref{fig:qat_ptq_comparison} summarizes the difference between
+QAT and PTQ workflows.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth]{pics/qat_ptq.pdf}
+    \caption{Comparison between quantization-aware training (QAT, Left) and post-training quantization
+    (PTQ, Right). In QAT, quantization is simulated during training or fine-tuning so that the model can
+    adapt to low-precision weights and activations. In PTQ, a pretrained model is quantized after
+    training, typically using a calibration dataset to determine quantization ranges and scaling
+    factors. Cropped from Gholami et al.~\cite{gholami2022survey}.}
+    \label{fig:qat_ptq_comparison}
+\end{figure}
+
+\paragraph{Simulated and integer-only quantization}
+It is also important to distinguish simulated quantization from integer-only inference. In simulated
+or fake quantization, tensors may be stored in low precision, but the actual arithmetic is still
+performed in floating point after dequantization. This can reduce memory footprint, but it does
+not fully exploit low-precision arithmetic units. In integer-only quantization, operations such as
+convolution and matrix multiplication are performed using integer arithmetic, often with INT8
+multiplication and INT32 accumulation. This is the form of quantization most relevant for
+deployment on edge accelerators and mobile inference libraries, because it can reduce both memory
+traffic and arithmetic cost. However, integer-only inference imposes stricter constraints on operator
+support. Operations such as residual additions, normalization, softmax, GELU, or other nonlinear
+functions may require special integer approximations, rescaling steps, or fallback to floating-point
+execution. If unsupported operators fall back to floating point, the practical speedup can be much
+smaller than expected.
+
+\paragraph{Mixed precision}
+Uniformly assigning the same low precision to every layer is often suboptimal. Different layers
+have different sensitivity to quantization: some layers can be reduced to INT8, INT4, or even
+lower precision with little loss, while others cause large accuracy degradation if quantized too
+aggressively. Mixed-precision quantization assigns different bit widths to different layers or
+operators. Sensitive layers are kept at higher precision, while less sensitive or more expensive
+layers are quantized more aggressively. This can provide a better trade-off between accuracy,
+latency, energy, and model size.
+
+The main difficulty is that choosing the bit width of each layer creates a large combinatorial search
+problem. For a network with $L$ layers and $k$ possible bit widths per layer, the number of
+possible assignments is $k^L$. Existing methods therefore use heuristics, sensitivity analysis,
+reinforcement learning, differentiable search, or hardware-aware optimization to choose the
+precision configuration. The optimal assignment is also hardware-dependent: a lower bit width is
+only useful if the target device and inference backend provide efficient kernels for that precision.
+For example, INT8 may be well supported on CPUs and edge accelerators, while INT4 may require
+specialized kernels or hardware support. Thus, mixed precision should be evaluated not only by
+model accuracy, but also by real latency, memory bandwidth, and power consumption on the
+target platform.
+
+\paragraph{Summary}
+Quantization reduces inference cost by replacing floating-point weights and activations with
+lower-precision representations. Its practical effectiveness depends on several interacting design
+choices: the quantization function, clipping range, calibration method, symmetric or asymmetric
+mapping, quantization granularity, static or dynamic activation ranges, and whether inference is
+simulated or integer-only. PTQ provides a simple and fast deployment path, but may reduce
+accuracy, while QAT usually improves accuracy at the cost of retraining. Mixed precision further
+extends this trade-off by assigning different bit widths to different layers according to their
+sensitivity and hardware efficiency. Therefore, quantization should be understood not only as a
+numerical compression method, but also as a hardware-aware deployment technique whose
+benefits depend strongly on compiler support, backend kernels, and the target device.
+
+\section{Pruning and Structural Simplification}
+
+Pruning is a model-compression technique that reduces the number of parameters, filters,
+channels, or other computational structures in a neural network after or during training. The
+basic motivation is that modern deep neural networks are often over-parameterized: many weights
+or channels can be removed with little effect on accuracy. A smaller network can reduce memory
+usage, arithmetic cost, and energy consumption, which is especially relevant for deployment on
+edge devices. However, the practical benefit of pruning depends strongly on the type of sparsity
+introduced. Removing individual weights can produce a highly sparse model, but such
+unstructured sparsity is difficult to accelerate on general-purpose CPUs and GPUs without
+specialized sparse kernels or hardware support. In contrast, structured pruning removes entire
+filters, channels, neurons, or blocks, producing dense smaller tensors that are easier for existing
+compilers and inference runtimes to exploit.
+
+Vadera and Ameen~\cite{vadera2022methods} categorize studies on neural-network pruning into
+eight broad groups: magnitude-based pruning, similarity and clustering methods, sensitivity
+analysis methods, knowledge distillation, low-rank methods, quantization methods, architectural
+design methods, and hybrid methods. In a strict sense, not all of these are pruning methods.
+Knowledge distillation, low-rank approximation, quantization, and architectural search are better
+understood as related model-compression or model-efficiency techniques. Nevertheless, they are
+often discussed together with pruning because they pursue the same goal: reducing the memory,
+latency, or energy cost of neural-network deployment.
+
+\paragraph{Magnitude-based pruning}
+Magnitude-based pruning removes parameters or structures according to simple local measures,
+most commonly the absolute value or norm of weights, filters, or activations. The intuition is that
+weights or filters with small magnitude contribute less to the network output and can therefore be
+removed. Early work by Han et al.~\cite{han2015learning} demonstrated that iterative magnitude
+pruning followed by fine-tuning can remove a large fraction of weights from networks such as
+LeNet, AlexNet, and VGG without significant loss in accuracy. Their results also showed two
+important practical lessons: iterative pruning is usually more effective than one-shot pruning, and
+fine-tuning the remaining weights is preferable to simply reinitializing the pruned network.
+
+Later work observed that pure magnitude pruning can remove weights too early. Guo et al.\
+introduced Dynamic Network Surgery~\cite{guo2016dynamic}, where pruned weights are not
+permanently discarded but can be restored if they later become important. This addresses the
+problem that the importance of a weight can change after other weights have been removed.
+
+Magnitude-based pruning also extends naturally to structured pruning. Instead of removing
+individual weights, a method can remove filters or channels whose norms are small. For example,
+Li et al.~\cite{li2016pruning} prune convolutional filters based on the sum of absolute filter weights.
+This form of pruning is more deployment-friendly than unstructured weight pruning because
+removing an entire filter or channel reduces tensor dimensions and produces a smaller dense
+network. Such structural changes are more likely to translate into real speedups in standard
+deep-learning frameworks and compiler backends.
+
+\paragraph{The lottery ticket hypothesis}
+The Lottery Ticket Hypothesis introduced by Frankle and Carbin~\cite{frankle2018lottery}
+reframed pruning as a way to identify trainable subnetworks inside a larger network. The
+hypothesis states that a randomly initialized dense network contains a sparse subnetwork, a
+``winning ticket'', that can be trained to match the accuracy of the original network in no more
+training iterations than the full model. Their procedure uses magnitude pruning to identify the
+subnetwork, resets the remaining weights to their initial values, and retrains.
+
+This work is important because it suggests that pruning is not only a post-hoc compression
+technique, but also a tool for studying over-parameterization and trainability. However, later
+studies showed that the behavior depends on model size, dataset, pruning level, and whether the
+remaining weights are reset to their original initialization or to a later training checkpoint. For
+larger networks and harder datasets, resetting to later training iterations can be more stable than
+resetting to the initial weights~\cite{frankle2019stabilizing}. From a deployment perspective, the
+lottery-ticket literature is conceptually important, but its direct usefulness is limited unless the
+resulting sparse subnetworks can be efficiently executed.
+
+\paragraph{Structured channel and filter pruning}
+Structured pruning removes complete channels, filters, neurons, or blocks. This is often more
+important for real inference acceleration than unstructured sparsity. If an entire output channel is
+removed from a convolutional layer, the corresponding input channel in the following layer can
+also be removed. This reduces both the number of parameters and the number of dense
+multiply--accumulate operations.
+
+Vadera and Ameen~\cite{vadera2022methods} identify three main directions in structured channel
+and filter pruning: data-dependent methods, data-independent methods, and optimization-based
+channel approximation methods.
+
+\subparagraph{Data-dependent channel pruning}
+Data-dependent methods estimate the usefulness of a channel by observing its behavior on a
+sample of input data. The underlying assumption is that an informative channel should respond
+differently to different inputs. Polyak and Wolf~\cite{polyak2015channel} proposed pruning
+methods based on feature-map variance. Channels or filters whose activations vary little across
+samples are considered less informative and can be pruned. Their Reduce and Reuse method also
+addresses a key difficulty in output-channel pruning: removed channels may still be expected by
+subsequent layers. To compensate, removed channels are approximated as linear combinations of
+the remaining channels, implemented using an additional $1 \times 1$ convolution.
+
+Entropy-based pruning follows a similar idea but measures the information content of feature
+maps rather than their variance. If a feature map has low entropy, it is assumed to carry less
+discriminative information and its corresponding filter may be removed. Such methods can be
+more meaningful than pure magnitude criteria, but they require representative data and additional
+forward passes to estimate channel statistics.
+
+\subparagraph{Data-independent channel pruning}
+Data-independent methods use properties of the learned weights or activations without explicitly
+solving a reconstruction problem. Hu et al.~\cite{hu2016network} introduced Average Percentage
+of Zeros (APoZ), where filters producing many zero activations are considered weak and are
+removed. This is motivated by ReLU-based networks, where inactive channels may contribute
+little to the final prediction. After pruning, the network is fine-tuned to recover accuracy.
+
+Another simple data-independent approach is filter-norm pruning, where filters with small
+$\ell_1$ or $\ell_2$ norms are removed. These methods are attractive because they are cheap and
+easy to implement. Their limitation is that small magnitude does not always imply low importance:
+a filter can have small weights but still be useful, while a large filter may be redundant if its
+function is duplicated by other filters.
+
+\subparagraph{Optimization-based channel approximation}
+Optimization-based channel pruning methods remove channels while explicitly trying to preserve
+the layer output. Rather than asking which channels are individually small or inactive, these
+methods ask which subset of channels best reconstructs the original feature maps. ThiNet
+~\cite{luo2017thinet}, for example, formulates channel selection as an optimization problem and
+uses a greedy strategy to choose channels whose removal minimally affects the next layer. After
+the subset of channels is chosen, the remaining weights are re-optimized using least squares.
+
+Related methods use LASSO regression or other approximations to select channels and refit the
+remaining weights. These approaches are often more accurate than simple magnitude pruning
+because they account for the interaction between channels. Their disadvantage is additional
+computational cost: estimating reconstruction error and solving optimization problems requires
+data samples and extra pruning-time computation.
+
+\paragraph{Similarity and clustering methods}
+Similarity and clustering methods remove redundant structures rather than individually weak
+ones. The main assumption is that over-parameterized networks may contain filters or channels
+that perform similar functions. If two filters are highly similar, one may be removed or replaced
+with an approximation based on the other. Representative approaches include geometric median
+filter pruning~\cite{he2019filter}, ThiNet~\cite{luo2017thinet}, and FilterSketch~\cite{lin2021filter}.
+
+Geometric median pruning removes filters that are close to the geometric median of the filter set,
+because such filters are assumed to contain information already represented by other filters.
+FilterSketch instead aims to reduce the number of filters while preserving covariance information
+among them. These methods are useful because they target redundancy directly. However, their
+success depends on the assumption that similarity in weight or feature space corresponds to
+functional redundancy, which may not always hold across architectures and tasks.
+
+\paragraph{Sensitivity-analysis methods}
+Sensitivity-analysis methods attempt to estimate the effect of removing a parameter, channel, or
+filter on the loss function. These methods are more directly tied to the learning objective than
+simple magnitude criteria. Classical examples include Optimal Brain Damage and Optimal Brain
+Surgeon, which use second-order Taylor approximations of the loss to estimate weight saliency.
+More recent methods use first-order or second-order approximations to prune channels and feature
+maps in convolutional networks.
+
+Taylor pruning~\cite{molchanov2016pruning} estimates the change in loss caused by removing a
+feature map using a first-order Taylor approximation. SNIP~\cite{lee2018snip} performs
+single-shot pruning before training by estimating the saliency of each connection at initialization.
+GraSP~\cite{wang2020picking} instead aims to preserve gradient flow after pruning. These methods
+can achieve strong accuracy--compression trade-offs because they prune according to estimated
+task sensitivity. However, they are often more expensive than magnitude-based pruning and may
+require gradient computation, data samples, or careful tuning.
+
+\paragraph{Knowledge distillation and pruning}
+Knowledge distillation is not pruning in the strict sense, because it does not necessarily remove
+weights from an existing model. Instead, a large teacher model transfers predictive behavior to a
+smaller student model~\cite{hinton2015distilling}. The student may be a manually designed compact
+architecture, a pruned network, or a structurally simplified model. Distillation is especially useful
+after structured pruning, because the pruned model can be trained to match the outputs or
+intermediate representations of the original model. Methods such as discrimination-aware channel
+pruning~\cite{zhuang2018discrimination} combine pruning with auxiliary losses to preserve
+discriminative features.
+
+The advantage of distillation is that it can recover accuracy that would otherwise be lost during
+compression. The limitation is that it introduces additional training complexity and usually
+requires access to training data and a strong teacher model. Therefore, distillation is powerful when
+accuracy is critical, but less convenient for fast, hardware-agnostic compression.
+
+\paragraph{Low-rank approximation, quantization, and architectural search}
+Low-rank approximation, quantization, and architectural search are related to pruning but should
+be treated as broader model-efficiency techniques. Low-rank methods factor large weight tensors
+or matrices into smaller components, reducing computation in convolution-heavy models. Their
+effectiveness depends on whether the learned weights admit a good low-rank approximation.
+At high compression levels, accuracy may degrade quickly.
+
+Quantization reduces numerical precision rather than removing structures. It is commonly
+combined with pruning because the two methods attack different sources of cost: pruning reduces
+the number of parameters or operations, while quantization reduces the cost of storing and
+executing the remaining ones. Quantization-aware training~\cite{jacob2018quantization} and binary
+or ternary networks such as XNOR-Net~\cite{rastegari2016xnor} are therefore better discussed as
+complementary compression methods rather than pruning methods.
+
+Architectural design methods, including NAS- and reinforcement-learning-based approaches such
+as AMC, AutoSlim, and Once-for-All, search directly for efficient architectures. These methods may
+produce networks that resemble pruned architectures, but they differ from classical pruning
+because they optimize the architecture itself rather than removing parts from a fixed trained
+network.
+
+\paragraph{Deployment considerations}
+The main practical distinction is between unstructured and structured pruning. Unstructured
+pruning can remove a very large number of individual weights and therefore achieves high nominal
+compression. However, unless the target hardware, compiler, and runtime support sparse tensor
+operations efficiently, the model may not become faster. Sparse weight matrices can introduce
+irregular memory access, index-storage overhead, and poor utilization of dense SIMD, GPU, or
+NPU execution units.
+
+Structured pruning is usually more useful for deployment because it changes tensor shapes and
+reduces dense computation. Removing channels, filters, or blocks can reduce FLOPs and memory
+traffic in a way that standard inference engines can exploit. This makes structured pruning more
+relevant for compiler-aware model optimization, where the goal is not only to reduce the number
+of parameters, but to produce a model that maps efficiently to the target backend. For edge
+deployment, pruning should therefore be evaluated using real latency, memory consumption, and
+power measurements, not only parameter count or theoretical FLOPs.
+
+\paragraph{Summary}
+Pruning methods differ in what they remove and how they estimate importance. Magnitude-based
+methods are simple and cheap, but may remove parameters that are locally small yet globally
+important. Sensitivity-analysis methods are more task-aware but computationally more expensive.
+Similarity and clustering methods target redundancy between filters or channels, while
+optimization-based methods explicitly preserve layer outputs after channel removal. For practical
+deployment, structured pruning is generally more useful than unstructured pruning because it
+produces smaller dense models that are easier for existing compilers, libraries, and hardware
+backends to accelerate. In the context of this thesis, pruning is therefore most relevant when it
+leads to structural simplification of the model, such as reducing channels, filters, or blocks in a
+way that improves actual inference latency and energy efficiency on edge hardware.
 
 
 \section{Apache TVM}
@@ -1329,7 +1630,7 @@ For compute-dominated layers such as large convolutions and matrix multiplicatio
 implementations that use Tensor Cores through libraries such as cuDNN and cuBLASLt, or through internally specialized
 kernels. For convolution in particular, many implementations reduce the operation to an implicit GEMM-like form, which
 allows the same blocked matrix multiplication machinery to be reused for deep learning
-workloads~\cite{nvidia_cudnn_frontend, cutlass_overview, cutlass_implicit_gemm, jia2018volta, yan2020tensorcores}.
+workloads.
 This is one reason why matrix multiplication is the right mental model for understanding a large fraction of modern
 inference kernels: convolution, attention, and linear layers are often executed through GEMM-style tiled pipelines
 rather than through direct textbook formulations.
@@ -1340,8 +1641,7 @@ supported regions, fuses eligible operations, and benchmarks tactics. At the imp
 commonly backed by cuDNN, cuBLASLt, Tensor Core matrix-multiply pipelines, and, for unsupported or intentionally
 replaced regions, user-defined plugins. At runtime, the execution context launches the selected kernels on CUDA
 streams using the precompiled execution plan, without performing a second round of graph
-optimization~\cite{nvidia_tensorrt_docs, nvidia_tensorrt_plugins, nvidia_tensorrt_engine_tools, nvidia_tensorrt_cmd,
-    nvidia_cudnn_frontend}. This layered view is especially useful in a compiler-aware thesis because it clarifies
+optimization. This layered view is especially useful in a compiler-aware thesis because it clarifies
 that TensorRT's optimization problem spans both graph compilation and kernel dispatch, but does not expose the full
 schedule space to the user in the way that TVM does.
 
@@ -1350,16 +1650,15 @@ mixed-precision arithmetic. Tensor Cores provide very high throughput for matrix
 but only when shapes, data layouts, and operand types satisfy hardware-specific constraints. Independent
 microbenchmarking work has shown that Tensor Core performance depends strongly on operand tiling, instruction form,
 and memory staging, meaning that nominal precision support alone is not sufficient to guarantee high realized
-throughput~\cite{markidis2018tensorcores, jia2018volta, yan2020tensorcores, sun2022dissecting_tensor_cores}. For
-inference, this is highly relevant: the theoretical gain from FP16, BF16, TF32, or INT8 is achieved only when the
-surrounding kernel implementation can sustain data movement and feed the compute units efficiently. TensorRT's
-tactic-selection mechanism exists precisely to navigate this design space on a concrete target
-device~\cite{nvidia_tensorrt_perf, nvidia_tensorrt_support_matrix}.
+throughput. For inference, this is highly relevant: the theoretical gain from FP16, BF16, TF32, or INT8 is achieved
+only when the surrounding kernel implementation can sustain data movement and feed the compute units efficiently.
+TensorRT's tactic-selection mechanism exists precisely to navigate this design space on a concrete target
+device.
 
 An important practical issue is operator support. TensorRT does not execute arbitrary ONNX graphs without restriction.
 Instead, the ONNX parser supports a large but incomplete subset of ONNX, and unsupported operators must either be
 rewritten, decomposed into supported subgraphs, or implemented as plugins
-~\cite{nvidia_tensorrt_quickstart, nvidia_tensorrt_support_matrix}. This means that deployment success depends not
+. This means that deployment success depends not
 only on the neural network architecture, but also on how the model is exported. Two ONNX graphs with equivalent
 mathematical meaning can lead to different TensorRT outcomes if one export pattern matches TensorRT-supported
 operators and fusion rules more closely than the other. This is particularly important in research codebases,
@@ -1367,22 +1666,20 @@ where novel blocks are often expressed as long sequences of primitive operators 
 structurally unfriendly to vendor parsers and fusion passes.
 
 For this reason, TensorRT's plugin interface is a central mechanism for controlled intervention. In current TensorRT
-releases, custom layers are implemented through the \texttt{IPluginV3} interface, while earlier plugin APIs are
-deprecated~\cite{nvidia_tensorrt_plugins_cpp, nvidia_tensorrt_plugin_migration}. A plugin declares its inputs, outputs,
+releases, custom layers are implemented through the \path{IPluginV3} interface, while earlier plugin APIs are
+deprecated. A plugin declares its inputs, outputs,
 formats, data types, shape behavior, and runtime implementation, and is then inserted into the network either
 programmatically or through ONNX parser integration. In the common ONNX-based workflow, the user first performs
 subgraph surgery, typically with ONNX GraphSurgeon, replacing a region of the exported graph with a custom node
 whose operator name matches the registered plugin creator. TensorRT then parses that node as a plugin layer and
-includes it as a first-class component during engine building
-~\cite{nvidia_tensorrt_plugins, nvidia_tensorrt_plugin_migration, nvidia_onnx_graphsurgeon,
-    nvidia_tensorrt_plugin_advanced}. This is the cleanest route for injecting a hand-written CUDA implementation
-into an otherwise TensorRT-optimized model.
+includes it as a first-class component during engine building. This is the cleanest route for injecting a hand-written
+CUDA implementation into an otherwise TensorRT-optimized model.
 
 Conceptually, plugin injection can occur in three stages. First, a subgraph is identified whose default lowering is
 unsupported or inefficient. Second, that region is replaced in the ONNX graph by a plugin node carrying the required
 metadata or serialized weights. Third, the plugin shared library is loaded during engine build and runtime so that
 TensorRT can benchmark the plugin against surrounding layers and embed the plugin into the final engine
-plan~\cite{nvidia_tensorrt_plugins, nvidia_tensorrt_plugin_migration, nvidia_tensorrt_cmd}. This mechanism is narrow
+plan. This mechanism is narrow
 compared with a general compiler IR transformation framework, but it is highly valuable in practice because it permits
 targeted replacement of persistent bottlenecks without abandoning the rest of TensorRT's optimization pipeline.
 
@@ -1396,9 +1693,9 @@ words, plugins are not only an extensibility mechanism; they are an experimental
 leaves on the table.
 
 TensorRT does provide limited introspection tools that are useful for this purpose. The engine inspector and
-\texttt{trtexec} can expose layer information, per-layer runtimes, and selected engine structure via flags such
-as \texttt{--profilingVerbosity=detailed}, \texttt{--dumpLayerInfo}, and
-\texttt{--dumpProfile}~\cite{nvidia_tensorrt_engine_tools, nvidia_tensorrt_cmd}. While these tools do not reveal full
+\path{trtexec} can expose layer information, per-layer runtimes, and selected engine structure via flags such
+as \texttt{--profilingVerbosity=detailed}, \path{--dumpLayerInfo}, and
+\path{--dumpProfile}. While these tools do not reveal full
 internal scheduling logic, they are sufficient to identify whether overhead is dominated by specific kernels, reformat
 operations, shape handling, or data transfers. Combined with Nsight Systems and Nsight Compute, they allow the
 researcher to bridge the gap between graph-level descriptions and actual kernel execution on the GPU.
@@ -1410,19 +1707,18 @@ deployment effectiveness on one hardware family, relying on proprietary tactic l
 and vendor-maintained kernels. Compared with ONNX Runtime, TensorRT is less general but typically more aggressive on
 supported NVIDIA targets: ONNX Runtime organizes acceleration through execution providers, including both CUDA EP and
 TensorRT EP, and therefore emphasizes portability and broad operator coverage over deep specialization to a single
-kernel ecosystem~\cite{onnxruntime_docs, onnxruntime_cuda_ep, onnxruntime_trt_ep}. This distinction is analytically
+kernel ecosystem. This distinction is analytically
 important: ONNX Runtime is primarily a runtime abstraction layer over multiple backends, whereas TensorRT is itself
 a backend compiler and engine builder.
 
 TensorRT also has important limitations. First, unsupported operators, dynamic control flow, and export idiosyncrasies
 can prevent full graph lowering or degrade fusion quality. Second, the engine is strongly tied to the target platform
-and should be treated as hardware- and software-specific rather than portable~\cite{nvidia_tensorrt_support_matrix,
-    nvidia_tensorrt_glossary}. Third, the user has only partial visibility into why a particular tactic was chosen,
+and should be treated as hardware- and software-specific rather than portable. Third, the user has only partial visibility into why a particular tactic was chosen,
 which complicates rigorous compiler analysis. Finally, per-layer or per-region optimization can still leave global
 inefficiencies unresolved, especially when model performance is limited by reformatting, synchronization, or memory
 traffic between otherwise efficient kernels. Recent systems work on GPU inference and tensor-program optimization
 repeatedly shows that kernel-by-kernel execution can remain suboptimal relative to more holistic scheduling and fusion
-approaches~\cite{rammer2020, roller2022, mononn2024}. This observation helps explain why even TensorRT-optimized models
+approaches. This observation helps explain why even TensorRT-optimized models
 can retain stubborn bottlenecks around custom architectural blocks.
 
 \paragraph{Relation to this thesis.}
