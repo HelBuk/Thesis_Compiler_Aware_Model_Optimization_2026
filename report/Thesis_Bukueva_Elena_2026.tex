@@ -105,7 +105,7 @@
 
 % ======= Title Page Variables (edit these) =======
 \newcommand{\ThesisTitleEng}{Compiler-Aware Model Optimization for Edge AI}
-\newcommand{\ThesisTitleNor}{Kompilerbevisst optimalisering for Edge-AI}
+\newcommand{\ThesisTitleNor}{Kompileravhengig optimalisering for Edge-AI}
 \newcommand{\AuthorName}{Bukueva Elena}
 \newcommand{\SupervisorName}{Professor Geir Mathisen, Dept. of Eng. Cybernetics}
 
@@ -120,20 +120,25 @@
     Efficient deployment of deep learning models on embedded and edge platforms depends on
     both model-level and system-level factors. In addition to model design, inference
     performance is influenced by compiler support, runtime behavior, hardware
-    characteristics, numerical precision, and optimization techniques such as quantizatio
-    n and pruning. This thesis studies compiler-aware model optimization for edge AI,
+    characteristics, numerical precision, and optimization techniques such as quantization
+    and pruning. This thesis studies compiler-aware model optimization for edge AI,
     with focus on real-time object detection. The aim is to evaluate how different
     deployment configurations affect accuracy, latency, and resource usage, and to
     identify the main bottlenecks that limit efficient execution on target hardware.
 }
+\newcommand{\TaskLit}{
+    Survey existing work on deep learning model optimization and compiler-based deployment for edge hardware.
+}
 \newcommand{\TaskOne}{
-    Develop a framework for evaluating deep learning models across deployment configurations in terms of accuracy, latency, and resource usage.
+    Develop a framework for evaluating deep learning models across deployment configurations in terms of accuracy,
+    latency, and resource usage.
 }
 \newcommand{\TaskTwo}{
     Explore model optimization techniques to improve computational efficiency while maintaining acceptable performance.
 }
 \newcommand{\TaskThree}{
-    Analyze optimized models on target hardware, identify bottlenecks, and investigate ways to improve execution efficiency.
+    Analyze optimized models on target hardware, identify bottlenecks, and investigate ways to improve execution
+    efficiency.
 }
 \newcommand{\StartDate}{15. January, 2026}
 \newcommand{\DueDate}{08. June, 2026}
@@ -146,45 +151,55 @@
 \hypersetup{pageanchor=false} % avoid duplicate page anchors in front matter
 
 % ======= Front Page (mirrors “NTNU’s standard front page” placeholder) =======
+\newgeometry{left=1.5cm, right=2.5cm, top=1.2cm, bottom=2.5cm}
 \begin{titlepage}
     \thispagestyle{empty}
 
     \noindent
-    \begin{minipage}[t]{0.7\textwidth}
-        \vspace{0pt} % top-align this minipage
-        NTNU\\
-        Norwegian University of Science and Technology (NTNU)\\
-        Faculty of Information Technology and Electrical Engineering\\
-        Department of Engineering Cybernetics
-    \end{minipage}%
-    \hfill
-    \begin{minipage}[t]{0.2\textwidth}
-        \vspace{0pt} % top-align this minipage
-        \raggedleft
-        \includegraphics[width=1.8cm]{pics/NTNU_hovedlogo_farger_hoyde.png}
-    \end{minipage}
+    \begin{tabular}{@{}p{8cm}p{10cm}@{}}
+        \begin{minipage}[t]{\linewidth}
+            \vspace{0pt}
+            \textbf{NTNU}\\
+            \textbf{Norwegian University} \\
+            \textbf{of Science and Technology}
+        \end{minipage}
+        &
+        \begin{minipage}[t]{\linewidth}
+            \vspace{0pt}
+            \raggedleft
+            \textbf{Faculty of Information Technology}\\
+            \textbf{and Electrical Engineering}\\
+            \textbf{Department of Engineering Cybernetics}\\[0.4cm]
+            \includegraphics[width=1.8cm, trim={0 1.06cm 0 0}, clip]{pics/NTNU_hovedlogo_farger_hoyde.png}
+        \end{minipage}
+    \end{tabular}
 
-    \vspace{1cm}
+    \vspace{0.1cm}
 
     \begin{center}
-        {\LARGE \textbf{Master's Thesis}\par}
+        {\LARGE \textbf{Master’s Thesis}\par}
     \end{center}
 
     \noindent
-    \begin{tabular}{@{}p{4.5cm}p{12cm}@{}}
+    \begin{tabular}{@{}p{4.8cm}p{13.2cm}@{}}
         \textbf{Candidate:}              & \textbf{\AuthorName} \\[0.1cm]
-        \textbf{Course:}                & \textbf{\CourseCode} \\[0.2cm]
-        \textbf{Title (English):}   & \textbf{\ThesisTitleEng} \\[0.1cm]
-        \textbf{Title (Norwegian):} & \textbf{\ThesisTitleNor} \\[0.4cm]
-        \textbf{Thesis description:}     & \ThesisDescription \\[0.9cm]
-        \textbf{The tasks will be:}      &
-          \begin{minipage}[t]{10cm}
-            \begin{enumerate}
+        \textbf{Course:}                 & \textbf{\CourseCode} \\[0.2cm]
+        \textbf{Title (English):}        & \textbf{\ThesisTitleEng} \\[0.1cm]
+        \textbf{Title (Norwegian):}      & \textbf{\ThesisTitleNor} \\[0.4cm]
+        \textbf{Thesis description:}     & \ThesisDescription \\[0.5cm]
+        \textbf{The tasks will be:}      & \\[-0.2cm]
+        \multicolumn{2}{@{}l@{}}{%
+          \hspace{4.8cm}%
+          \begin{minipage}{13.2cm}
+            \begin{enumerate}[leftmargin=*, topsep=0pt, itemsep=2pt]
+              \item \TaskLit
               \item \TaskOne
               \item \TaskTwo
-              \item \TaskThree \\[0.1cm]
+              \item \TaskThree
             \end{enumerate}
-          \end{minipage} \\
+          \end{minipage}%
+        } \\
+        \noalign{\vspace{0.8cm}}
         \textbf{Start date:}             & \StartDate \\[0.1cm]
         \textbf{Due date:}               & \DueDate \\[0.1cm]
         \textbf{Thesis performed at:}    & \ThesisLocation \\[0.1cm]
@@ -192,11 +207,8 @@
     \end{tabular}
 
     \vfill
-%
-%    \begin{center}
-%        \includegraphics[width=0.25\textwidth]{ntnu_bredde_eng.png}\\[0.5cm]
-%    \end{center}
 \end{titlepage}
+\restoregeometry
 \cleardoublepage
 
 
