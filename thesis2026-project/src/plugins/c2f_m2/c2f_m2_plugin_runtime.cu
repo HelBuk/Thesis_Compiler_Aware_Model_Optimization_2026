@@ -14,6 +14,27 @@ extern "C" __global__ void slice_ch_kernel(
     const float* x, float* out,
     int N, int Cin, int Cslice, int H, int W, int c_start);
 
+// ---------------------------------------------------------------------------
+// Fully-fused kernel: all 4 convolutions + activations in shared memory
+// (defined in c2f_m2_fused.cu).  Fixed at CIN=32, COUT=32, HALFC=16.
+// ---------------------------------------------------------------------------
+extern "C" __global__ void fused_c2f_model2_kernel(
+    const float* __restrict__ x,
+    float*       __restrict__ y,
+    const float* __restrict__ cv1_w,
+    const float* __restrict__ cv1_b,
+    const float* __restrict__ m0cv1_w,
+    const float* __restrict__ m0cv1_b,
+    const float* __restrict__ m0cv2_w,
+    const float* __restrict__ m0cv2_b,
+    const float* __restrict__ cv2_w,
+    const float* __restrict__ cv2_b,
+    int H, int W);
+
+static constexpr int    FUSED_TILE_H = 8;
+static constexpr int    FUSED_TILE_W = 8;
+static constexpr size_t FUSED_SMEM   = 34048;  // see c2f_m2_fused.cu header comment
+
 static void launchSiLU(float* x, size_t n, cudaStream_t stream) {
     if (n == 0) return;
     int threads   = 256;
@@ -57,11 +78,6 @@ int YoloC2fM2Plugin::enqueue(
         }
     }
 
-    if (!workspace) {
-        std::cerr << "[enqueue] workspace is null — getWorkspaceSize() must return >0" << std::endl;
-        return 1;
-    }
-
     int N = 1, H = 0, W = 0;
     if (inputDesc[0].dims.nbDims == 3) {
         H = inputDesc[0].dims.d[1];
@@ -83,6 +99,38 @@ int YoloC2fM2Plugin::enqueue(
     const float* x   = static_cast<const float*>(inputs[0]);
     float*       out = static_cast<float*>(outputs[0]);
 
+    // -----------------------------------------------------------------------
+    // Fast path: fully-fused shared-memory kernel.
+    // Fuses all 4 convolutions (cv1, m0.cv1, m0.cv2, cv2) plus every bias
+    // and SiLU activation into one kernel launch with 33 KB of shared memory.
+    // Only available for the hardcoded CIN=32 / COUT=32 / HALFC=16 variant.
+    // -----------------------------------------------------------------------
+    if (mCin == 32 && mCout == 32 && mHalfC == 16) {
+        dim3 block(FUSED_TILE_W, FUSED_TILE_H);
+        dim3 grid(
+            static_cast<unsigned>((W + FUSED_TILE_W - 1) / FUSED_TILE_W),
+            static_cast<unsigned>((H + FUSED_TILE_H - 1) / FUSED_TILE_H));
+
+        fused_c2f_model2_kernel<<<grid, block, FUSED_SMEM, stream>>>(
+            x, out,
+            d_cv1_w,   d_cv1_b,
+            d_m0_cv1_w, d_m0_cv1_b,
+            d_m0_cv2_w, d_m0_cv2_b,
+            d_cv2_w,   d_cv2_b,
+            H, W);
+
+        if (cudaGetLastError() == cudaSuccess) return 0;
+        std::cerr << "[enqueue] fused kernel failed, falling back to cuDNN" << std::endl;
+    }
+
+    // -----------------------------------------------------------------------
+    // Fallback: multi-step cuDNN path (handles arbitrary channel counts).
+    // -----------------------------------------------------------------------
+    if (!workspace) {
+        std::cerr << "[enqueue] workspace is null — getWorkspaceSize() must return >0" << std::endl;
+        return 1;
+    }
+
     size_t HW        = static_cast<size_t>(H) * W;
     float* cv1_out   = static_cast<float*>(workspace);
     float* m0cv1_out = cv1_out   + static_cast<size_t>(mCout)      * HW;
@@ -92,7 +140,7 @@ int YoloC2fM2Plugin::enqueue(
     float* m0_buf    = concat    + static_cast<size_t>(2 * mHalfC) * HW;
     float* conv_ws   = concat    + static_cast<size_t>(3 * mHalfC) * HW;
 
-    // Step 1: cv1 (1x1), then fused bias+SiLU.
+    // Step 1: cv1 (1x1) + bias + SiLU.
     if (!runConv(mCv1Desc, x, cv1_out, d_cv1_w, d_cv1_b, conv_ws, stream, false)) {
         std::cerr << "[enqueue] cv1 failed" << std::endl;
         return 1;
@@ -106,34 +154,24 @@ int YoloC2fM2Plugin::enqueue(
     launchSlice(cv1_out, x1_buf, N, mCout, mHalfC, H, W, 0,      stream);
     launchSlice(cv1_out, x2_buf, N, mCout, mHalfC, H, W, mHalfC, stream);
 
-    // Step 3: m0.cv1 (3x3) — Winograd path with cuDNN fallback.
-    bool usedWinogradM0Cv1 = false;
-    if (canUseWinograd(N, mHalfC, mHalfC, H, W, 3, 3, 1, 1)) {
-        usedWinogradM0Cv1 = launchWinogradConv3x3SiLU(
-            x2_buf, m0cv1_out, d_m0_cv1_wino, d_m0_cv1_b,
-            N, mHalfC, mHalfC, H, W, stream);
+    // Step 3: m0.cv1 (3x3) + bias + SiLU.
+    if (!runConv(mM0Cv1Desc, x2_buf, m0cv1_out, d_m0_cv1_w, d_m0_cv1_b, conv_ws, stream, false)) {
+        std::cerr << "[enqueue] m0.cv1 failed" << std::endl;
+        return 1;
     }
-    if (!usedWinogradM0Cv1) {
-        if (!runConv(mM0Cv1Desc, x2_buf, m0cv1_out, d_m0_cv1_w, d_m0_cv1_b, conv_ws, stream, true)) {
-            std::cerr << "[enqueue] m0.cv1 failed" << std::endl;
-            return 1;
-        }
-        launchSiLU(m0cv1_out, static_cast<size_t>(mHalfC) * HW, stream);
+    if (!launchBiasSiLUInplace(m0cv1_out, d_m0_cv1_b, N, mHalfC, H, W, false, stream)) {
+        std::cerr << "[enqueue] m0.cv1 bias+silu failed" << std::endl;
+        return 1;
     }
 
-    // Step 4: m0.cv2 (3x3) — Winograd path with cuDNN fallback.
-    bool usedWinogradM0Cv2 = false;
-    if (canUseWinograd(N, mHalfC, mHalfC, H, W, 3, 3, 1, 1)) {
-        usedWinogradM0Cv2 = launchWinogradConv3x3SiLU(
-            m0cv1_out, m0_buf, d_m0_cv2_wino, d_m0_cv2_b,
-            N, mHalfC, mHalfC, H, W, stream);
+    // Step 4: m0.cv2 (3x3) + bias + SiLU.
+    if (!runConv(mM0Cv2Desc, m0cv1_out, m0_buf, d_m0_cv2_w, d_m0_cv2_b, conv_ws, stream, false)) {
+        std::cerr << "[enqueue] m0.cv2 failed" << std::endl;
+        return 1;
     }
-    if (!usedWinogradM0Cv2) {
-        if (!runConv(mM0Cv2Desc, m0cv1_out, m0_buf, d_m0_cv2_w, d_m0_cv2_b, conv_ws, stream, true)) {
-            std::cerr << "[enqueue] m0.cv2 failed" << std::endl;
-            return 1;
-        }
-        launchSiLU(m0_buf, static_cast<size_t>(mHalfC) * HW, stream);
+    if (!launchBiasSiLUInplace(m0_buf, d_m0_cv2_b, N, mHalfC, H, W, false, stream)) {
+        std::cerr << "[enqueue] m0.cv2 bias+silu failed" << std::endl;
+        return 1;
     }
 
     // Step 5: residual shortcut.
@@ -141,13 +179,12 @@ int YoloC2fM2Plugin::enqueue(
         launchAddInplace(m0_buf, x2_buf, static_cast<size_t>(mHalfC) * HW, stream);
     }
 
-    // Step 6: cv2 (1x1), then fused bias+SiLU.
+    // Step 6: cv2 (1x1) + bias + SiLU.  Output is always NCHW (kLINEAR).
     if (!runConv(mCv2Desc, concat, out, d_cv2_w, d_cv2_b, conv_ws, stream, false)) {
         std::cerr << "[enqueue] cv2 failed" << std::endl;
         return 1;
     }
-    bool outIsNHWC = (mInputFormat == TensorFormat::kCHW32);
-    if (!launchBiasSiLUInplace(out, d_cv2_b, N, mCout, H, W, outIsNHWC, stream)) {
+    if (!launchBiasSiLUInplace(out, d_cv2_b, N, mCout, H, W, false, stream)) {
         std::cerr << "[enqueue] cv2 bias+silu failed" << std::endl;
         return 1;
     }

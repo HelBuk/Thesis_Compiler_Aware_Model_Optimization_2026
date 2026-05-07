@@ -388,6 +388,12 @@ bool YoloC2fM2Plugin::buildOneDescSet(
     } else {
         d.algo = perf.algo;
     }
+    // Winograd on Orin sm87 requires cuTENSOR format transforms (~470µs overhead)
+    // and the heuristic can select it for small 3×3 problems.  Force GEMM instead.
+    if (d.algo == CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD ||
+        d.algo == CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED) {
+        d.algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
+    }
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
@@ -428,23 +434,13 @@ bool YoloC2fM2Plugin::buildDescSets() noexcept {
 
     destroyDescSets();
 
-    // kCHW32 (= 5) is TRT's Ampere FP32 NHWC-vectorised layout.
-    // For our tensors (C = 32 exactly) it is byte-equivalent to NHWC.
-    // Using CUDNN_TENSOR_NHWC for the plugin I/O descriptors lets cuDNN consume
-    // and produce the tensor directly without any format-conversion copy node.
-    // All intermediate (workspace) tensors stay NCHW — slice / add kernels only
-    // work with NCHW, and workspace buffers have no TRT format constraints.
-    cudnnTensorFormat_t ioFmt =
-        (mInputFormat == TensorFormat::kCHW32) ? CUDNN_TENSOR_NHWC : CUDNN_TENSOR_NCHW;
-
+    // All I/O and workspace tensors are NCHW — the fused_c2f_model2_kernel
+    // reads/writes NCHW, and TRT is restricted to kLINEAR for this plugin.
     bool ok = true;
-    // cv1: reads plugin input (ioFmt), writes workspace (NCHW)
-    ok &= buildOneDescSet(mCv1Desc,   mN, mCin,     mCout,  mH, mW, 1, 1, 0, 0, ioFmt,             CUDNN_TENSOR_NCHW);
-    // m0.cv1 / m0.cv2: workspace → workspace, always NCHW
+    ok &= buildOneDescSet(mCv1Desc,   mN, mCin,     mCout,  mH, mW, 1, 1, 0, 0, CUDNN_TENSOR_NCHW, CUDNN_TENSOR_NCHW);
     ok &= buildOneDescSet(mM0Cv1Desc, mN, mHalfC,   mHalfC, mH, mW, 3, 3, 1, 1, CUDNN_TENSOR_NCHW, CUDNN_TENSOR_NCHW);
     ok &= buildOneDescSet(mM0Cv2Desc, mN, mHalfC,   mHalfC, mH, mW, 3, 3, 1, 1, CUDNN_TENSOR_NCHW, CUDNN_TENSOR_NCHW);
-    // cv2: reads workspace (NCHW), writes plugin output (ioFmt)
-    ok &= buildOneDescSet(mCv2Desc,   mN, 3*mHalfC, mCout,  mH, mW, 1, 1, 0, 0, CUDNN_TENSOR_NCHW, ioFmt);
+    ok &= buildOneDescSet(mCv2Desc,   mN, 3*mHalfC, mCout,  mH, mW, 1, 1, 0, 0, CUDNN_TENSOR_NCHW, CUDNN_TENSOR_NCHW);
 
     mDescsCached = ok;
     std::cout << "[buildDescSets] result=" << ok << std::endl;
@@ -562,11 +558,6 @@ int YoloC2fM2Plugin::initialize() noexcept {
         }
     }
 
-    // Optional fast path. If this fails, enqueue() will fall back to cuDNN.
-    if (!mWinogradReady) {
-        precomputeWinogradFilters();
-    }
-
     std::cerr << "[initialize] OK" << std::endl;
     return 0;
 }
@@ -681,13 +672,11 @@ bool YoloC2fM2Plugin::supportsFormatCombination(
     auto const& desc = inOut[pos];
     // Only FP32
     if (desc.type != DataType::kFLOAT) return false;
-    // Accept kCHW32 (Ampere NHWC-vectorised, eliminates the reformat copy node)
-    // and kLINEAR (NCHW, safe fallback on non-Ampere / older cuDNN).
-    if (desc.format != TensorFormat::kCHW32 && desc.format != TensorFormat::kLINEAR)
-        return false;
-    // Require all I/O tensors to share the same format so TRT doesn't insert
-    // an additional inter-tensor reformat between input and output.
-    if (pos > 0) return desc.format == inOut[0].format;
+    // kLINEAR (NCHW) only — the fused_c2f_model2_kernel reads/writes NCHW.
+    // TRT inserts efficient Reformat nodes at the I/O boundary when the
+    // surrounding graph uses kCHW32; that overhead (~0.1 ms each) is cheaper
+    // than the multi-step cuDNN path the plugin used to run internally.
+    if (desc.format != TensorFormat::kLINEAR) return false;
     return true;
 }
 
