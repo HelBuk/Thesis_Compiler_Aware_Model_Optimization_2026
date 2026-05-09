@@ -338,7 +338,8 @@ The remainder of this report is organised as follows:
     of the thesis work.}
 \section{Scope of the chapter}
 
-This chapter covers the technical background necessary to understand the methodology and results of this thesis.
+This chapter introduces a literature research of the existing optimizations strategies and methods as well as
+the technical background necessary to understand the methodology and results of this thesis.
 After an introduction to object detection and the YOLO family, a dedicated section on the YOLOv8 architecture
 establishes the model used throughout all experiments, followed by a section on the challenges of edge deployment
 that motivates why optimization is necessary in the first place.
@@ -1743,35 +1744,220 @@ remaining time is spent: in arithmetic kernels, tensor reformatting, launch over
 optimized and non-optimized regions. This makes TensorRT especially useful for a compiler-aware investigation of the
 boundary between graph-level optimization and kernel-level specialization.
 
-\section{Performance Bottlenecks in ML Inference}
-
-\textcolor{red}{TODO}
-
-A workload is compute-bound if increasing the raw processing power
-(e.g., higher clock speed, more compute units) directly leads to a proportional decrease
-in execution time, assuming memory and latency are not limiting factors.
-
-Inference for complex neural networks requires millions of multiply-accumulate (MAC) operations.
-If hardware is not fully utilized and code not map vectors/tensors effectively, the processing
-bottlenecks are created.
-
-Many ML operations are memory-bound.
-This means the execution time is dominated by the time spent
-transferring data between memory levels (e.g., DRAM to caches, cache levels, host-to-device
-memory) rather than the computation itself.
-
-Latency bounded operations: single-batch inference, overhead for dispatching operations,
-pipeline stalls.
-
-These strategies reduce dispatch overhead for frequently executed execution paths:
-
-\begin{itemize}
-    \item \textbf{Ahead-of-Time (AOT):} Compile the entire model before execution,
-    as in traditional C/C++ workflows and many edge deployment scenarios.
-    \item \textbf{Just-In-Time (JIT):} Compile code or computation graphs at runtime,
-    typically upon first execution, leveraging runtime information such as tensor
-    shapes, data types, and target hardware.
-\end{itemize}
+%\section{Performance Bottlenecks in ML Inference}
+%
+%Deploying neural networks efficiently requires understanding where and why execution time is
+%lost. Bottlenecks in ML inference arise from an interplay of memory architecture, data layout,
+%compiler decisions, and workload scheduling. This section surveys the main categories of
+%performance limitations encountered in practice and explains the mechanisms behind each.
+%
+%A workload is compute-bound when execution time scales with the number of
+%multiply-accumulate (MAC) operations and shrinks proportionally with added arithmetic
+%throughput. It is memory-bound when the processor stalls waiting for data rather than
+%computing. The Roofline model, introduced by Williams et al.~\cite{williams2009roofline},
+%provides a concise way to diagnose which regime applies by relating an operation's
+%arithmetic intensity (FLOPs per byte of memory traffic) to the hardware's peak
+%compute-to-bandwidth ratio.
+%
+%The classical algorithmic response to memory pressure is blocking (also called
+%tiling): partition the matrices $A$, $B$, and accumulator $C$ into sub-tiles that fit
+%in L2 or L1 cache, so each element is reused many times before being evicted.  A
+%multiply-accumulate step then becomes:
+%\[
+%  C[i,j] \mathrel{+}= \sum_{k} A[i,k] \cdot B[k,j],
+%\]
+%where the tile sizes are chosen to maximise reuse for a specific cache capacity. Compute-in-memory
+%(CIM) proposals carry this principle further by performing the multiply-accumulate operations
+%directly inside the memory array, eliminating the data-movement cost
+%entirely~\cite{emer_sze_chen_2019_dnn_accel_tutorial}.
+%
+%\subsection{Memory Layout: NCHW vs.\ NHWC}
+%
+%The physical order in which tensor elements are stored in memory has a significant effect on
+%vectorisation efficiency and cache utilisation. Two conventions dominate deep learning
+%frameworks: NCHW (batch, channels, height, width), where the channel dimension is
+%innermost after the batch axis, and NHWC (batch, height, width, channels), where
+%spatial positions group together.
+%
+%For convolutions on NVIDIA GPUs with Tensor Cores, NHWC is typically preferred because Tensor Core convolution kernels
+%operate most efficiently when the channel dimension is the fastest-varying dimension in memory. NVIDIA documents that
+%Tensor Core convolutions require NHWC layout internally and are fastest when input tensors are already stored as NHWC.
+%NCHW tensors can still use Tensor Cores, but cuDNN/TensorRT may insert NCHW-to-NHWC transformations, whose overhead
+%can be measurable, especially when layout conversion cost is large relative to the convolution itself.
+%
+%On CPUs, oneDNN often prefers blocked memory formats such as nChw8c or nChw16c, where the channel dimension is split
+%into SIMD-sized blocks. This lets convolution kernels operate on vectors efficiently and improves cache locality.
+%If the channel count is not a multiple of the block size, oneDNN may use zero-padding in the blocked dimension so
+%kernels can avoid special tail-handling code~\cite{onednn_memory_formats, onednn_memory_format_tag}.
+%
+%Layout mismatches across framework boundaries are a common source of latency. A model
+%exported from PyTorch in NCHW format and consumed by a TensorRT engine that internally
+%prefers NHWC will incur a transpose operation at each I/O boundary. Compilers such as TVM
+%and TensorRT insert explicit layout-conversion nodes during graph compilation to ensure
+%internal uniformity, but when mixed-precision layers with different layout requirements
+%appear adjacently, the conversion overhead can dominate a short operator's runtime. Profiling
+%for unnecessary transposes is therefore an important step in deployment
+%optimisation~\cite{chen2018tvm}.
+%
+%\subsection{Tensor Transformations for Efficient Convolution}
+%
+%Direct computation of a convolution requires $O(K^{2} \cdot C_{in} \cdot C_{out} \cdot H
+%\cdot W)$ multiplications. Two classical transformations reduce this cost by restructuring
+%the computation.
+%
+%\paragraph{im2col.}
+%The im2col transformation unfolds each receptive field of the input feature map into a
+%column of a matrix, converting the convolution into a single general matrix multiplication
+%(GEMM). This allows highly tuned BLAS libraries to be applied directly. The trade-off is
+%memory: unfolding a $K \times K$ receptive field over $C_{in}$ channels creates a matrix
+%with $K^{2} C_{in}$ rows, increasing the memory footprint by a factor of $K^{2}$ compared
+%to the original activation tensor. For large kernels or high-resolution feature maps, this
+%expansion can stress the cache hierarchy and reduce the arithmetic-intensity gains expected
+%from GEMM.
+%
+%\paragraph{Winograd's algorithm.}
+%The Winograd minimal filtering algorithm reduces the number of multiplications required for
+%small convolutions (typically $3\times3$ with stride 1) from $K^{2}$ to as few as
+%$(K+r-1)^{2}/r^{2}$ multiplications per output tile of size $r$, at the cost of additional
+%additions and a change of basis. For the common $F(2\times2, 3\times3)$ case the number of
+%multiplications drops from 36 to 16 per $2\times2$ output tile, a 2.25$\times$ reduction.
+%Liu et al.~\cite{liu2021optimizing} demonstrate that aligning the Winograd basis transformation
+%with Tensor Core tile sizes can yield further speed-ups on modern GPUs. A combined
+%Im2col-Winograd approach~\cite{zhang2024im2col} decomposes an $N$-dimensional convolution
+%into a sequence of 1-D Winograd transforms applied along each spatial axis, avoiding the
+%memory explosion of standard im2col while retaining compatibility with NHWC layout. Reported
+%speed-ups over cuDNN reach up to $2.05\times$ for certain configurations on contemporary
+%NVIDIA hardware.
+%
+%The Winograd algorithm introduces numerical instability at larger tile sizes, so it is
+%typically restricted to $3\times3$ and $5\times5$ kernels and disabled for depthwise
+%separable convolutions, where its arithmetic savings are smaller.
+%
+%\subsection{Operator Fusion and Its Limitations}
+%
+%Operator fusion merges adjacent computation nodes in the execution graph into a single
+%compiled kernel, eliminating the round-trip to global memory that would otherwise be required
+%between them. The performance benefit is straightforward: if a convolution is followed by
+%batch normalisation and a ReLU activation, executing them as three separate kernels requires
+%writing intermediate feature maps to DRAM and reading them back twice. A fused kernel keeps
+%these intermediate values in registers or shared memory, improving both memory traffic and
+%kernel-launch overhead.
+%
+%Frameworks such as TensorRT, TVM, and XLA apply fusion aggressively during graph
+%compilation~\cite{nvidia_tensorrt_dev_guide, chen2018tvm, frostig2019compiling}. However,
+%fusion is not always possible, and failed fusion silently degrades performance.
+%
+%A representative example is the Swish/SiLU activation, defined as $\sigma(x) = x
+%\cdot \text{sigmoid}(x)$. Because SiLU requires a higher-precision intermediate value for
+%the sigmoid computation to maintain accuracy, TensorRT does not always fuse
+%it with a preceding INT8-quantised convolution: the precision mismatch forced an explicit
+%dequantise-compute-requantise sequence, inserting two memory transactions where a fused
+%kernel would have required none~\cite{nvidia_tensorrt_docs}. A similar issue arises with
+%GELU and its approximations in transformer blocks: the $\tanh$ component is not
+%directly representable in tensor-core arithmetic, so compilers frequently emit it as a
+%separate scalar kernel, breaking the fusion chain from the preceding linear projection.
+%
+%Beyond specific operators, custom or user-defined operations that fall outside a compiler's supported operator set are
+%unconditionally excluded from fusion, creating a guaranteed memory bottleneck wherever such
+%operations appear in a graph. Profiling tools such as Nsight Systems expose these gaps as
+%short, rapidly repeating kernel launches with high idle time between them.
+%
+%\subsection{Ahead-of-Time vs.\ Just-in-Time Compilation}
+%
+%The timing of when a model graph is lowered to machine code fundamentally affects both
+%startup behaviour and peak throughput.
+%
+%\paragraph{Ahead-of-Time (AOT) compilation}
+%translates the model to a static binary during a build phase, before any inference request
+%arrives. Because compilation time is not charged to the end user, the compiler can afford
+%exhaustive search strategies such as evolutionary auto-tuning, polyhedral scheduling, and
+%multi-level tiling optimisation that would take minutes or hours to run. The resulting binary
+%has deterministic latency from the very first inference call, which is critical in real-time
+%systems where a single slow startup frame is unacceptable. TVM's \path{tvm compile} and
+%TensorRT's engine serialisation both follow the AOT model. The downside is rigidity:
+%a serialised engine is tied to a specific batch size, input resolution, and hardware target;
+%any change requires a full recompilation.
+%
+%\paragraph{Just-in-Time (JIT) compilation}
+%defers lowering to the moment a graph is first executed, using live information about actual
+%tensor shapes, data types, and hardware state. PyTorch's \path{torch.compile} backend and
+%TVM's dynamic shape support are JIT frameworks. JIT compilation can adapt to variable-length
+%inputs, dynamically chosen batch sizes, and runtime-detected hardware features that an AOT
+%compiler cannot anticipate at build time. Jia et al.~\cite{jia2024empowering} show that a
+%JIT kernel auto-generation system for in-browser edge inference achieves up to $8.2\times$
+%faster throughput within 30 seconds of first execution compared to pre-compiled baselines
+%on the same device, because it generates kernels precisely matched to the browser's WebGPU
+%backend. The cost is a warm-up latency: the first call to a JIT-compiled model is
+%substantially slower than subsequent calls, and in latency-sensitive pipelines this cold-start
+%penalty may be unacceptable.
+%
+%In practice, edge deployments almost universally prefer AOT: the target hardware is fixed,
+%the input resolution is known at design time, and the absence of a runtime compiler reduces
+%memory footprint. JIT strategies are more common in server-side or research settings where
+%flexibility outweighs determinism.
+%
+%\subsection{Batching: Throughput vs.\ Latency}
+%
+%Neural network inference throughput increases with batch size because larger batches amortise
+%fixed overheads - kernel launch costs, memory-allocation calls, and pipeline-fill latency -
+%across more output samples. On an NVIDIA edge GPU, batched inference can process up to
+%$2.4\times$ more inferences per second compared with single-sample execution when the
+%hardware's compute units would otherwise be underutilised~\cite{hao2023reaching}.
+%
+%However, batching fundamentally conflicts with latency requirements. A system that waits to
+%accumulate a batch of $B$ samples before dispatching inference will add a queuing delay
+%proportional to $B$ times the inter-arrival time of requests. In real-time applications such
+%as object detection in a live video stream, latency measured end-to-end includes this waiting
+%time, so large batches are counter-productive. The Sarathi-Serve
+%scheduler~\cite{agrawal2024taming} addresses this tension in LLM serving by splitting prefill
+%requests into equal-sized chunks that can be interleaved with ongoing decode batches, achieving
+%near-peak throughput without stalling low-latency decode streams. A simpler version of the
+%same principle applies to edge vision pipelines: processing frames one at a time preserves
+%temporal responsiveness, while offline evaluation tasks (e.g., dataset benchmarking) should
+%use the largest batch that fits in device memory.
+%
+%For deeply memory-bound workloads, batching also raises arithmetic intensity and can push
+%the operating point above the Roofline's bandwidth ceiling, transforming a memory-bound
+%regime into a compute-bound one. This transition is itself an argument for profiling at
+%multiple batch sizes when characterising a deployment target.
+%
+%\subsection{Underutilisation of Compute Resources}
+%
+%High peak compute throughput does not imply high utilised throughput. Several mechanisms
+%cause the hardware's arithmetic units to sit idle even when inference is actively running.
+%
+%\paragraph{Low GPU/NPU occupancy.}
+%GPU execution is organised into warps of 32 threads scheduled onto streaming multiprocessors
+%(SMs). A kernel with insufficient parallelism - for example, a $1\times1$ convolution with
+%a very small feature map - may launch fewer warps than the number of SMs, leaving most of
+%the chip idle. This is common in the deeper layers of a network where spatial resolution
+%has been reduced by pooling but the design has not increased channel count enough to
+%compensate.
+%
+%\paragraph{Memory-bandwidth-induced compute stalls.}
+%When operators are strongly memory-bound, arithmetic units stall waiting for cache misses to
+%be resolved. The processor appears busy from a utilisation-monitoring perspective but is
+%not executing useful arithmetic. This is the hardware manifestation of the memory-wall
+%problem described in Section~\ref{sec:mem_bottleneck}, and profiling tools distinguish it
+%by reporting a high ratio of memory-bound stall cycles to total active cycles.
+%
+%\paragraph{Small and fragmented kernel launches.}
+%Compilers that fail to fuse consecutive lightweight operators emit many short kernels in
+%rapid succession. Each kernel launch incurs a fixed overhead on the order of a few
+%microseconds, and for operations whose compute time is shorter than this overhead - such as
+%channel-wise bias additions, scalar multiplications, or simple element-wise activations -
+%the dispatch cost dominates execution time. Nsight Systems traces of unoptimised models
+%frequently reveal hundreds of sub-microsecond kernels occupying only a fraction of the
+%timeline while GPU utilisation reads low~\cite{nvidia_tensorrt_dev_guide}.
+%
+%\paragraph{Data-type and precision mismatches.}
+%Tensor Core hardware requires inputs to be aligned to specific multiples of the tile
+%dimension (typically multiples of 8 or 16 for INT8/FP16). When layer dimensions do not
+%satisfy this constraint - common in custom attention heads with non-power-of-two hidden
+%sizes - the compiler pads the tensors, and the padded elements consume bandwidth and compute
+%cycles without contributing to the result. Selecting model dimensions that are
+%hardware-aligned is therefore a design-time decision with measurable inference-time
+%consequences~\cite{markidis2018tensorcores}.
 
 \section{Relation to this thesis}
 
@@ -4067,7 +4253,7 @@ shrink proportionally with modest channel reductions. A layer with 10\,\% fewer 
 launches the same kernel, with the same grid geometry and shared-memory footprint, but
 simply leaves a fraction of the warp lanes idle. The actual reduction in execution time
 only manifests when the channel count drops far enough to trigger a different kernel
-configuration — a threshold that the sparsity levels explored here (up to $\sim$90\,\%)
+configuration - a threshold that the sparsity levels explored here (up to $\sim$90\,\%)
 rarely cross cleanly. This is confirmed by the sweep data: speedups cluster at
 $1.00\pm0.02$ across all 418 configurations, regardless of sparsity level.
 
@@ -4093,250 +4279,287 @@ is a more effective lever than structural pruning for this class of model and ha
 It should be noted that all pruning experiments reported here used PyTorch FP32 inference.
 It is possible that TensorRT's layer-fusion and kernel-selection passes could
 extract a modest additional benefit from a reduced channel count, since the engine builder
-operates on the pruned graph directly rather than relying on the runtime to skip channels.
+operates on the pruned graph directly, not relying on the runtime to skip channels.
 However, given the cuDNN kernel-granularity limitation and the already negligible
 speedups observed in PyTorch, a substantial gain from that path is not expected.
 
 
 
 \section{GPU Kernel-Level Performance Analysis}
+\label{sec:gpu_kernel_analysis}
 
-To better understand the performance characteristics of the optimized YOLOv8n inference pipeline, kernel-level
-profiling was performed using NVIDIA Nsight Systems and NVIDIA Nsight Compute on the Jetson Orin Nano platform.
-The profiling compared TensorRT engines executed in FP32 and INT8 precision modes.
+Nsight Systems profiling was performed on the TensorRT FP32 engine for YOLOv8n on the Jetson Orin Nano
+(batch\,=\,1, 640$\times$640 input, raw inference without NMS post-processing).
+Each session used three warm-up passes to allow CUDA JIT compilation to complete before timing,
+followed by five timed runs.
+The kernel execution trace extracted from the profiling session shows that each inference cycle
+comprises 167 TRT inference kernels plus 3 device-to-host copy kernels for the output tensor,
+totalling 170 GPU kernel launches per cycle.
+The first warm-up run completed in 44.4\,ms due to CUDA JIT compilation of all kernel variants on
+first call, an 8.8$\times$ inflation over steady state, illustrating why multiple warm-up passes are
+essential before timing.
+The steady-state GPU execution time, taken as the median NVTX \path{ExecutionContext::enqueue}
+duration across the five timed runs, was 4.84\,ms per inference.
+The Python-level wall-clock median from this session was 17.97\,ms, measured with only 5 timed runs
+and 3 warm-up iterations using \path{tensorrt\_evaluation\_indiv.py}.
+The main benchmark results reported in Table~\ref{tab:orin_backend_benchmark} were produced by
+\path{tensorrt\_evaluation\_dual.py} with 200 timed runs and 30 warm-up iterations per repetition
+across 5 isolated repetitions, which yields a more stable estimate; those figures (11.38\,ms mean)
+should be treated as the authoritative latency reference.
+The nsys session here is used exclusively for kernel-level decomposition, not for
+absolute latency comparison.
 
-The results provide insight into the underlying execution behaviour of the GPU kernels and reveal several key
-performance bottlenecks and optimization opportunities.
+\subsection{Kernel Category Breakdown}
 
-\subsection{Kernel Structure of YOLOv8n Inference}
+GPU kernel execution time was grouped into five functional categories from the Nsight Systems kernel
+summary, covering all 8 profiled runs (3 warm-up\,+\,5 timed).
+Table~\ref{tab:kernel_categories} shows the result.
 
-\noindent Nsight Compute profiling revealed that YOLOv8n inference consists of approximately 35--40 unique GPU kernels
-executed repeatedly during inference. These kernels can be categorized into several functional groups:
-
-\begin{itemize}
-\item Tensor Core convolution kernels
-\item Tensor format conversion kernels
-\item Tensor permutation kernels
-\item Pointwise elementwise kernels
-\item Auxiliary operations such as pooling and softmax
-\end{itemize}
-
-\noindent The dominant compute kernels correspond to Tensor Core convolution implementations generated by TensorRT,
-typically with names such as
-
-\begin{lstlisting}
-sm80_xmma_fprop_implicit_gemm_interleaved_i8i8_i8i32_f32
-\end{lstlisting}
-
-\noindent which represent implicit GEMM implementations of convolution layers optimized for Ampere Tensor Cores.
-
-\noindent INT8 inference uses kernels such as:
-
-\begin{lstlisting}
-trt_ampere_int8x4_icudnn_int8x4
-\end{lstlisting}
-
-\noindent which exploit INT8 Tensor Core instructions.
-
-\subsection{Observed Performance Characteristics}
-
-The benchmark results, summarized from the measurements reported in
-Tables~\ref{tab:orin_backend_benchmark} and~\ref{tab:int8_latency_comparison}, show the following
-end-to-end latency for TensorRT-compiled YOLOv8n on the Jetson Orin Nano:
-
-\begin{center}
-\begin{tabular}{lcc}
-\hline
-Precision & Latency (ms) & FPS \\
-\hline
-TensorRT FP32   & 11.38 & 87.87 \\
-TensorRT INT8   &  5.34 & 187.23 \\
-\hline
+\begin{table}[h]
+\centering
+\caption{GPU kernel time breakdown for TensorRT FP32 YOLOv8n on Orin Nano.
+Percentages are relative to total GPU kernel time summed across all 8 runs.}
+\label{tab:kernel_categories}
+\begin{tabular}{lrr}
+\toprule
+Kernel category & Total (ms, 8 runs) & \% \\
+\midrule
+NHWC convolutions (\texttt{sm80\_xmma\_fprop\ldots{}nhwc})      & 34.5 & 39.5 \\
+Pointwise / activations (\texttt{generatedNativePointwise})      & 17.1 & 19.6 \\
+NCHW-path convolutions (\texttt{sm80\_xmma\_fprop\ldots{}nchw}) & 15.0 & 17.2 \\
+Format conversion (\texttt{copyPackedKernel}, \texttt{nchwToNhwcKernel}, etc.) & 14.2 & 16.3 \\
+Pooling, resize, softmax                                          &  3.5 &  4.0 \\
+Detection head GEMM                                               &  3.0 &  3.4 \\
+\midrule
+Total                                                             & 87.3 & 100  \\
+\bottomrule
 \end{tabular}
-\end{center}
+\end{table}
 
-This corresponds to a speedup of approximately $2.13\times$, when switching from TensorRT FP32 to TensorRT INT8
-implicit calibration.
-The PyTorch FP32 eager baseline reached 25.02\,ms (39.96\,FPS), so the
-TensorRT INT8 engine provides a roughly $4.7\times$ improvement over the
-uncompiled reference, while the TensorRT FP32 engine alone contributes a
-$2.2\times$ uplift over PyTorch.
+\noindent From the table we can see that format conversion kernels, which perform no neural network computation, consume
+16.3\,\% of all GPU kernel time.
+Second, NCHW-path convolutions account for a further 17.2\,\%: these are bottleneck 3$\times$3
+convolutions whose input tensors were described as NCHW at engine-build time, causing cuDNN to perform
+an internal NCHW$\rightarrow$NHWC conversion on every call instead of using the faster native NHWC
+path.
+Together, these two categories represent 33.5\,\% of GPU time spent on reformatting.
 
-Despite this improvement, the profiling results show that GPU hardware utilization is still far from optimal.
+\subsection{C2f Split Copy Overhead}
+\label{sec:split_copy_overhead}
 
-\subsection{Occupancy Limitations}
+A specific and quantifiable source of format-conversion cost is the Split copy node that
+TensorRT inserts at every C2f block.
 
-Many Tensor Core convolution kernels exhibit very low theoretical occupancy, often in the range of $16\% - 33\%$.
+The profiling trace makes the internal tensor format directly observable:
+the \path{copyPackedKernel} calls appearing throughout the trace (see Table~\ref{tab:kernel_trace})
+are TensorRT's kCHW32 pack-unpack kernel - the kernel name itself reflects the
+``packed'' channel layout.
+TensorRT defines \path{TensorFormat::kCHW32} as $[N,\,C/32,\,H,\,W,\,32]$, where channels
+are grouped into contiguous blocks of 32; this layout allows Ampere Tensor Core convolution
+kernels to operate on 32-channel-wide blocks without any intra-kernel
+reformatting~\cite{nvidia_trt_data_formats}.
+The C2f block splits the cv1 output ($C{=}64$ channels) along the channel axis into two halves of 32
+channels each.
+In kCHW32 this is structurally free: the two halves already exist as separate contiguous blocks
+(block~0 = channels 0--31, block~1 = channels 32--63), so no data movement is needed for the split
+itself.
 
-\noindent This behaviour is caused primarily by high register pressure and large shared memory requirements.
-For example, several kernels required more than $240 \text{ registers per thread}$ and over $80\,\mathrm{kB}$ of shared
-memory per block.
+The copy arises after the split, not from it.
+The downstream 3$\times$3 bottleneck convolution (\path{m0.cv1}) was built with NCHW tensor
+descriptors, it expects its input as $[N,\,32,\,H,\,W]$.
+A kCHW32 sub-block $[N,\,1,\,H,\,W,\,32]$ has the channel and spatial axes in a different order
+and cannot be passed directly to an NCHW-expecting kernel without transposition.
+TensorRT therefore inserts a \path{copyPackedKernel} to reformat kCHW32 to NCHW, and this copy
+appears at the Split boundary because that is where the data first enters the path leading to the
+NCHW conv.
+If the bottleneck convolutions used NHWC or kCHW32 descriptors instead, the split output could
+be passed directly to the kernel, eliminating the copy entirely.
 
-High register pressure and large shared memory requirements reduce the number of thread blocks that can be scheduled
-simultaneously on a Streaming Multiprocessor (SM). Since registers and shared memory are limited hardware
-resources, each thread block must reserve the required amount before execution can begin.
+The kernel execution trace makes this pattern directly visible.
+Table~\ref{tab:kernel_trace} shows a representative 15-kernel excerpt from a steady-state inference
+pass covering the C2f model.4 block: two convolution groups are separated by a burst of three
+\path{copyPackedKernel} calls (indices 27-29) at the Split boundary, followed immediately by the
+bottleneck convolutions.
 
-For example, if a kernel requires a large number of registers per thread or a substantial amount of shared memory
-per block, only a small number of blocks can reside on the SM at the same time. This limits the number of active
-warps and therefore reduces the theoretical occupancy of the kernel.
+\begin{table}[h]
+\centering
+\caption{Kernel execution trace excerpt (one inference pass, steady state) showing the
+\texttt{copyPackedKernel} cluster at the model.4 C2f Split boundary.
+Durations are raw GPU timestamps from the Nsight Systems kernel trace.}
+\label{tab:kernel_trace}
+\begin{tabular}{clr}
+\toprule
+\# & Kernel (abbreviated) & Duration ($\mu$s) \\
+\midrule
+25 & \texttt{sm80\_xmma\_fprop\ldots{}nhwc\_128x32x64} (cv1 conv)  & 112.5 \\
+26 & \texttt{generatedNativePointwise} (SiLU)                       &  59.5 \\
+\textbf{27} & \textbf{\texttt{copyPackedKernel}} (Split output 0)    & \textbf{62.0} \\
+\textbf{28} & \textbf{\texttt{copyPackedKernel}} (Split output 1)    & \textbf{60.5} \\
+\textbf{29} & \textbf{\texttt{copyPackedKernel}} (Add output copy)   & \textbf{54.5} \\
+30 & \texttt{sm80\_xmma\_fprop\ldots{}nhwc\_128x64x32} (m.cv1)     & 114.2 \\
+31 & \texttt{generatedNativePointwise} (SiLU)                       &  60.1 \\
+32 & \texttt{sm80\_xmma\_fprop\ldots{}nhwc\_256x128x32} (m.cv2)     &  98.1 \\
+33 & \texttt{generatedNativePointwise} (SiLU+Add)                   &  21.9 \\
+34 & \texttt{sm80\_xmma\_gemm\ldots{}tn\_n} (cv2 1$\times$1)       &  40.8 \\
+35 & \texttt{generatedNativePointwise} (SiLU)                       &  19.4 \\
+36--42 & (5 further conv+activation pairs)                          & 59--69 \\
+43 & \texttt{generatedNativePointwise}                               &  18.4 \\
+\textbf{44} & \textbf{\texttt{copyPackedKernel}} (next block Split)  & \textbf{32.5} \\
+\textbf{45} & \textbf{\texttt{copyPackedKernel}} (next block Split)  & \textbf{33.6} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-Low occupancy can negatively affect GPU performance because GPUs rely on warp-level parallelism to hide memory
-and instruction latency. When one warp stalls due to memory access or pipeline dependencies, the scheduler
-switches execution to another ready warp. However, if only a small number of warps are active due to resource
-constraints, the scheduler has fewer opportunities to hide these latencies. As a result, the compute units remain
-idle for longer periods, leading to reduced hardware utilization.
+\noindent The same burst pattern recurs at every C2f block in the 170-kernel sequence, with copy
+duration scaling with spatial resolution as shown in Table~\ref{tab:split_copies}.
 
-\subsection{Kernel Launch Granularity}
+Table~\ref{tab:split_copies} shows the per-block cost from the TensorRT layer profiler
+(median GPU time across 278 profiling iterations; the engine\% column is taken directly from
+the profiler's own time-fraction accounting).
 
-Another recurring issue observed in the profiling results is the small grid size of many kernels.
-Several kernels were launched with grid sizes smaller than the number of available Streaming Multiprocessors.
+\begin{table}[h]
+\centering
+\caption{C2f Split copy node overhead per backbone and neck block.
+Costs include both \texttt{Split\_output\_0 copy} and \texttt{Split\_output\_1 copy},
+plus the intermediate \texttt{Add\_output copy} for blocks with two bottleneck stages (model.4, 6).}
+\label{tab:split_copies}
+\begin{tabular}{lccc}
+\toprule
+Block & Spatial resolution & Copy cost (ms) & Engine \% \\
+\midrule
+model.2  (backbone) & 160$\times$160 & 0.249 & 2.23 \\
+model.4  (backbone) & 80$\times$80   & 0.148 & 1.32 \\
+model.15 (FPN neck) & 80$\times$80   & 0.087 & 0.78 \\
+model.6  (backbone) & 40$\times$40   & 0.083 & 0.74 \\
+model.12 (FPN neck) & 40$\times$40   & 0.049 & 0.44 \\
+model.8  (backbone) & 20$\times$20   & 0.048 & 0.43 \\
+model.18 (FPN neck) & 40$\times$40   & 0.048 & 0.43 \\
+model.21 (FPN neck) & 20$\times$20   & 0.033 & 0.29 \\
+\midrule
+Total               &                & 0.745 & 6.67 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-For example, kernels with grid sizes of $7 \text{ blocks}$ were observed on a GPU with 8 SMs. That means 12.5\% of the
-GPU is unused for the entire kernel.
-In such cases the GPU cannot fully utilize all available compute resources.
+\noindent The cost scales with spatial resolution: model.2 at 160$\times$160 accounts for 0.249\,ms
+alone - 1.7$\times$ that of model.4 at 80$\times$80, and 7.5$\times$ that of model.21 at
+20$\times$20 - because the number of elements that must be copied grows quadratically with the
+feature-map side length.
+Across the full network, C2f Split copies consume \textbf{6.7\,\% of total engine time}.
 
-This effect is commonly referred to as the tail effect and is particularly visible when performing
-inference with batch size 1.
+\subsection{Root Cause: Mixed Tensor Layout at C2f Boundaries}
 
-\subsection{Memory Layout Transformation Overhead}
+Both the Split copy overhead and the NCHW-path convolution overhead share a single root cause:
+TensorRT selects NHWC-native Tensor Core kernels (\texttt{nhwckrsc\_nhwc}) for most layers, but the
+3$\times$3 bottleneck convolutions inside each C2f block have their cuDNN tensor descriptors built
+with NCHW, causing two cascading penalties:
 
-\noindent A substantial portion of execution time is spent in kernels responsible for tensor layout transformations
-and format conversions. Examples include:
+\begin{enumerate}
+\item \textbf{Graph-level Split copy nodes.}
+The C2f channel split itself is free in kCHW32 (the two halves are already contiguous sub-blocks).
+The copy is inserted because the destination, the bottleneck 3$\times$3 convolution, has
+NCHW descriptors and cannot accept kCHW32 input directly.
+TensorRT inserts a \path{copyPackedKernel} at every split to transpose from kCHW32 to NCHW,
+totalling 6.7\,\% of engine time across the network.
 
-\begin{lstlisting}
-genericReformat::copyVectorizedKernel = layout/type conversion copy
-CUTENSOR_NAMESPACE::permutationKernel = tensor transpose / dimension reorder / permutation
-cuInt8::nc32hw32ToNc32hw32 = INT8 packed-layout repacking inside TensorRT's channel-blocked formats
-\end{lstlisting}
+\item \textbf{cuDNN-internal format conversion inside 3$\times$3 convolutions.}
+When the tensor descriptor specifies NCHW, cuDNN selects the \texttt{nhwckrsc\_nchw} kernel variant,
+which performs an NCHW$\rightarrow$NHWC conversion internally before executing the Tensor Core
+instruction.
+This variant is slower than the purely NHWC path (\texttt{nhwckrsc\_nhwc}) and accounts for 17.2\,\%
+of all GPU kernel time.
+\end{enumerate}
 
-These kernels do not perform useful neural network computation but instead move or reorder tensor data between
-different memory layouts required by TensorRT kernels.
+Both problems can be resolved simultaneously for any given C2f block by replacing it with a custom
+TensorRT plugin that accepts the engine's native kCHW32 input, keeps all intermediate buffers in NHWC
+layout, and returns NHWC output - eliminating the Split copy nodes and switching the 3$\times$3
+convolutions to NHWC descriptors.
+Section~\ref{sec:plugin} describes this approach targeting model.2, which carries the highest
+per-block overhead (0.249\,ms, 2.23\,\% of engine time).
 
-\noindent Several of these kernels exhibit high memory throughput utilization (often above 70\%), indicating that they
-are primarily memory-bandwidth bound operations.
+\subsection{Unfused SiLU Activations}
 
-\begin{lstlisting}
-genericReformat::copyVectorizedKernel
-\end{lstlisting}
+The kernel trace reveals a second class of overhead that is independent of format conversion.
+Every SiLU non-linearity ($\sigma(x)\cdot x$) in the network is dispatched as a separate
+\path{generatedNativePointwise} GPU kernel - 57 launches per inference pass totalling
+2.147\,ms (19.3\,\%) of engine time.
+TensorRT does fuse the Sigmoid and the element-wise multiply into a single pointwise node
+(\path{PWN}), avoiding one kernel launch per activation, but it does not merge the activation
+into the preceding convolution the way it fuses \path{Conv\,+\,ReLU}.
+On Ampere, cuDNN exposes a \path{CUDNN\_ACTIVATION\_SWISH} epilogue that would let the
+convolution kernel apply the non-linearity in-register without writing an intermediate activation
+tensor back to memory, however, here TensorRT did not select this path for these layer shapes
+in FP32 mode.
 
-
-
-\subsection{Pointwise Kernel Fragmentation}
-
-\noindent Another common pattern is the presence of many small pointwise kernels such as:
-
-\begin{lstlisting}
-generatedNativePointwise
-\end{lstlisting}
-
-These kernels implement operations such as activation functions, elementwise additions, or scaling operations.
-
-While each kernel individually executes quickly, the large number of such kernels introduces kernel launch
-overhead and reduces overall GPU efficiency.
-
-\subsection{Overall Performance Bottlenecks}
-
-The profiling results suggest that YOLOv8n inference performance is limited by a combination of factors rather
-than a single dominant bottleneck.
-
-\noindent The most significant contributors are:
-
-\begin{itemize}
-\item Tensor layout conversion overhead
-\item High register pressure in Tensor Core kernels
-\item Small kernel grid sizes due to batch size 1
-\item Fragmentation into many small pointwise kernels
-\item Moderate compute utilization across many kernels
-\end{itemize}
-
-These observations indicate that the GPU is neither purely compute-bound nor purely memory-bound. Instead,
-inference performance is limited by kernel launch granularity and resource-heavy kernel implementations.
-
-\subsection{Future Optimization Opportunities}
-
-Based on the kernel-level profiling analysis presented above, several optimization directions can be
-identified for further improving YOLO inference performance on the Jetson Orin Nano.
-
-\subsubsection{Operator Fusion}
-
-A large number of small pointwise kernels suggests that additional operator fusion could significantly reduce
-kernel launch overhead. Fusing activation, normalization, and elementwise operations into larger kernels can
-reduce both kernel count and memory traffic.
-
-Compiler frameworks such as TVM or TensorRT graph optimizations may enable such transformations.
-
-\subsubsection{Reducing Tensor Layout Conversions}
-
-Memory layout transformation kernels represent a non-negligible portion of total inference time. Reducing the
-number of tensor format conversions can therefore improve performance.
-
-\noindent Possible approaches include:
-
-\begin{itemize}
-\item ensuring consistent tensor layouts across the network
-\item minimizing precision conversions
-\item optimizing tensor format selection during engine compilation
-\end{itemize}
-
-\subsubsection{Batch Size Optimization}
-
-Small kernel grid sizes observed during profiling indicate that batch size 1 inference does not fully utilize
-GPU resources.
-
-Increasing the batch size can improve SM utilization and reduce the tail effect. However, this may not be
-acceptable for latency-sensitive real-time applications.
-
-\subsubsection{Model Architecture Optimization}
-
-\noindent Model architecture also influences GPU efficiency. Potential improvements include:
-
-\begin{itemize}
-\item reducing small tensor operations
-\item increasing arithmetic intensity
-\item restructuring layers to improve GPU utilization
-\end{itemize}
-
-Architectural modifications specifically designed for edge GPUs could further improve throughput.
-
-\subsubsection{Compiler-Level Optimization}
-
-Given the hardware-aware optimization focus of this work, compiler frameworks such as TVM provide an opportunity
-for further performance improvements.
-
-\noindent Potential directions include:
-
-\begin{itemize}
-\item auto-tuned convolution schedules
-\item optimized memory layouts
-\item kernel fusion
-\item reduced kernel launch overhead
-\end{itemize}
-
-Compiler-generated kernels may reduce the register pressure and shared memory usage observed in TensorRT kernels.
+Each activation kernel is purely memory-bandwidth-bound: it reads the full output tensor
+from DRAM, applies the non-linearity element-wise, and writes the result back.
+At 57 launches, unfused SiLU collectively consumes as much time as the entire detection head
+convolutions (21.3\,\%), making it the second-largest category after convolutions.
+Switching to FP16 precision or replacing SiLU with ReLU, which TensorRT always fuses as a
+conv epilogue, would eliminate this overhead.
 
 \subsection{Summary}
 
-The kernel-level profiling results confirm that TensorRT compilation combined with INT8 quantization
-provides substantial inference improvements for YOLOv8n on the Jetson Orin Nano.
-TensorRT FP32 reduces mean latency from 25.02\,ms (PyTorch baseline) to 11.38\,ms ($2.2\times$ speedup),
-while TensorRT INT8 implicit calibration achieves 5.34\,ms and 187.23\,FPS ($4.7\times$ over the
-PyTorch baseline, $2.13\times$ over TensorRT FP32).
-FP16 inference, evaluated separately, reached 6.31\,ms, positioning INT8 as the fastest measured path
-despite a roughly 10\% reduction in mAP50 relative to FP32.
+Table~\ref{tab:overhead_summary} shows where GPU time is spent across a single FP32 inference
+pass, using the TensorRT layer profiler (278 profiling iterations; engine total 11.154\,ms).
 
-However, substantial optimization potential remains.
-The profiling shows that even the fastest path is affected by tensor layout conversion overhead,
-small kernel grid sizes at batch size 1, and high register pressure in Tensor Core kernels.
-Future work should focus on reducing format-reformat overhead through consistent layout selection
-during engine compilation, improving operator fusion to consolidate small pointwise kernels, and
-exploring compiler-driven scheduling (e.g.\ TVM auto-tuning) to lower register pressure and better
-exploit the eight Streaming Multiprocessors of the Orin Nano GPU.
+\begin{table}[h]
+\centering
+\caption{Full GPU time breakdown for TensorRT FP32 YOLOv8n inference on Orin Nano, batch\,=\,1.
+Sources marked $\dagger$ are structural; sources marked $\star$ are directly targeted by the
+plugin described in Section~\ref{sec:plugin}.}
+\label{tab:overhead_summary}
+\begin{tabular}{lrr}
+\toprule
+Category & Time (ms) & Engine (\%) \\
+\midrule
+Backbone/neck convolutions$^\star$       & 4.229 & 37.9 \\
+\quad\small{(of which NCHW-path variants, internal cuDNN reformat)} & \small{(1.920)} & \small{(17.2)} \\
+Detection head convolutions (cv2, cv3, DFL)  & 2.378 & 21.3 \\
+SiLU activations (unfused \texttt{PWN})  & 2.147 & 19.3 \\
+\midrule
+Format copies \& reformats (total)         & 1.683 & 15.1 \\
+\quad C2f Split copy nodes (8 blocks)$^\star$            & \quad 0.744 & \quad 6.7 \\
+\quad Input NCHW$\rightarrow$kCHW32 reformat$^\dagger$   & \quad 0.269 & \quad 2.4 \\
+\quad Resize output copies (FPN)$^\dagger$               & \quad 0.177 & \quad 1.6 \\
+\quad MaxPool / other copies                             & \quad 0.493 & \quad 4.4 \\
+\midrule
+Resize / upsample ops (FPN)              & 0.193 &  1.7 \\
+Detection head ops (PWN, arithmetic)     & 0.281 &  2.5 \\
+MaxPool ops (SPPF)                       & 0.132 &  1.2 \\
+Softmax (DFL)                            & 0.110 &  1.0 \\
+\midrule
+\textbf{Total}                           & \textbf{11.154} & \textbf{100.0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent Convolutions (backbone, neck, and detection head) account for \textbf{59.2\,\%} of
+engine time and represent useful computation.
+The backbone/neck row includes the 17.2\,\% from NCHW-path variants (convolutions whose cuDNN
+descriptors specify NCHW, causing an internal format conversion on every call); together with the
+C2f Split copies (6.7\,\%), these are the overhead sources directly addressed by plugin
+replacement.
+The remaining 40.8\,\% is overhead: unfused SiLU activations (19.3\,\%), format copies and
+reformats (15.1\,\%), and other non-compute operations (6.4\,\%).
+Of the remaining overhead, unfused SiLU (19.3\,\%) is the largest single target not addressed
+by the plugin; eliminating it would require FP16 precision or a change of activation function.
 
 
 \section{Design and Implementation of a TensorRT Plugin for the C2f Block}
+\label{sec:plugin}
 
-\textcolor{red}{The implementation is complete; results are undergoing final validation
-    and will be reported here.}
+The kernel-level analysis in Section~\ref{sec:gpu_kernel_analysis} identified two overlapping
+sources of avoidable overhead at every C2f block: Split copy nodes (6.7\,\% of engine time)
+and NCHW-path bottleneck convolutions that trigger an internal format conversion on each call
+(17.2\,\%).
+This section investigates whether a custom TensorRT plugin can eliminate this overhead
+by replacing the entire C2f subgraph with a single opaque node.
+
+Model.2 was selected as the target because it carries the largest per-block Split copy cost
+(0.249\,ms) due to its 160$\times$160 spatial resolution.
+The plugin was implemented using the \path{IPluginV2DynamicExt} API;
+the build workflow is illustrated in Figure~\ref{fig:plugin}.
 
     \begin{figure}[h]
         \centering
@@ -4345,27 +4568,253 @@ exploit the eight Streaming Multiprocessors of the Orin Nano GPU.
         exported from PyTorch to ONNX, a selected C2f subgraph is replaced by a custom plugin node, and TensorRT
         builds a target-specific engine by parsing the modified graph, validating supported operators and
         registered plugins, applying graph optimizations, selecting tactics, planning memory, and serializing
-        the final engine}
+        the final engine.}
         \label{fig:plugin}
     \end{figure}
 
+\subsection{Plugin Architecture and Weight Management}
+
+The plugin replicates the YOLOv8n model.2 C2f forward pass, illustrated in
+Figure~\ref{fig:plugin_model2}:
+\texttt{cv1} ($1{\times}1$, $32 \to 2C_\text{half}{=}32$),
+channel split into $x_1$ and $x_2$ ($C_\text{half}{=}16$ channels each),
+one bottleneck stage with
+\texttt{m.0.cv1} ($3{\times}3$, $16{\to}16$) and
+\texttt{m.0.cv2} ($3{\times}3$, $16{\to}16$) with a residual shortcut,
+concatenation of $[x_1 \mid x_2 \mid \texttt{m.0.out}]$ into $3C_\text{half}{=}48$ channels,
+and \texttt{cv2} ($1{\times}1$, $48{\to}32$).
+All convolutions use folded batch-normalisation weights: bias vectors absorb the BN
+parameters offline so that inference requires only a convolution followed by a bias add.
+
+    \begin{figure}[h]
+        \centering
+        \includegraphics[width=1.0\linewidth]{pics/c2f_model2.pdf}
+        \caption{Architecture of the C2f (Cross Stage Partial with two convolutions) block, model.2 layer
+            used in YOLOv8,
+            shown for $n{=}1$ bottleneck stage.
+            \textbf{Left:} the outer block applies a $1{\times}1$ projection (\texttt{cv1}) to produce
+            $c_\text{out}$ channels, splits the result into $x_1$ and $x_2$ (each $0.5\,c_\text{out}$
+            channels), routes $x_2$ through one bottleneck, and concatenates
+            $[x_1,\,x_2,\,m.0(x_2)]$ into $1.5\,c_\text{out}$ channels before the final
+            $1{\times}1$ projection (\texttt{cv2}).
+            \textbf{Right:} the bottleneck (\texttt{m.0}) consists of two convolutions with an optional
+            residual shortcut that adds the block input to its output when the channel count is preserved.}
+        \label{fig:plugin_model2}
+    \end{figure}
+
+Weights are exported from the trained PyTorch model in a custom binary format and loaded
+once during \path{initialize()} into device memory; \path{terminate()} frees them.
+
+\subsection{Fused Shared-Memory Kernel}
+
+The plugin executes all four convolutions, bias additions, and SiLU activations in a single
+CUDA kernel (\path{fused\_c2f\_model2\_kernel}), keeping all intermediate feature maps in
+shared memory without writing them to global memory.
+An $8{\times}8$-pixel output tile is assigned to each thread block, and the four convolution
+stages execute sequentially from shared memory with the residual shortcut applied in registers.
+Table~\ref{tab:plugin_vs_default} shows the per-component breakdown.
+
+\begin{table}[h]
+\centering
+\caption{Model.2 C2f execution cost: default TensorRT engine versus plugin engine.
+Times are median values from the TensorRT layer profiler.}
+\label{tab:plugin_vs_default}
+\begin{tabular}{lrr}
+\toprule
+Component & Default engine & Plugin engine \\
+\midrule
+4 convolutions          & 0.581\,ms (TF32 Tensor Cores)  & 4.889\,ms (FP32 CUDA cores) \\
+SiLU activations        & 0.380\,ms (4 PWN kernels)      & fused into kernel           \\
+Split / slice copies    & 0.248\,ms                      & eliminated                  \\
+Boundary reformat nodes & ---                            & 0.249\,ms                   \\
+\midrule
+\textbf{model.2 total}  & \textbf{1.209\,ms}             & \textbf{5.138\,ms}          \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent The plugin successfully eliminates the Split copy nodes and all intermediate
+global-memory writes.
+However, the convolution cost increases from 0.581\,ms to 4.889\,ms ($8.4{\times}$).
+The default engine dispatches \path{sm80\_xmma\_fprop} kernels (observed in the Nsight
+Systems kernel trace), whose names encode \texttt{tf32f32} accumulation, confirming
+TF32 Tensor Core execution on Orin Ampere; the plugin kernel uses scalar FP32 arithmetic
+and cannot utilise the Tensor Core units.
+The savings from eliminating copies (0.248\,ms) and fusing SiLU (0.380\,ms) are
+outweighed by this compute regression, yielding a net increase of 3.929\,ms for model.2
+that propagates directly to the 4.00\,ms end-to-end gap.
+
+\subsection{Summary}
+
+The experiment confirms that the identified overhead sources — Split copies and unfused
+activations — can be structurally removed by a plugin.
+The performance gap is entirely attributable to the absence of Tensor Core utilisation
+in the custom kernel: TensorRT's advantage lies not only in graph-level fusion but in
+access to hardware-specific Tensor Core kernels that general-purpose FP32 CUDA code
+cannot match. It might be possible to  close this gap is CUTLASS-based fused convolutions,
+which provide  Tensor Core execution with arbitrary activations. However, the development of such
+convolutions is not trivial and still requires a lot of manual testing and debugging.
+
 \section{Evaluation of Activation Function Simplification: SiLU vs.\ ReLU}
+\label{sec:silu_relu}
 
-\textcolor{red}{The implementation is complete; results are undergoing final validation
-    and will be reported here.}
+The kernel-level analysis in Section~\ref{sec:gpu_kernel_analysis} identified unfused SiLU
+activations as the second-largest source of overhead in the default TensorRT engine,
+consuming 19.3\,\% of total engine time.
+This section investigates whether substituting SiLU with ReLU eliminates this overhead
+and quantifies the resulting latency reduction, along with the accuracy implications of
+the change.
 
+\subsection{Why SiLU Cannot Be Fused by TensorRT}
+
+YOLOv8n uses SiLU (Sigmoid Linear Unit)~\cite{ramachandran2017swish} as its activation function
+throughout, defined as $\text{SiLU}(x) = x \cdot \sigma(x)$, where
+$\sigma(x) = (1 + e^{-x})^{-1}$ is the logistic sigmoid.
+This is a composite expression: unlike ReLU ($\max(0, x)$), SiLU requires two distinct
+element-wise operations, a sigmoid and a multiplication, that cannot be expressed as a single
+algebraic operation to a convolution.
+
+TensorRT's cuDNN-based convolution kernels support a limited set of fused activation
+epilogues: ReLU, clipped ReLU, sigmoid, tanh, and their composites where the intermediate
+result is not reused.
+SiLU requires the input $x$ to be available both as the argument to sigmoid and as the
+multiplicand, which means the activation cannot be fused into the convolution's output stage.
+TensorRT therefore emits the activation as two separate pointwise kernels:
+\path{PWN(Sigmoid)} followed by \path{PWN(Mul)}, sometimes merged by the graph optimiser into
+a single \path{PWN(PWN(Sigmoid), PWN(Mul))} node, but always requiring a global-memory
+round-trip between the convolution and the activation.
+
+ReLU, by contrast, is a supported cuDNN convolution epilogue.
+TensorRT fuses it directly into the convolution kernel, so the activation is applied
+in registers as the output tile is being written to global memory, no second kernel
+launch and no DRAM re-read of the output tensor.
+
+\subsection{Activation Substitution Methodology}
+
+To isolate the structural cost of unfused SiLU from accuracy effects, the experiment
+replaces all 57 SiLU instances in the pre-trained YOLOv8n model with ReLU via direct
+weight substitution in PyTorch without any subsequent fine-tuning or retraining.
+The substitution traverses the module tree and replaces every \path{nn.SiLU} with
+\path{nn.ReLU(inplace=True)}, preserving all convolutional, batch-normalisation (already
+folded), and structural weights unchanged.
+
+The resulting model is exported to ONNX (opset 17, \path{simplify=True}) and compiled
+into a TensorRT FP32 engine using the same build flags as the default engine.
+This procedure yields an engine that is structurally identical to the SiLU baseline
+in all respects except the activation function.
+Profiling is performed with the same Nsight Systems setup and inference harness as the
+default engine, making the two profiles directly comparable.
+
+\subsection{TensorRT Graph-Level Impact}
+
+Figure~\ref{fig:silu_relu} illustrates the per-layer profiling difference between the two
+engines using \path{model.2/cv1} as a representative example.
+In the SiLU engine, TRT reports two separate profiling entries for this layer:
+the convolution (\path{Conv}, 0.126\,ms) and the activation
+(\path{PWN(PWN(Sigmoid), PWN(Mul))}, 0.112\,ms),
+for a combined cost of \textbf{0.238\,ms}.
+In the ReLU engine, TRT reports a single fused entry
+(\path{Conv + Relu}, 0.124\,ms), a reduction of \textbf{$\approx$1.9$\times$}.
+The convolution time itself is almost identical in both cases; the difference comes
+entirely from the additional activation kernel in the SiLU path.
 
     \begin{figure}[h]
         \centering
         \includegraphics[width=1.0\linewidth]{pics/TensorRT_SiLU_ReLU.pdf}
-        \caption{Comparison of TensorRT per-layer profiling for convolution followed by SiLU and ReLU. In the ReLU
-        case, TensorRT reports a fused Conv + Relu region, whereas in the SiLU case the activation appears
-        as additional pointwise Sigmoid and Mul operations. For the profiled example, the convolution
-        time remains similar, but the extra SiLU activation work increases the total layer cost to approximately
-        1.9$\times$ that of the fused ReLU case.}
+        \caption{TensorRT per-layer profiling for model.2/cv1: SiLU (top) versus ReLU (bottom).
+        In the ReLU case TensorRT reports a single fused Conv + Relu entry (0.124\,ms),
+        whereas the SiLU case produces a separate PWN activation node (0.112\,ms) on top of
+        the convolution (0.126\,ms), increasing the combined layer cost by approximately
+        $1.9\times$.}
         \label{fig:silu_relu}
     \end{figure}
 
+\noindent Across the full network, the SiLU engine has 59 standalone activation nodes
+(after TRT's own pointwise fusion), with a total median GPU time of 2.28, ms.
+None of these nodes appear in the ReLU engine: all 61 convolutional layers in the ReLU
+engine appear as fused Conv + Relu entries.
+Table~\ref{tab:silu_relu} shows the overall comparison from the TensorRT layer profiler.
+
+\begin{table}[h]
+\centering
+\caption{Comparison between the SiLU and ReLU TensorRT engines (FP32, Orin Nano,
+batch\,=\,1). Layer profiler values are sums of per-layer median GPU times.
+End-to-end latency and FPS are from \texttt{bench\_rigorous.py}
+(5 repetitions $\times$ 200 runs, 30 warm-up runs;
+GPU clocks locked during this measurement).}
+\label{tab:silu_relu}
+\begin{tabular}{lrr}
+\toprule
+Metric & SiLU engine & ReLU engine \\
+\midrule
+Convolution layers (sum)          & 6.27\,ms           & 6.25\,ms          \\
+Activation nodes (sum)            & 2.28\,ms           & 0\,ms (fused)     \\
+Copy / reformat / other (sum)     & 2.59\,ms           & 2.95\,ms          \\
+\midrule
+\textbf{Layer profiler total}     & \textbf{11.14\,ms} & \textbf{9.20\,ms} \\
+\midrule
+End-to-end mean latency           & 11.45\,ms          & 9.37\,ms          \\
+End-to-end std                    & $\pm$0.01\,ms      & $\pm$0.02\,ms     \\
+Throughput                        & 87.3\,FPS          & 106.7\,FPS        \\
+\textbf{Speedup}                  & \multicolumn{2}{c}{$\mathbf{1.22\times}$} \\
+\midrule
+Average power                     & 28\,128\,mW        & 26\,369\,mW       \\
+Power reduction                   & \multicolumn{2}{c}{$-6.2\,\%$}           \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent The 2.28\,ms reduction in activation time from the layer profiler
+(11.14\,$\to$\,9.20\,ms, $-17.4\,\%$) is slightly lower than the 19.3\,\%
+share cited in Section~\ref{sec:gpu_kernel_analysis}, because the TRT graph optimiser
+fuses a small fraction of SiLU nodes with preceding or following operations
+(e.g.\ \path{PWN(SiLU + Add)} in residual shortcuts), reducing their standalone cost.
+The end-to-end benchmark confirms the structural improvement: mean latency drops from
+11.45\,ms to 9.37\,ms ($-18.2\,\%$), with throughput increasing from 87.3 to
+106.7\,FPS ($+22.2\,\%$).
+Both engines were benchmarked under identical thermal and clock conditions.
+
+\subsection{Accuracy–Latency Trade-off}
+
+The direct weight-substitution approach used here does not involve retraining and
+therefore does not recover the accuracy the original SiLU activations provided.
+The SiLU function was introduced in YOLOv8 specifically because it provides a smoother
+gradient landscape than ReLU~\cite{ultralytics_silu}. ReLU outputs zero for all negative
+inputs, which is computationally efficient but can cause neurons to produce zero gradients
+permanently once their pre-activation falls below zero.
+SiLU avoids this by preserving a small, smooth gradient for negative values through its
+$\sigma(x)$ factor, which in practice leads to improved convergence in deep architectures.
+A direct weight swap yields a network whose filters were optimised under SiLU gradients
+but must execute with a different activation shape, degrading detection accuracy.
+
+Validation of the weight-substituted ReLU model on the COCO validation set was not
+performed.
+The experiment is therefore restricted to a structural latency measurement.
+Deploying a ReLU-based YOLOv8n would require either fine-tuning the substituted weights
+or retraining from scratch with ReLU as the default activation.
+Prior work on alternative activation functions in YOLO architectures suggests that
+fine-tuning for 10–30 epochs can largely recover the accuracy gap, but a full retraining
+from scratch is required to match the original mAP50 within 0.3--0.5\,\%.
+
+\subsection{Summary}
+
+Replacing SiLU with ReLU removes 59 standalone activation kernel launches, reduces the
+layer profiler total by 17.4\,\% (11.14\,$\to$\,9.20\,ms), and delivers a
+$1.22\times$ end-to-end speedup (11.45\,$\to$\,9.37\,ms, 87.3\,$\to$\,106.7\,FPS)
+with a 6.2\,\% reduction in average power draw.
+The savings are consistent with the 19.3\,\% overhead estimate from the kernel analysis:
+SiLU is the single largest latency target in the FP32 engine that can be addressed
+without custom CUDA kernels, requiring only a model-level change.
+
+The trade-off is that this change comes at the cost of the activation function that
+the model was trained with, and recovering the original accuracy requires additional
+training effort.
+For latency-critical deployments where a 1--2\,\% mAP reduction is acceptable, the
+ReLU swap delivers a meaningful speedup with no hardware-specific engineering.
+For deployments requiring the full accuracy of the pre-trained model, the alternative
+is FP16 quantisation, which eliminates the SiLU overhead through a different mechanism
+(halving the data volume processed by all kernels including activations)
+and represents a natural next step for precision-aware optimisation.
 
 % Tables, figures; explain what the numbers mean.
 
@@ -4607,19 +5056,6 @@ Full Model (THOP)                    & 26.02 & 157.765 & 170.22 & Mixed / Overhe
 
 \end{longtable}
 \endgroup
-
-\chapter{Demonstration (Appendix B)}
-
-    YOLOv8n summary: 129 layers, 3,157,200 parameters, 0 gradients, 8.9 GFLOPs.
-
-
-    \begin{figure}[h]
-        \centering
-        \includegraphics[width=0.8\linewidth]{pics/YOLOv8_structure.pdf}
-        \caption{YOLOv8 structure \cite{yolov8_architecture_rangeking}}
-        \label{fig:yolo_architecture}
-    \end{figure}
-
-
+    
 
 \end{document}
