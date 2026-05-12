@@ -156,7 +156,7 @@
     \thispagestyle{empty}
 
     \noindent
-    \begin{tabular}{@{}p{8cm}p{10cm}@{}}
+    \begin{tabular}{@{}p{7cm}p{10cm}@{}}
         \begin{minipage}[t]{\linewidth}
             \vspace{0pt}
             \textbf{NTNU}\\
@@ -180,26 +180,38 @@
         {\LARGE \textbf{Master’s Thesis}\par}
     \end{center}
 
+    % ---- Top fields: two-column layout ----
     \noindent
     \begin{tabular}{@{}p{4.8cm}p{13.2cm}@{}}
         \textbf{Candidate:}              & \textbf{\AuthorName} \\[0.1cm]
         \textbf{Course:}                 & \textbf{\CourseCode} \\[0.2cm]
         \textbf{Title (English):}        & \textbf{\ThesisTitleEng} \\[0.1cm]
-        \textbf{Title (Norwegian):}      & \textbf{\ThesisTitleNor} \\[0.4cm]
-        \textbf{Thesis description:}     & \ThesisDescription \\[0.5cm]
-        \textbf{The tasks will be:}      & \\[-0.2cm]
-        \multicolumn{2}{@{}l@{}}{%
-          \hspace{4.8cm}%
-          \begin{minipage}{13.2cm}
-            \begin{enumerate}[leftmargin=*, topsep=0pt, itemsep=2pt]
-              \item \TaskLit
-              \item \TaskOne
-              \item \TaskTwo
-              \item \TaskThree
-            \end{enumerate}
-          \end{minipage}%
-        } \\
-        \noalign{\vspace{0.8cm}}
+        \textbf{Title (Norwegian):}      & \textbf{\ThesisTitleNor} \\
+    \end{tabular}
+
+    \vspace{0.4cm}
+
+    % ---- Thesis description: full width ----
+    \noindent\textbf{Thesis description:}\\[0.2cm]
+    \noindent\ThesisDescription
+
+    \vspace{0.4cm}
+
+    % ---- Tasks: full width ----
+    \noindent\textbf{The tasks will be:}
+    \vspace{-0.2cm}
+    \begin{enumerate}[leftmargin=*, topsep=0pt, partopsep=0pt, parsep=0pt, itemsep=3pt]
+        \item \TaskLit
+        \item \TaskOne
+        \item \TaskTwo
+        \item \TaskThree
+    \end{enumerate}
+
+    \vspace{0.6cm}
+
+    % ---- Bottom fields: two-column layout ----
+    \noindent
+    \begin{tabular}{@{}p{4.8cm}p{13.2cm}@{}}
         \textbf{Start date:}             & \StartDate \\[0.1cm]
         \textbf{Due date:}               & \DueDate \\[0.1cm]
         \textbf{Thesis performed at:}    & \ThesisLocation \\[0.1cm]
@@ -226,12 +238,18 @@ MetaSchedule autotuning, ONNX Runtime, Google LiteRT (Tensorflow Lite), and torc
 (FP16 and INT8),
 structured channel pruning with retraining, and activation function substitution. The experimental design includes
 isolated subprocess-based repetitions, warm-up runs, confidence intervals, and power measurements for each benchmark,
-enabling direct comparison across frameworks and hardware targets. Roofline analysis is used to classify per-layer
-execution  regimes, and GPU kernel-level profiling with Nsight Systems and Nsight Compute is used to identify concrete
-hardware bottlenecks. These profiling findings directly motivated the development of a custom TensorRT plugin replacing
-the C2f block - a targeted engineering attempt to eliminate the layout conversion and split overhead that standard
-TensorRT export cannot fully resolve, and to demonstrate that knowledge of model internals can expose optimization
-space beyond what automated compilation alone achieves.
+enabling direct comparison across frameworks and hardware targets. Roofline analysis classifies per-layer execution regimes, and GPU kernel-level profiling with Nsight Systems
+decomposes the TensorRT FP32 engine into concrete overhead categories.
+Profiling reveals that only 59\,\% of engine time is spent on useful convolution work.
+The remaining 41\,\% has three identifiable sources: unfused SiLU activations (19\,\%), explicit memory copy nodes
+at the C2f channel-split boundaries (6.7\,\%), and internal NCHW$\to$kCHW32 format reformats within the C2f
+subgraph (17\,\% of backbone convolution time).
+The copy and reformat overhead arises because TensorRT's \path{Split} operator fixes the layout to NCHW,
+while the surrounding convolutions prefer the NHWC-vectorised kCHW32 format.
+These findings motivated a custom TensorRT plugin that replaces the entire C2f subgraph with a single opaque node,
+eliminating the format boundary that standard export cannot resolve.
+However, the structural overhead savings were offset by the loss of TensorRT's Tensor Core kernels inside the plugin,
+and end-to-end latency did not improve over the default engine.
 
 The results reveal several non-obvious findings. On the Raspberry Pi 5, LiteRT INT8 achieves 31\,ms inference,
 a $9.4\times$ reduction compared to the 290\,ms PyTorch eager baseline, establishing that correct deployment choices
@@ -244,7 +262,8 @@ finding with direct implications for architecture design on resource-constrained
 function affects not only accuracy but also the quality of kernel fusion. Structured channel pruning proved
 ineffective as a standalone strategy: a systematic sweep of 298 per-layer configurations found no single pruned model
 exceeding a $1.04\times$ speedup, while the best multi-layer result with fine-tuning achieved only a 2.3\,\%
-latency reduction at the cost of a 4.0\,\% drop in mAP50-95, confirming that channel removal does not translate to runtime gains when cuDNN's kernel
+latency reduction at the cost of a 4.0\,\% drop in mAP50-95, confirming that channel removal does not translate to
+runtime gains when cuDNN's kernel
 tiling granularity is coarser than the applied reductions, and deeper architectural changes
 are required for meaningful compression.
 
@@ -255,16 +274,61 @@ hardware.
 \textcolor{red}{Disclaimer: This thesis is shared as a draft for review and is still under development. Several
 sections are not yet finalized. In particular, parts of the introduction remain incomplete, including the final
 formulation of the contributions and thesis structure. The literature review chapter is still being revised and
-expanded. The Norwegian summary has not yet been completed. Parts of the results chapter, including the sections on
-the TensorRT C2f plugin and the SiLU-to-ReLU substitution, are pending final validation and write-up, while some
-existing subsections still require restructuring and refinement. The discussion, conclusion, and future work chapters
-are also not yet finalized. In addition, some figures, tables, references, appendices, and formatting elements may still
+expanded. The Norwegian summary has not yet been completed. Parts of the results chapter still require restructuring
+and refinement. In addition, some figures, tables, references, appendices, and formatting elements may still
 contain placeholders, inconsistencies, or rendering artifacts. Final revision of the text, structure, and presentation
-will be completed during the concluding phase of the thesis work in consultation with the supervisor.}
+will be completed during the concluding phase of the thesis work.}
 
 \begin{otherlanguage}{norwegian}
 \chapter*{Sammendrag}
 \addcontentsline{toc}{chapter}{Sammendrag}
+
+Effektiv utrulling av dyplæringsmodeller på kantmaskinvare er ikke utelukkende et spørsmål om modellstørrelse.
+Inferensytelse bestemmes av samspillet mellom modellarkitektur, numerisk presisjon og i hvilken grad
+inferensrammeverket kan utnytte målmaskinvaren.
+Denne avhandlingen presenterer en systematisk, målebasert studie av kompilatorbevisst optimalisering for kant-AI,
+med YOLOv8n objektdeteksjon på to representative kantplattformer --- NVIDIA Jetson Orin Nano og Raspberry Pi~5 ---
+som konkret kasusstudie.
+
+Et bredt spekter av optimaliseringsstrategier evalueres gjennom fem inferensrammeverk
+(TensorRT, Apache TVM med MetaSchedule-autotuning, ONNX Runtime, Google LiteRT og \texttt{torch.compile}),
+to presisjonsnivåer (FP16 og INT8), strukturell kanalbeskjæring med ettertrening,
+og substitusjon av aktiveringsfunksjon.
+Det eksperimentelle opplegget inkluderer isolerte kjøringer i egne delprosesser, oppvarmingskjøringer,
+konfidensintervaller og strømmålinger for hvert benkemål,
+noe som muliggjør direkte sammenligning på tvers av rammeverk og maskinvareplattformer.
+Roofline-analyse brukes til å klassifisere kjøreregimer per lag, og GPU-kjerneprofil\-ering med Nsight Systems
+brukes til å dekomponere TensorRT FP32-motoren i konkrete overheadkategorier.
+Profileringen viser at kun 59\,\% av motortiden brukes på nyttige konvolusjonsberegninger.
+De resterende 41\,\% fordeler seg på tre identifiserbare kilder: usammenslåtte SiLU-aktiveringer (19\,\%),
+eksplisitte minnekopieringsnoder ved C2f-kanalsplitgrensene (6{,}7\,\%), og interne NCHW$\to$kCHW32-formatkonverteringer
+i C2f-undergrafen (17\,\% av ryggradets konvolusjonstid).
+Disse funnene motiverte utviklingen av en tilpasset TensorRT-plugin som erstatter hele C2f-undergrafen med én enkelt
+ugjennomsiktig node og eliminerer formatgrensen som standard eksport ikke kan løse automatisk.
+Pluginen fjernet den strukturelle overheaden, men gevinsten ble motsvart av tapet av TensorRTs Tensor Core-kjerner,
+slik at den totale inferenstiden ikke ble forbedret sammenlignet med standardmotoren.
+
+Resultatene avdekker flere ikke-åpenbare funn.
+På Raspberry Pi~5 oppnår LiteRT INT8 31\,ms inferenstid, en $9{,}4\times$ reduksjon sammenlignet med
+290\,ms for PyTorch eager-basislinjen, noe som viser at riktige utrullingsvalg betyr langt mer enn
+arkitektoniske endringer for denne klassen maskinvare.
+TVM MetaSchedule var det eneste rammeverket som oppnådde ekte FP16-akselerasjon på ARM-CPU og
+reduserte ventetiden til 122\,ms, mens alle andre rammeverk enten ble tregere eller feilet
+på grunn av manglende halvpresisjonskjerner.
+På Orin Nano oppnådde TVM i FP16 12{,}5\,ms gjennom WMMA-tensorisering, noe som er 26\,\% raskere
+enn ONNX Runtime og nærmer seg TensorRT (6{,}3\,ms).
+Profileringen avslørte videre at SiLU-aktiveringer ikke sammenslås med konvolusjoner av TensorRT, i motsetning
+til ReLU, et funn med direkte implikasjoner for arkitekturvalg på ressursbegrensede plattformer.
+Strukturell kanalbeskjæring viste seg å være ineffektivt som frittstående strategi: et systematisk søk
+gjennom 298 lagkonfigurasjoner fant ingen enkeltbeskåret modell med mer enn $1{,}04\times$ hastighetsøkning,
+og det beste flerl\-ags\-resultatet med ettertrening ga kun 2{,}3\,\% redusert ventetid til en kostnad
+av 4{,}0\,\% lavere mAP50-95.
+Dette bekrefter at kanalreduksjoner ikke gir proporsjonal tidsgevinst når cuDNNs kjernekornstørrelse
+er grovere enn de anvendte reduksjonene.
+
+Samlet sett viser resultatene at valg av inferensrammeverk, presisjonsstrategi og maskinvaretilpasning
+på lavt nivå --- ikke modellstørrelsen alene --- er de dominerende faktorene for inferenseffektivitet
+på kantmaskinvare.
 
 \end{otherlanguage}
 
@@ -279,6 +343,95 @@ will be completed during the concluding phase of the thesis work in consultation
 \chapter*{Abbreviations}
 \addcontentsline{toc}{chapter}{Abbreviations}
 \begin{longtable}{@{}p{3cm}p{10cm}@{}}
+\toprule
+\textbf{Abbreviation} & \textbf{Description} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+
+AArch64      & ARM 64-bit instruction set architecture \\[2pt]
+AI           & Artificial Intelligence \\[2pt]
+AOT          & Ahead-of-Time compilation \\[2pt]
+AP           & Average Precision \\[2pt]
+API          & Application Programming Interface \\[2pt]
+ARM          & Advanced RISC Machine; a family of processor architectures \\[2pt]
+AWQ          & Activation-aware Weight Quantization \\[2pt]
+BN           & Batch Normalization \\[2pt]
+C2f          & Cross-stage Partial with 2 convolutions and feature fusion (YOLOv8 block) \\[2pt]
+CNN          & Convolutional Neural Network \\[2pt]
+COCO         & Common Objects in Context (benchmark dataset) \\[2pt]
+CPU          & Central Processing Unit \\[2pt]
+CSP          & Cross-Stage Partial network design \\[2pt]
+CUDA         & Compute Unified Device Architecture (NVIDIA parallel computing platform) \\[2pt]
+cuDNN        & CUDA Deep Neural Network library \\[2pt]
+CUTLASS      & CUDA Templates for Linear Algebra Subroutines and Solvers \\[2pt]
+DAG          & Directed Acyclic Graph \\[2pt]
+DETR         & Detection Transformer \\[2pt]
+DFL          & Distribution Focal Loss \\[2pt]
+DLA          & Deep Learning Accelerator \\[2pt]
+DRAM         & Dynamic Random-Access Memory \\[2pt]
+DVFS         & Dynamic Voltage and Frequency Scaling \\[2pt]
+FC           & Fully Connected (layer) \\[2pt]
+FLOP         & Floating-Point Operation \\[2pt]
+FP8          & 8-bit floating-point numerical format \\[2pt]
+FP16         & 16-bit (half-precision) floating-point numerical format \\[2pt]
+FP32         & 32-bit (single-precision) floating-point numerical format \\[2pt]
+FPGA         & Field-Programmable Gate Array \\[2pt]
+FPN          & Feature Pyramid Network \\[2pt]
+FPS          & Frames Per Second \\[2pt]
+GEMM         & General Matrix Multiplication \\[2pt]
+GELU         & Gaussian Error Linear Unit (activation function) \\[2pt]
+GFLOP        & Gigaflop; $10^{9}$ floating-point operations \\[2pt]
+GFLOPS       & Gigaflops per second; arithmetic throughput \\[2pt]
+GPU          & Graphics Processing Unit \\[2pt]
+HLO          & High-Level Optimizer (XLA intermediate representation) \\[2pt]
+IGEMM        & Integer General Matrix Multiplication \\[2pt]
+INT8         & 8-bit integer numerical format \\[2pt]
+IoU          & Intersection over Union \\[2pt]
+IPC          & Instructions Per Cycle \\[2pt]
+IR           & Intermediate Representation \\[2pt]
+JIT          & Just-In-Time compilation \\[2pt]
+KL           & Kullback–Leibler divergence \\[2pt]
+LiteRT       & Google Lite Runtime (formerly TensorFlow Lite) \\[2pt]
+LLC          & Last-Level Cache \\[2pt]
+LLVM         & Low-Level Virtual Machine (compiler infrastructure) \\[2pt]
+LSQ          & Learned Step-size Quantization \\[2pt]
+mAP          & Mean Average Precision \\[2pt]
+mAP50        & Mean Average Precision at 50\,\% IoU threshold \\[2pt]
+mAP50-95     & Mean Average Precision averaged over IoU thresholds 50–95\,\% \\[2pt]
+MLIR         & Multi-Level Intermediate Representation \\[2pt]
+MLAS         & Microsoft Linear Algebra Subroutines \\[2pt]
+NCHW         & Channels-first tensor layout (batch, channels, height, width) \\[2pt]
+NEON         & ARM Advanced SIMD instruction set extension \\[2pt]
+NHWC         & Channels-last tensor layout (batch, height, width, channels) \\[2pt]
+NMS          & Non-Maximum Suppression \\[2pt]
+NPU          & Neural Processing Unit \\[2pt]
+NVTX         & NVIDIA Tools Extension (profiling annotation API) \\[2pt]
+OBB          & Oriented Bounding Box \\[2pt]
+ONNX         & Open Neural Network Exchange (model interchange format) \\[2pt]
+PAN          & Path Aggregation Network \\[2pt]
+PTQ          & Post-Training Quantization \\[2pt]
+PWN          & Pointwise node (TensorRT activation kernel category) \\[2pt]
+QAT          & Quantization-Aware Training \\[2pt]
+QDQ          & QuantizeLinear–DequantizeLinear (ONNX quantization representation) \\[2pt]
+ReLU         & Rectified Linear Unit (activation function) \\[2pt]
+RT-DETR      & Real-Time Detection Transformer \\[2pt]
+SIMD         & Single Instruction, Multiple Data \\[2pt]
+SiLU         & Sigmoid Linear Unit (activation function; also called Swish) \\[2pt]
+SM           & Streaming Multiprocessor (GPU compute unit) \\[2pt]
+SPPF         & Spatial Pyramid Pooling – Fast \\[2pt]
+STE          & Straight-Through Estimator \\[2pt]
+TF32         & TensorFloat-32 (19-bit precision format used by NVIDIA Tensor Cores) \\[2pt]
+TFLite       & TensorFlow Lite \\[2pt]
+TensorRT     & NVIDIA TensorRT inference optimisation library \\[2pt]
+TRT          & TensorRT (abbreviated) \\[2pt]
+TVM          & Apache TVM deep learning compiler stack \\[2pt]
+UINT8        & 8-bit unsigned integer \\[2pt]
+WMMA         & Warp Matrix Multiply-Accumulate (NVIDIA Tensor Core intrinsic) \\[2pt]
+XLA          & Accelerated Linear Algebra (Google compiler for ML workloads) \\[2pt]
+XNNPACK      & Accelerated neural network operations library for ARM and x86 \\[2pt]
+YOLO         & You Only Look Once (real-time object detection model family) \\[2pt]
 
 \end{longtable}
 \cleardoublepage
@@ -288,43 +441,164 @@ will be completed during the concluding phase of the thesis work in consultation
 % ======= 1 Introduction (Innledning) =======
 \chapter{Introduction}
 
-
-
 \section{Motivation}
 
+Deep learning has become the dominant approach to visual perception tasks such as object detection, segmentation,
+and classification.
+Models that were once confined to data centres now need to run on embedded hardware: surveillance cameras, autonomous
+vehicles, industrial inspection systems, and consumer mobile devices all demand on-device inference that is fast,
+power-efficient, and accurate.
+
+The challenge is that deploying a deep learning model on edge hardware is not simply a matter of copying trained
+weights to a device and running them.
+Inference performance is determined by the joint interaction of model architecture, numerical precision, and the
+inference framework that compiles and executes the model.
+Two devices with nominally similar specifications can deliver very different throughput depending on which framework
+is used and how it maps the computational graph to the underlying hardware.
+At the same time, optimization techniques that are well understood in a data-centre context, quantization, pruning,
+operator fusion, often behave differently on embedded hardware, where compute budgets, memory bandwidth, and driver
+maturity all impose additional constraints.
+
+There is a gap between what the theoretical performance of edge hardware suggests and what users observe in
+practice.
+Roofline analysis and kernel-level profiling of TensorRT-compiled YOLOv8n on the NVIDIA Jetson Orin Nano, for example,
+reveals that only 59\,\% of engine time is spent on useful convolution work; the remaining 41\,\% is structural overhead
+from unfused activations, format copies, and graph-level inefficiencies that standard compilation does not resolve.
+Understanding where this overhead comes from, and which optimization strategies can reduce it, requires systematic
+measurement rather than reliance on published benchmark tables.
+
+This thesis addresses this gap by conducting a controlled, measurement-driven study of compiler-aware optimization
+for edge AI.
+Using YOLOv8n object detection as a concrete and deployable case study, the work evaluates how inference frameworks,
+precision formats, model compression, and low-level kernel customization interact to determine end-to-end inference efficiency.
+The goal is to provide a rigorous characterization of the optimization
+space available to a practitioner deploying an existing model on representative edge hardware.
 
 \section{Limitations}
 
+The scope of this study is to allow controlled and reproducible experimentation.
+The following limitations apply throughout.
+
+\begin{itemize}
+
+\item \textbf{Two hardware platforms.}
+All experiments are conducted on the NVIDIA Jetson Orin Nano (Ampere GPU, SM87) and the Raspberry Pi~5 (Cortex-A76 CPU, AArch64).
+These two devices represent a GPU-equipped embedded platform and a CPU-only single-board computer respectively, covering
+the most common edge deployment profiles.
+Other hardware targets, dedicated NPUs (Hailo, Qualcomm AI Engine), FPGAs, mobile SoCs, or the Raspberry Pi~5 VideoCore
+GPU, are not evaluated experimentally.
+
+\item \textbf{One model and one task.}
+The study uses YOLOv8n as the sole model and object detection as the sole task.
+YOLOv8n is selected because it is compact, widely deployed, architecturally representative of modern one-stage
+detectors, and exposes realistic deployment bottlenecks.
+Findings may not generalise directly to larger models, segmentation or classification architectures, or transformer-based detectors.
+
+\item \textbf{Limited set of inference frameworks.}
+Five frameworks are evaluated: TensorRT, Apache TVM with MetaSchedule, ONNX Runtime, Google LiteRT (TensorFlow Lite),
+and PyTorch (eager mode and \texttt{torch.compile}).
+Other relevant runtimes, OpenVINO, RKNN, CoreML, Hailo Dataflow Compiler, are outside the scope of the comparison.
+
+\item \textbf{Underexplored pruning.}
+Structured channel pruning is evaluated using PyTorch FP32 inference as the measurement backend.
+The study does not evaluate pruning combined with TensorRT compilation, unstructured weight pruning, or more recent
+sensitivity-based and gradient-guided pruning methods.
+As a result, the conclusions about pruning effectiveness are specific to the PyTorch FP32 execution regime.
+
+\item \textbf{Underexplored quantization.}
+Post-training quantization is evaluated using the calibration tools available within each framework.
+Quantization-aware training (QAT), mixed-precision quantization with per-layer bit-width assignment, and joint
+pruning--quantization methods are not investigated.
+The accuracy results reported for INT8 therefore represent a conservative lower bound on what is achievable with more
+sophisticated quantization workflows.
+
+\item \textbf{Single-image batch size.}
+All latency and throughput experiments use batch size~1, reflecting a real-time, single-stream deployment scenario.
+Throughput-optimised configurations with larger batch sizes are not evaluated.
+
+\item \textbf{Custom plugin scope.}
+The custom TensorRT plugin is developed and evaluated for the C2f block at model.2 (32-channel, 160$\times$160 spatial
+resolution).
+The plugin is not generalised across all C2f instances in the network, and the implementation is fixed to FP32.
+
+\end{itemize}
 
 \section{Contributions}
 
-    Within these limitations, the main contributions of this thesis are:
+Within these limitations, the main contributions of this thesis are:
 
-    \begin{itemize}
-        \item \textbf{:}
+\begin{itemize}
 
-        \item \textbf{:}
+\item \textbf{Systematic multi-framework, multi-precision benchmark.}
+A controlled end-to-end benchmark of YOLOv8n inference across five frameworks, two hardware platforms, and three
+precision formats (FP32, FP16, INT8) is presented.
+Each configuration is evaluated with isolated subprocess repetitions, warm-up runs, 95\,\% confidence intervals, and
+simultaneous power measurements, enabling direct comparison of both latency and energy efficiency.
 
-        \item \textbf{:}
+\item \textbf{Hardware-aware bottleneck analysis.}
+Roofline analysis is applied to classify per-layer execution regimes on both platforms.
+GPU kernel-level profiling with Nsight Systems and Nsight Compute is used to decompose the TensorRT FP32 engine into
+concrete overhead categories, identifying unfused SiLU activations (19.3\,\%), format copy nodes (15.1\,\%), and
+channels-first (NCHW) format reformat overhead (17.2\,\% of backbone time) as the dominant sources of non-compute cost.
 
-        \item \textbf{:}
-        \item \textbf{:}
-    \end{itemize}
+\item \textbf{Custom TensorRT C2f plugin.}
+A TensorRT plugin is developed that replaces the C2f subgraph (four convolutions, SiLU activations, a channel split,
+and a residual addition) with a single opaque node.
+The plugin includes a hand-written fused CUDA (Compute Unified Device Architecture) kernel for the 32-channel case and a cuDNN (CUDA Deep Neural Network library) fallback path.
+The experiment quantifies the gap between custom CUDA code and Tensor Core-accelerated vendor kernels, establishing that
+structural fusion alone is not sufficient to outperform TensorRT's default engine without Tensor Core alignment.
+
+\item \textbf{Activation function substitution study.}
+The effect of replacing all SiLU activations in YOLOv8n with ReLU is evaluated as a structural latency optimization.
+The substitution is performed without retraining and achieves a $1.22\times$ end-to-end speedup (11.45\,ms$\to$9.37\,ms)
+and a 6.2\,\% reduction in average power draw on the Orin Nano, demonstrating that activation function choice has a
+direct and measurable impact on TensorRT kernel fusion and inference cost.
+
+\item \textbf{Quantization and pruning characterization.}
+INT8 quantization is evaluated across multiple deployment paths on both platforms, revealing a large performance gap
+between implementations: TFLite INT8 achieves a $9.4\times$ speedup on Raspberry Pi~5 CPU while ONNX Runtime INT8
+provides no practical benefit over FP32.
+Structured channel pruning is evaluated across 418 per-layer configurations and a full-model experiment, showing that
+cuDNN kernel granularity prevents proportional speedup at the channel reductions explored, and that the strategy is
+ineffective as a standalone optimization for this model.
+
+\end{itemize}
 
 \section{Thesis Structure}
-The remainder of this report is organised as follows:
+
+The remainder of this report is organised as follows.
+
 \begin{itemize}
-    \item \textbf{Chapter 2}
-    \item \textbf{Chapter 3}
-    \item \textbf{Chapter 4}
-    \item \textbf{Chapter 5}
-    \item \textbf{Chapter 6}
-    \item \textbf{Chapter 7}
-    \item \textbf{Chapter 8}
-    \item \textbf{Chapter 9}
-    \item \textbf{Chapter 10}
-    \item \textbf{Appendix A}
-    \item \textbf{Appendix B}
+
+\item \textbf{Chapter~2 - Literature Study} introduces object detection with deep learning models, covering CNN
+fundamentals, the YOLO model family, the challenges of edge deployment, and an overview of inference frameworks,
+compilers, quantization, and pruning techniques that form the context for the experimental work.
+
+\item \textbf{Chapter~3 - Theory} describes the analytical tools used throughout the thesis: object detection evaluation
+metrics (Mean Average Precision (mAP), precision, recall), the roofline model for hardware-aware performance characterization, and the activation
+functions ReLU and SiLU.
+
+\item \textbf{Chapter~4 - Methodology} defines the experimental workflow, model selection rationale, baseline
+establishment procedure, and the evaluation criteria applied consistently across all experiments.
+
+\item \textbf{Chapter~5 - Testing and Results} presents the experimental results across all optimization strategies:
+framework and precision benchmarks on both platforms, FP16 and INT8 inference results, accuracy comparison, structured
+pruning evaluation, GPU kernel-level profiling, the C2f TensorRT plugin, and the SiLU-to-ReLU activation substitution.
+
+\item \textbf{Chapter~6 - Discussion} interprets the results in context, compares the effectiveness of different
+strategies, examines causes of unexpected or negative findings, and identifies deployment configurations not covered
+by the experiments.
+
+\item \textbf{Chapter~7 - Conclusion} summarises the main findings and directly answers the research questions posed
+by the study.
+
+\item \textbf{Chapter~8 - Future Work} outlines concrete directions for extending this work, including CUTLASS-based
+Tensor Core plugins, quantization-aware training, activation function retraining, TensorRT-aware pruning, and broader
+hardware targets.
+
+\item \textbf{Chapter~9 - Description of Use of Artificial Intelligence} declares the use of AI tools in the preparation of this thesis.
+
+\item \textbf{Appendix~A - Demonstration} provides supplementary experimental data and profiling artefacts.
 
 \end{itemize}
 
@@ -333,9 +607,9 @@ The remainder of this report is organised as follows:
 \noindent
 
 
-\textcolor{red}{This chapter is currently in draft form and requires further structuring,
-    formatting, and completion of the literature review. Its final revision is planned for the concluding phase
-    of the thesis work.}
+%\textcolor{red}{This chapter is currently in draft form and requires further structuring,
+%    formatting, and completion of the literature review. Its final revision is planned for the concluding phase
+%    of the thesis work.}
 \section{Scope of the chapter}
 
 This chapter introduces a literature research of the existing optimizations strategies and methods as well as
@@ -361,9 +635,126 @@ of this thesis.
 
 \section{Introduction to Object Detection with Deep Learning Models}
 
-\textcolor{red}{TODO: Description of common object detection models and introduction to the the YOLO family}
+Artificial Intelligence (AI) covers a broad set of algorithms that enable computers to perform tasks in language
+understanding, object recognition, control, and many other domains.
+This thesis is concerned specifically with deep learning models for visual object detection: models that take an image
+as input and produce a list of bounding boxes with associated class labels as output.
+Before examining specific architectures, it is useful to establish what such a model is made of and how it differs
+from simpler machine-learning tasks.
+
+\subsection*{From pixels to features: convolutional neural networks}
+
+Modern object detectors are built on convolutional neural networks (CNNs)~\cite{krizhevsky2012imagenet},
+which process images through a sequence of learned filters.
+A single convolutional layer applies a small kernel (typically $3\times3$ or $1\times1$) to every spatial position of
+the input feature map.
+Each kernel learns to detect a local pattern: an edge, a texture, a colour gradient, and produces one channel of the
+output feature map.
+Stacking many such layers builds up increasingly abstract representations: shallow layers detect low-level edges and
+textures, while deeper layers respond to object parts and semantic categories.
+
+Formally, a single convolution at spatial position $(i, j)$ with kernel $\mathbf{W}$ of size $k \times k$ over
+$C_{\mathrm{in}}$ input channels is:
+\[
+  y_{c,i,j} = \sum_{c'=0}^{C_{\mathrm{in}}-1}\sum_{p=0}^{k-1}\sum_{q=0}^{k-1}
+  \mathbf{W}_{c,c',p,q}\; x_{c',\,i \cdot s + p,\,j \cdot s + q} \;+\; b_c,
+\]
+where $s$ is the stride, $b_c$ is a learned bias, and $c$ indexes the output channel.
+After each convolution, a non-linear activation function is applied element-wise to introduce non-linearity
+into the model.
+Common choices are ReLU ($\max(0, x)$) and SiLU ($x \cdot \sigma(x)$), the latter being the default in YOLOv8.
+Between convolutional stages, pooling or strided convolutions reduce the spatial resolution while increasing
+the receptive field, the area of the input image that influences each output value.
+
+Batch Normalization (BN), applied after each convolution and before activation, normalises the distribution of
+activations across the batch, stabilising training and enabling the use of higher learning rates.
+In deployed models, BN parameters are typically folded into the preceding convolution's weight and bias, eliminating
+a separate operation at inference time.
+
+Fully connected (FC) layers operate on a flat vector and learn global relationships between all features.
+In image classification networks, an FC layer at the end maps the final feature vector to class logits.
+In modern detection heads, dedicated convolutional or FC branches produce box coordinates and class scores, as
+described further in Section~\ref{sec:yolov8}.
+
+At a high level, the entire network is a parameterized function
+\[
+  f_\theta : \mathbb{R}^{H \times W \times C} \rightarrow \mathcal{Y},
+\]
+where the input is an image of height $H$, width $W$, and $C$ channels, and $\theta$ contains all trainable weights.
+The output space $\mathcal{Y}$ depends on the task.
+
+\subsection*{How object detection differs from classification}
+
+In image classification, $\mathcal{Y}$ is a vector of class probabilities: the model answers ``what is in
+this image?'' with a single label.
+Object detection requires answering ``where are the objects, and what are they?'' simultaneously for a variable
+number of instances.
+The output $\mathcal{Y}$ is therefore a set of tuples $\{(b_i, c_i)\}$, where each $b_i$ is a bounding box
+and $c_i$ is a class probability vector.
+
+This difference has important architectural consequences.
+A detection model must produce spatially localised outputs rather than a single global label, which requires the
+network to preserve spatial information through most of its depth.
+It also must handle multiple simultaneous detections of different sizes, which requires multiscale feature
+fusion: the combination of high-resolution feature maps (sensitive to small objects) with semantically rich
+low-resolution maps (needed for large-object classification).
+Modern detectors achieve this through feature pyramid networks (FPN) or PANet-style neck architectures, which
+are described in more detail in the context of YOLOv8 in Section~\ref{sec:yolov8}.
+
+A further distinction is post-processing.
+Classification outputs a single softmax distribution.
+Detection outputs a large number of candidate boxes, many of which overlap.
+A non-maximum suppression (NMS) step is therefore applied after the forward pass to remove duplicate detections,
+selecting the highest-confidence box among overlapping candidates.
+Several recent architectures (YOLOv10, RT-DETR) have sought to eliminate or simplify NMS by design.
+
+\subsection*{Two-stage versus one-stage detectors}
+
+Early deep learning detectors used a two-stage pipeline.
+The first stage generates a set of region proposals (candidate bounding boxes); the second stage classifies each
+proposal and refines its coordinates.
+Representative models in this family, R-CNN, Fast R-CNN, Faster R-CNN~\cite{ren2015faster}, achieved high accuracy
+but were too slow for real-time use (typically 7--18 frames per second (FPS) on contemporary hardware).
+
+One-stage detectors eliminate the proposal stage.
+A single convolutional pass over the image directly predicts bounding boxes and class scores at multiple spatial
+positions and scales.
+YOLO~\cite{Redmon2016YOLO} (You Only Look Once) was the first widely adopted model in this family: on PASCAL VOC 2007,
+the original YOLO ran at 45 FPS while achieving competitive mAP, and the faster variant reached 155 FPS.
+This speed advantage made one-stage detectors the dominant choice for real-time and edge deployments.
+
+\subsection*{The YOLO family and transformer-based alternatives}
+
+Since the original YOLO in 2015, eleven major versions have been released~\cite{khanam2024yolov11}.
+The most practically significant milestones are:
+
+\begin{itemize}
+  \item \textbf{YOLOv5} - introduced a PyTorch implementation, multiple size variants (n/s/m/l/x), and straightforward
+  ONNX export, making YOLO accessible for deployment across a wide range of hardware.
+  \item \textbf{YOLOv8} - adopted an anchor-free detection head, C2f backbone blocks, and a distribution-based box
+  regression head (DFL), improving both accuracy and training stability while retaining the same deployment ecosystem.
+  \item \textbf{YOLOv10} - introduced NMS-free inference through dual-label assignment during training, reducing
+  post-processing latency, and added large-kernel convolutions and partial self-attention for a wider receptive field.
+  \item \textbf{YOLOv11} - refined the training pipeline and architecture for better accuracy per parameter, achieving
+  higher mAP than YOLOv8 with fewer parameters.
+\end{itemize}
+
+A competing approach is the transformer-based detector.
+RT-DETR~\cite{lv2023rtdetr} replaces the convolutional neck and NMS post-processing with a transformer decoder that
+performs set-based prediction, entirely removing the duplicate-suppression step.
+On GPU, RT-DETR benefits from the parallelism of self-attention and achieves strong accuracy.
+However, transformer architectures carry a higher parameter count and memory footprint than compact YOLO variants,
+making them less attractive for CPU and low-power edge targets.
+NanoDet~\cite{nanodet} represents the opposite extreme: a sub-megaparameter detector targeting mobile CPU inference,
+trading accuracy ($\sim$34\,\% mAP) for extreme compactness.
+
+For the purposes of this thesis, YOLOv8n is selected as the representative model.
+It offers a well-understood architecture with realistic deployment challenges, strong community support, a complete
+export ecosystem, and a parameter count (3.2\,M, 8.7\,GFLOPs) that makes it practical to experiment with on edge hardware.
+A detailed architectural description follows in Section~\ref{sec:yolov8}.
 
 \section{YOLOv8 Architecture}
+\label{sec:yolov8}
 \noindent
 
 YOLOv8 is a one-stage convolutional object detector introduced by Ultralytics in 2023~\cite{yolov8_ultralytics}
@@ -399,7 +790,7 @@ are produced from feature levels P3/8, P4/16, and P5/32.
 
 The backbone begins with strided convolutional layers that reduce spatial resolution while increasing channel
 depth. These stages are interleaved with C2f blocks, which are described in the Ultralytics reference implementation
-as a ``faster implementation of CSP bottleneck with 2 convolutions.'' The main purpose of these blocks is to improve
+as a ``faster implementation of Cross-Stage Partial (CSP) bottleneck with 2 convolutions.'' The main purpose of these blocks is to improve
 gradient flow and feature reuse while maintaining computational efficiency. At the deepest stage of the network,
 YOLOv8 employs an SPPF (Spatial Pyramid Pooling -- Fast) module, which increases the effective receptive field
 and improves multiscale context aggregation with relatively low computational overhead.
@@ -417,7 +808,7 @@ to preserve useful information. This design improves feature propagation and red
 retaining informative representations. Compared with earlier CSP-style blocks, C2f enables richer feature reuse
 and more efficient gradient flow.
 
-The neck follows a PAN-FPN style design. In practice, this means that feature maps are upsampled, concatenated
+The neck follows a Path Aggregation Network (PAN)--FPN style design. In practice, this means that feature maps are upsampled, concatenated
 with earlier backbone features, and then processed again using C2f blocks. This combination of top-down and bottom-up
 feature fusion is central to YOLOv8's ability to detect objects across multiple scales. The reference YAML
 architecture repeatedly uses Upsample, Concat, and C2f blocks before the final
@@ -482,7 +873,7 @@ be exported to ONNX, TensorRT, TFLite, and other runtimes, the achieved performa
 the target backend supports the specific operator set and graph structure of the model. In practice, operations
 such as SiLU, concatenation-heavy neck structures, and certain post-processing steps may be implemented with
 different levels of efficiency across frameworks. As a result, there is often a noticeable gap between the
-theoretical FLOP count of the model and the measured end-to-end latency.
+theoretical Floating-Point Operation (FLOP) count of the model and the measured end-to-end latency.
 
 Third, post-processing introduces an additional deployment challenge. Standard YOLOv8 detection still relies on
 confidence filtering and non-maximum suppression after the forward pass. On GPU-based systems, this may require
@@ -549,7 +940,7 @@ In real-time edge inference, however, batch size is often fixed to one in order 
 latency. Under this regime, the computation may expose less parallelism and less reuse per invocation.
 On GPUs, this can reduce occupancy and make CUDA kernel-launch overhead, memory traffic, and
 operator fragmentation more visible in the end-to-end latency. On CPUs, the analogous issue is not GPU
-occupancy but reduced SIMD utilization, less effective cache blocking, thread-management overhead,
+occupancy but reduced Single Instruction, Multiple Data (SIMD) utilization, less effective cache blocking, thread-management overhead,
 and layout-conversion overheads. As a result, batch-size-one inference can be limited not only by peak
 compute throughput, but also by memory movement, runtime overhead, and the ability of the compiler or
 runtime to fuse operators and select kernels specialized for small-batch execution.
@@ -557,7 +948,7 @@ runtime to fuse operators and select kernels specialized for small-batch executi
 Graph-level compilers address this by operating on the entire computation graph rather than dispatching one
 operator at a time. With global visibility over operators, data dependencies, and tensor lifetimes,
 a compiler can fuse multiple operations into a single kernel, fold constants, eliminate dead branches, and
-reorder associative operations to improve locality. It can also select a single data layout (NCHW, NHWC, or
+reorder associative operations to improve locality. It can also select a single data layout (channels-first NCHW, channels-last NHWC, or
 a blocked format) that suits the target hardware and insert only the minimal number of layout conversions,
 avoiding the unnecessary transposes that arise when operators from different libraries are composed naively.
 
@@ -580,8 +971,8 @@ JAX~\cite{frostig2019compiling}. In practical deployment pipelines, this import 
 mediated by an exchange format such as ONNX~\cite{microsoft2017onnx}. Other representations are
 more closely tied to particular compiler ecosystems: TorchScript was historically used for PyTorch
 graph capture and deployment, FX graphs are used in the PyTorch 2.x compilation pipeline
-~\cite{reed2022torch}, HLO is the central IR in XLA~\cite{openxla_hlo_to_thunks_docs}, and
-StableHLO provides a more portable HLO-based representation in the OpenXLA/MLIR ecosystem
+~\cite{reed2022torch}, High-Level Optimizer (HLO) is the central Intermediate Representation (IR) in Accelerated Linear Algebra (XLA)~\cite{openxla_hlo_to_thunks_docs}, and
+StableHLO provides a more portable HLO-based representation in the OpenXLA/Multi-Level Intermediate Representation (MLIR) ecosystem
 ~\cite{openxla_stablehlo_docs}.
 
 The imported program is then converted into the compiler's internal intermediate representation.
@@ -715,7 +1106,7 @@ how it is computed. Halide-inspired IRs, used for example in TVM, follow this id
 separating the tensor computation from its schedule. The computation defines the mathematical
 operation, while the schedule controls implementation choices such as tiling, loop reordering,
 vectorization, parallelization, memory placement, and unrolling. This separation is useful because
-the same operator can be mapped differently depending on the target hardware, such as an ARM
+the same operator can be mapped differently depending on the target hardware, such as an Advanced RISC Machine (ARM)
 CPU, an NVIDIA GPU, or a specialized accelerator.
 
 Another important family is polyhedral-based IRs. These represent loop nests and memory
@@ -729,7 +1120,7 @@ dynamic or irregular model structures.
 Some compiler systems use their own low-level IRs instead of directly adopting Halide- or
 polyhedral-style representations. For example, Glow~\cite{rotem2018glow} uses an instruction-based low-level IR over
 explicit memory regions, while MLIR~\cite{mlir_overview} provides a multi-level compiler infrastructure based on
-dialects, allowing tensor, linear algebra, affine, LLVM~\cite{lattner2004llvm}, and hardware-specific
+dialects, allowing tensor, linear algebra, affine, Low-Level Virtual Machine (LLVM)~\cite{lattner2004llvm}, and hardware-specific
 abstractions to coexist in the same framework.
 XLA HLO can also serve both high-level and lower-level roles, since it is
 fine-grained enough to express many target-specific optimization decisions while still preserving
@@ -1641,7 +2032,8 @@ A TensorRT engine does not simply ``run convolutions faster.'' Instead, performa
 graph rewrites, kernel selection, tensor layout choices, workspace allocation, and reduced-precision execution.
 For compute-dominated layers such as large convolutions and matrix multiplications, TensorRT attempts to select
 implementations that use Tensor Cores through libraries such as cuDNN and cuBLASLt, or through internally specialized
-kernels. For convolution in particular, many implementations reduce the operation to an implicit GEMM-like form, which
+kernels. For convolution in particular, many implementations reduce the operation to an implicit General Matrix
+Multiplication (GEMM)-like form, which
 allows the same blocked matrix multiplication machinery to be reused for deep learning
 workloads.
 This is one reason why matrix multiplication is the right mental model for understanding a large fraction of modern
@@ -1663,7 +2055,7 @@ mixed-precision arithmetic. Tensor Cores provide very high throughput for matrix
 but only when shapes, data layouts, and operand types satisfy hardware-specific constraints. Independent
 microbenchmarking work has shown that Tensor Core performance depends strongly on operand tiling, instruction form,
 and memory staging, meaning that nominal precision support alone is not sufficient to guarantee high realized
-throughput. For inference, this is highly relevant: the theoretical gain from FP16, BF16, TF32, or INT8 is achieved
+throughput. For inference, this is highly relevant: the theoretical gain from FP16, BF16, TensorFloat-32 (TF32), or INT8 is achieved
 only when the surrounding kernel implementation can sustain data movement and feed the compute units efficiently.
 TensorRT's tactic-selection mechanism exists precisely to navigate this design space on a concrete target
 device.
@@ -1726,7 +2118,8 @@ a backend compiler and engine builder.
 
 TensorRT also has important limitations. First, unsupported operators, dynamic control flow, and export idiosyncrasies
 can prevent full graph lowering or degrade fusion quality. Second, the engine is strongly tied to the target platform
-and should be treated as hardware- and software-specific rather than portable. Third, the user has only partial visibility into why a particular tactic was chosen,
+and should be treated as hardware- and software-specific rather than portable. Third, the user has only partial
+visibility into why a particular tactic was chosen,
 which complicates rigorous compiler analysis. Finally, per-layer or per-region optimization can still leave global
 inefficiencies unresolved, especially when model performance is limited by reformatting, synchronization, or memory
 traffic between otherwise efficient kernels. Recent systems work on GPU inference and tensor-program optimization
@@ -2039,7 +2432,7 @@ model behavior.
 
 The Roofline model, introduced by Williams et al.~\cite{williams2009roofline},
 provides an intuitive way to analyze whether a workload is limited by memory bandwidth
-or computational throughput. It plots performance (e.g., GFLOP/s) versus arithmetic intensity
+or computational throughput. It plots performance (e.g., Gigaflops per second (GFLOP/s)) versus arithmetic intensity
 (FLOPs per byte of memory traffic). The model defines two limits: a sloped memory roof determined by peak memory
 bandwidth, and a flat compute roof determined by peak floating-point throughput. Any kernel’s performance is
 bounded by the minimum of these two ceilings. If a point lies on the sloped region, it is memory-bound;
@@ -2109,7 +2502,7 @@ of reading/writing to/from memory or the computational speed overall.
         \begin{equation}
         \mathrm{AI} = \frac{\mathrm{FLOPs}}{\mathrm{Bytes}}.
         \end{equation}
-        Since exact DRAM traffic is generally unavailable without hardware performance counters, a lower-bound
+        Since exact Dynamic Random-Access Memory (DRAM) traffic is generally unavailable without hardware performance counters, a lower-bound
         estimate of memory traffic is commonly used. For convolutional or linear layers, this lower bound
         consists of the input tensor, weight parameters, and output tensor:
         \begin{equation}
@@ -2347,9 +2740,9 @@ Figure~\ref{fig:thesis_scope} summarizes the scope of the study and the main exp
 \chapter{Testing and Results}
 \noindent
 
-\textcolor{red}{This chapter is currently in draft form and requires further structuring,
-    formatting, and completion of the subsections: c2f-plugin, relu\_silu activation functions substitution and prunning.
-    Its final revision is planned for the concluding phase of the thesis work.}
+%\textcolor{red}{This chapter is currently in draft form and requires further structuring,
+%    formatting, and completion of the subsections: c2f-plugin, relu\_silu activation functions substitution and prunning.
+%    Its final revision is planned for the concluding phase of the thesis work.}
 
 \section{Experimental Setup}
 
@@ -3198,8 +3591,8 @@ model on this platform.
 
 \paragraph{Tensorisation as the Main Structural Change.}
 The most important difference between the FP32 and FP16 tuning campaigns was
-that FP16 enabled tensorisation through WMMA-style matrix multiply-accumulate
-operations on the Orin Nano GPU. In the FP32 campaign, no task could be mapped
+that FP16 enabled tensorisation through Warp Matrix Multiply-Accumulate (WMMA)-style
+matrix operations on the Orin Nano GPU. In the FP32 campaign, no task could be mapped
 to a dedicated hardware intrinsic, and all schedules remained conventional CUDA
 thread-block implementations. In the FP16 campaign, by contrast, a large
 fraction of tasks could be mapped to tensorised execution. As a result, the
@@ -3414,7 +3807,7 @@ TVM MetaSchedule tuned 65 operator tasks over approximately 4 hours and 6
 minutes - compared with 6 hours and 15 minutes for the FP32 campaign on the
 same graph. The faster convergence reflects the more distinct latency signal
 that FP16 kernels produce: once the vectoriser finds a schedule that fills the
-128-bit NEON register with eight \path{float16} values instead of four
+128-bit NEON (ARM Advanced SIMD extension) register with eight \path{float16} values instead of four
 \path{float32} values, the improvement is immediately visible and the tuner
 concentrates its remaining trials on refinement rather than exploration. A total
 of 6{,}477 valid schedule candidates were evaluated across all tasks.
@@ -3734,7 +4127,7 @@ graph.
 For this reason, the quantization study in this thesis focuses on practical deployment behavior rather than on
 theoretical INT8 speedup alone. The experiments were carried out on the Jetson Orin Nano GPU and compared FP32 and
 INT8 inference across several deployment paths. The PyTorch FP32 model served as the reference baseline. ONNX Runtime
-was evaluated using statically quantized QDQ graphs, while TensorRT was evaluated both with an implicit INT8
+was evaluated using statically quantized QuantizeLinear--DequantizeLinear (QDQ) graphs, while TensorRT was evaluated both with an implicit INT8
 calibration path starting from an FP32 ONNX model and with a QDQ-based INT8 ONNX graph.
 
 A first important observation is that efficient quantization support is not uniformly available across deployment
@@ -3878,7 +4271,7 @@ TensorRT INT8 QDQ       & 19161 & 21678 & 6.77 \\
 \end{tabular}
 \end{table}
 
-The profiling data helps explain why these differences occur. For the implicit TensorRT INT8 engine, the NVTX summary
+The profiling data helps explain why these differences occur. For the implicit TensorRT INT8 engine, the NVIDIA Tools Extension (NVTX) summary
 shows that execution is dominated by the TensorRT enqueue stage, while the GPU kernel summary is largely composed of
 INT8 GEMM and IMMA-style convolution kernels. This indicates that TensorRT is able to map a large fraction of the
 network to hardware-efficient INT8 kernels. At the same time, the profile still contains non-negligible reformat,
@@ -4004,9 +4397,11 @@ larger drop in recall. This suggests that the two deployment paths affect confid
 regression somewhat differently, even though both are based on INT8 inference.
 
 On Raspberry Pi 5 CPU, Linux perf profiling showed that TFLite INT8 inference spent most active execution
-time inside clearly identifiable XNNPACK quantized microkernels, such as IGEMM/GEMM and LUT-based kernels.
+time inside clearly identifiable Accelerated Neural Network (XNNPACK) quantized microkernels, such as Integer
+GEMM (IGEMM)/GEMM and LUT-based kernels.
 In contrast, ONNX Runtime INT8 required substantially more total cycles and instructions, achieved a lower
-IPC, and exhibited a higher LLC miss rate. This indicates that, for this model and deployment path, TFLite
+Instructions Per Cycle (IPC), and exhibited a higher Last-Level Cache (LLC) miss rate. This indicates that, for
+this model and deployment path, TFLite
 provided a more efficient CPU execution path, likely due to better-optimized low-level kernels and/or lower
 runtime overhead.
 
@@ -4483,8 +4878,8 @@ The kernel trace reveals a second class of overhead that is independent of forma
 Every SiLU non-linearity ($\sigma(x)\cdot x$) in the network is dispatched as a separate
 \path{generatedNativePointwise} GPU kernel - 57 launches per inference pass totalling
 2.147\,ms (19.3\,\%) of engine time.
-TensorRT does fuse the Sigmoid and the element-wise multiply into a single pointwise node
-(\path{PWN}), avoiding one kernel launch per activation, but it does not merge the activation
+TensorRT does fuse the Sigmoid and the element-wise multiply into a single Pointwise Node (PWN),
+avoiding one kernel launch per activation, but it does not merge the activation
 into the preceding convolution the way it fuses \path{Conv\,+\,ReLU}.
 On Ampere, cuDNN exposes a \path{CUDNN\_ACTIVATION\_SWISH} epilogue that would let the
 convolution kernel apply the non-linearity in-register without writing an intermediate activation
@@ -4646,8 +5041,8 @@ that propagates directly to the 4.00\,ms end-to-end gap.
 
 \subsection{Summary}
 
-The experiment confirms that the identified overhead sources — Split copies and unfused
-activations — can be structurally removed by a plugin.
+The experiment confirms that the identified overhead sources, Split copies and unfused
+activations, can be structurally removed by a plugin.
 The performance gap is entirely attributable to the absence of Tensor Core utilisation
 in the custom kernel: TensorRT's advantage lies not only in graph-level fusion but in
 access to hardware-specific Tensor Core kernels that general-purpose FP32 CUDA code
@@ -4792,9 +5187,10 @@ performed.
 The experiment is therefore restricted to a structural latency measurement.
 Deploying a ReLU-based YOLOv8n would require either fine-tuning the substituted weights
 or retraining from scratch with ReLU as the default activation.
-Prior work on alternative activation functions in YOLO architectures suggests that
-fine-tuning for 10–30 epochs can largely recover the accuracy gap, but a full retraining
-from scratch is required to match the original mAP50 within 0.3--0.5\,\%.
+Prior work on activation function substitution in YOLO architectures suggests that
+fine-tuning from pretrained weights can partially recover the accuracy gap, though
+full retraining from scratch is the standard approach used in comparative
+studies~\cite{sah2025actnas, li2022yolov6}.
 
 \subsection{Summary}
 
@@ -4820,28 +5216,291 @@ and represents a natural next step for precision-aware optimisation.
 
 % ======= 7 Discussion (Diskusjon) =======
 \chapter{Discussion}
-% How to interpret results? Do they match expectations/specifications (from Functional Specification)?
-% Causes of deviations? What could be done differently? What should be added?
-% This leads into Future Work.
-    \section{Discussion Points}
 
-        \subsection{Quantization and accelerator deployment}
-        \subsection{Unexplored hardware configurations and deployment possibilities}
+This chapter interprets the experimental results in the broader context of the research questions, examines causes of
+unexpected or negative findings, and connects the individual experiments into a coherent picture of which optimization
+strategies are most effective for YOLOv8n on edge hardware.
+
+\section{Framework effectiveness is platform-dependent}
+
+The most consistent finding across all experiments is that no single inference framework dominates across both platforms
+and all precision settings.
+On the Jetson Orin Nano GPU, TensorRT was the clear winner in every configuration: FP32 ($2.21\times$ over PyTorch
+eager), FP16 ($4.34\times$), and INT8 implicit ($4.69\times$).
+On the Raspberry Pi~5 CPU, the rankings changed substantially.
+LiteRT achieved both the lowest FP32 latency (154.1\,ms, $1.88\times$ speedup) and the most efficient INT8 execution
+(31.05\,ms, $9.4\times$ speedup over PyTorch eager).
+ONNX Runtime and TVM were competitive with each other in FP32 on the CPU, while TorchCompile consistently underperformed
+relative to ahead-of-time compiled alternatives.
+
+This platform dependency is not accidental.
+The runtime advantage of TensorRT on NVIDIA hardware is rooted in low-level GPU-specific kernel selection, Tensor Core
+dispatch, and aggressive graph-level fusion that general-purpose runtimes cannot replicate.
+LiteRT's advantage on Raspberry Pi~5 reflects strong optimization for Arm AArch64 NEON and XNNPACK micro-kernel paths.
+A deployment decision based on only one platform would therefore produce misleading conclusions about the other.
+
+\section{TVM is competitive but does not exceed TensorRT}
+
+Apache TVM with MetaSchedule demonstrated a qualitatively different optimization trajectory depending on precision.
+In FP32, TVM essentially matched ONNX Runtime on the GPU (23.38\,ms vs.\ 23.18\,ms), suggesting that for this model size
+and architecture, mature CUDA libraries used by both runtimes already close most of the gap that compiler-level scheduling
+can address.
+In FP16, however, TVM moved from merely matching to clearly outperforming ONNX Runtime (12.45\,ms vs.\ 16.95\,ms),
+because FP16 enabled tensorised WMMA execution and shifted MetaSchedule into a qualitatively different search space.
+
+Even in the FP16 setting, TensorRT remained substantially faster (6.31\,ms vs.\ 12.45\,ms for TVM).
+The remaining gap is attributable to optimizations that MetaSchedule did not discover within the tuning budget:
+backend-specific kernel variants, multi-layer fusion across C2f subgraphs, and empirically selected Tensor Core tile
+configurations that TensorRT accumulates over years of hardware-specific tuning.
+This shows that compiler-based tuning can unlock hardware potential incrementally, but does not automatically match the
+depth of a mature vendor runtime for a well-supported architecture.
+
+The long tuning time required by MetaSchedule (approximately 18 hours for FP16) is also a practical limitation for
+deployment in production contexts where rapid iteration is expected.
+
+\section{Quantization is a deployment trade-off, not a universal gain}
+
+The quantization experiments produced the most heterogeneous results of the entire study, and they illustrate that
+INT8 quantization cannot be treated as a drop-in optimization.
+
+On the Jetson Orin Nano, TensorRT implicit INT8 achieved the best latency result in the entire experiment (5.34\,ms,
+$4.69\times$ speedup), but at a measurable accuracy cost of approximately 10\,\% in both mAP50 and mAP50--95.
+TensorRT QDQ INT8 was slower than the implicit path and caused severe accuracy degradation ($-25.4\,\%$ mAP50),
+suggesting that explicit quantization node insertion creates graph boundaries that the TensorRT compiler cannot
+fully eliminate.
+ONNX Runtime QDQ INT8 was actually slower than the PyTorch FP32 baseline despite nominally using INT8 values, a
+result explained by the profiling data showing that the model spent a large fraction of time on
+QuantizeLinear/DequantizeLinear conversions rather than on useful convolution work.
+
+On the Raspberry Pi~5, the contrast between TFLite INT8 (31.05\,ms, $9.4\times$ speedup) and ONNX Runtime INT8
+(133.81\,ms, $2.2\times$ speedup) shows the same principle: latency gains from INT8 depend almost entirely on whether
+the runtime has an efficient integer execution path for the target hardware.
+TFLite achieves this through XNNPACK IGEMM kernels with direct INT8 arithmetic; ONNX Runtime is burdened by QDQ
+conversion overhead.
+
+These results suggest that for YOLOv8n, INT8 quantization is practical only when the deployment path can sustain clean
+low-precision execution through fused kernels: TensorRT implicit calibration on GPU or TFLite on Arm CPU.
+In other configurations, the overhead introduced by quantization can outweigh its benefits.
+
+\section{Structured Pruning is ineffective for this model and hardware}
+
+The pruning experiments produced a consistent negative result across both hardware targets and a wide range of sparsity
+levels.
+The per-layer sensitivity sweep on the Jetson Orin Nano showed median speedups of $1.00 \pm 0.02$ across 418 configurations.
+The full-model pruning and fine-tuning on the RTX~3070 achieved at most 2.3\,\% relative speedup against its paired
+baseline, accompanied by a 4.0\,\% mAP50-95 reduction.
+
+The root cause is the mismatch between channel-level sparsity and the granularity at which cuDNN selects convolution
+kernels.
+cuDNN dispatches GEMM and Winograd kernels with fixed warp-level tiling that does not adapt continuously to channel
+count, so modest channel reductions simply leave warp lanes idle without triggering a faster kernel path.
+YOLOv8n is also already a compact model, and compact models provide less redundancy for pruning to exploit.
+
+This finding is consistent with the broader quantization observation: the most effective optimization levers are those
+that change the execution regime of the entire kernel (precision format, Tensor Core utilisation, dedicated
+micro-kernels), rather than those that reduce the work within an existing kernel regime.
+
+\section{Kernel-Level analysis reveals structural overhead in the optimized engine}
+
+The Nsight Systems profiling of the default TensorRT FP32 engine showed that only 59.2\,\% of engine time is spent on
+convolutions (useful computation).
+The remaining 40.8\,\% is structural overhead: unfused SiLU activations (19.3\,\%), format copies and reformats
+(15.1\,\%), and other non-compute operations (6.4\,\%).
+This overhead profile motivates the two targeted experiments that followed: the C2f plugin (addressing format copies
+and the Split copy nodes) and the SiLU$\to$ReLU substitution (addressing unfused activations).
+
+The fact that these two overhead sources together account for roughly 36\,\% of total engine time shows that even
+well-optimized TensorRT engines can contain significant avoidable cost at FP32.
+Identifying these sources required kernel-level profiling beyond what framework-level benchmarks reveal.
+
+\section{The C2f Plugin confirms both the source and the limit of the overhead}
+
+The custom TensorRT plugin for the C2f block successfully removed the C2f Split copy nodes (6.7\,\% of engine time)
+and the associated format conversion overhead.
+However, the plugin achieved approximately the same end-to-end latency as the default TensorRT engine, because the
+removal of copy overhead was offset by the loss of Tensor Core utilisation.
+
+The default TensorRT engine dispatches the \texttt{sm80\_xmma} kernel family, which uses TF32 Tensor Core arithmetic
+($4\times$ throughput increase on Ampere) and NHWC-native layout, eliminating the NCHW$\leftrightarrow$NHWC conversions
+that the custom CUDA path incurs.
+The hand-written fused kernel processes output pixels sequentially per thread and cannot exploit the warp-cooperative
+16$\times$8$\times$8 accumulation required by \texttt{wmma} operations.
+
+The result is instructive: the plugin demonstrates that a hand-written CUDA kernel can replicate the structural grap
+h transformation (fusion of four convolutions) while preserving correctness, but it cannot reproduce the
+hardware-specific Tensor Core performance without adopting a CUTLASS-style block-tiling strategy.
+This is a general lesson about the limits of simple custom CUDA kernels when competing with vendor-optimised math
+libraries on modern Ampere-class hardware.
+
+\section{SiLU replacement delivers a clear structural speedup at an accuracy cost}
+
+The SiLU$\to$ReLU experiment produced the clearest positive latency result among the targeted optimizations: a
+$1.22\times$ end-to-end speedup (11.45\,ms$\to$9.37\,ms), 87.3$\to$106.7\,FPS, and a 6.2\,\% reduction in average power draw.
+Unlike the plugin, this improvement has no counterbalancing hardware-level regression, because the ReLU epilogue is
+fused into the convolution kernel without any additional launch.
+
+The trade-off is accuracy.
+The substitution was performed without retraining, and the network's weights were optimised under SiLU gradients.
+COCO validation accuracy was not evaluated for the weight-substituted model, and recovering it would require either
+fine-tuning or full retraining.
+This places the SiLU replacement in the same category as INT8 quantization: a deployment trade-off suitable when a
+moderate accuracy reduction is acceptable, not a free performance improvement.
+
+For deployments where the original accuracy must be preserved, FP16 inference is the more appropriate alternative.
+TensorRT FP16 achieves 6.31\,ms ($4.34\times$ over PyTorch FP32 eager) with no measurable accuracy degradation
+($\Delta$mAP50 $= +0.03\,\%$ on the GPU side), and it eliminates the SiLU overhead through a different mechanism:
+half-precision reduces the data volume processed by all kernels, including the activation and convolution stages.
+
+\section{Unexplored Deployment Configurations}
+
+Several deployment configurations were identified but not experimentally evaluated in this work.
+All experiments used batch size~1, which is representative of low-latency real-time deployment but does not reflect
+throughput-optimised scenarios where larger batches amortise kernel launch overhead.
+On the hardware side, the study was limited to a CUDA GPU and an Arm CPU.
+Alternative targets, dedicated NPUs (Hailo, Qualcomm AI Engine), the Vulkan compute API on the Raspberry Pi~5 VideoCore
+GPU, FPGAs, and mobile SoCs, represent structurally different execution models where the overhead patterns identified
+here may manifest differently or not at all.
+These configurations are discussed as concrete future directions in Chapter~\ref{chap:future_work}.
 
 
 % ======= 8 Conclusion (Konklusjon) =======
 \chapter{Conclusion}
 
+This thesis investigated how compiler-aware optimization affects the inference performance of YOLOv8n on two edge
+hardware platforms, the NVIDIA Jetson Orin Nano GPU and the Raspberry Pi~5 CPU, across a range of deployment strategies:
+framework selection, numerical precision reduction, INT8 quantization, structured pruning, low-level TensorRT plugin
+development, and activation function substitution.
+
+The central finding is that the choice of inference framework and precision format is the dominant factor in
+edge deployment performance, and the most effective optimizations are those that change the hardware execution regime
+rather than those that reduce work within an existing regime.
+
+\paragraph{Framework and Precision Results.}
+On the Jetson Orin Nano GPU, TensorRT consistently achieved the best result at every precision level: $2.21\times$ over
+PyTorch FP32 at full precision, $4.34\times$ with FP16, and $4.69\times$ with implicit INT8 calibration.
+On the Raspberry Pi~5 CPU, LiteRT delivered the best FP32 result ($1.88\times$ over PyTorch) and the most effective INT8
+path with TFLite INT8 ($9.4\times$, 31.05\,ms).
+All frameworks, including FP16 variants, preserved YOLOv8n detection accuracy within 0.1\,\% mAP50 relative to the
+PyTorch FP32 baseline, confirming that reduced-precision floating-point deployment is accuracy-neutral for this model.
+
+\paragraph{Quantization.}
+INT8 quantization produces the largest absolute latency reductions (up to $9.4\times$ on CPU) but introduces measurable
+accuracy degradation in all tested configurations ($-6$ to $-10\,\%$ mAP50 on GPU, $-6\,\%$ on CPU).
+The magnitude of both the speedup and the accuracy loss depends critically on the deployment path: TensorRT implicit
+calibration and TFLite INT8 achieved substantial gains, while ONNX Runtime QDQ INT8 provided no practical benefit over
+the FP32 baseline on either platform.
+
+\paragraph{Structured Pruning.}
+Structured channel pruning of YOLOv8n did not yield meaningful latency reductions on either hardware target.
+The per-layer sensitivity sweep on the Orin Nano showed speedups of $1.00\pm0.02$ across 418 configurations, and the
+full-model pruning experiment on the RTX~3070 achieved at most 2.3\,\% relative speedup at a 4.0\,\% mAP50-95 cost.
+
+\paragraph{Kernel-Level Analysis.}
+GPU kernel profiling revealed that the default TensorRT FP32 engine spends only 59.2\,\% of its time on useful
+convolution work.
+The remaining 40.8\,\% is structural overhead: 19.3\,\% from unfused SiLU activations and 15.1\,\% from format copies
+and reformats.
+This analysis identified two concrete targets for further optimization and motivated the plugin and activation
+substitution experiments.
+
+\paragraph{Custom TensorRT Plugin.}
+The custom C2f plugin successfully removed the Split copy overhead (6.7\,\% of engine time) and confirmed that
+graph-level fusion of the C2f subgraph is feasible.
+However, the plugin achieved the same overall latency as the default engine because the removal of copy overhead was
+offset by the loss of Tensor Core utilisation: the default engine's TF32 Tensor Core kernels are more efficient than
+a hand-written FP32 CUDA kernel that processes output pixels sequentially per thread.
+The plugin demonstrated the structural feasibility of the approach while exposing the performance gap between custom
+CUDA code and vendor-optimized Tensor Core libraries.
+
+\paragraph{Activation Function Substitution.}
+Replacing SiLU with ReLU throughout the network, without any retraining, eliminated all 59 standalone PWN activation
+kernels and delivered a $1.22\times$ end-to-end speedup (11.45\,ms$\to$9.37\,ms, 87.3$\to$106.7\,FPS) with a
+6.2\,\% power reduction.
+This is the largest single-technique improvement achieved without changing the precision format.
+The trade-off is that the weight-substituted model has not been validated for accuracy loss, and recovering the
+original detection quality requires retraining.
+
+\paragraph{Overall.}
+Across all experiments, the most practically useful optimizations for latency-critical deployments without accuracy
+compromise are FP16 TensorRT on GPU and LiteRT FP32 on CPU.
+For deployments where some accuracy loss is acceptable, TFLite INT8 on CPU and TensorRT implicit INT8 on GPU offer
+substantially lower latency at the cost of measurable accuracy degradation.
+Framework selection and precision format account for a larger fraction of the achievable performance range than any
+structural modification to the model itself.
+
 
 % ======= 9 Future Work (Videre arbeid) =======
 \chapter{Future Work}
+\label{chap:future_work}
+
+The experiments in this thesis open several directions for further investigation.
+
+\begin{itemize}
+
+\item \textbf{CUTLASS-based Tensor Core plugin.}
+The C2f plugin demonstrated that a custom CUDA kernel can structurally fuse the C2f subgraph, but cannot match
+TensorRT's \path{sm80\_xmma} Tensor Core throughput.
+Re-implementing the fused convolutions with CUTLASS would provide the \path{wmma}-aligned block tiling required for
+Tensor Core execution with arbitrary activations, potentially combining the structural overhead elimination shown here
+with the hardware arithmetic efficiency of the default engine.
+
+\item \textbf{Activation function retraining.}
+The SiLU$\to$ReLU weight substitution was not evaluated for accuracy.
+Retraining YOLOv8n from scratch with ReLU would quantify the true accuracy cost, and a shorter fine-tuning experiment
+would determine how much of the mAP gap can be recovered without full retraining.
+
+\item \textbf{FP16 plugin.}
+The C2f plugin operated in FP32.
+An FP16 version paired with the TensorRT FP16 engine would combine structural fusion with reduced-precision Tensor Core
+arithmetic, which is the configuration most likely to produce a net improvement over the default engine.
+
+\item \textbf{TensorRT-aware pruning.}
+All pruning experiments used PyTorch FP32.
+TensorRT's engine-builder operates on the pruned ONNX graph directly and could select a different kernel configuration
+at a sufficiently reduced channel count.
+Evaluating structured pruning combined with TRT compilation would determine whether the cuDNN kernel-granularity
+limitation observed in PyTorch applies equally to TRT-compiled engines.
+
+\item \textbf{Quantization-aware training (QAT).}
+Post-training quantization introduced $-6$ to $-10\,\%$ mAP degradation across INT8 paths.
+QAT inserts simulated quantization noise during training, typically recovering most of the accuracy loss, and would
+allow the large latency gains of TFLite INT8 and TensorRT implicit INT8 to be used without the current accuracy penalty.
+
+\item \textbf{Advanced pruning and quantization methods.}
+This thesis applied standard structured channel pruning and post-training quantization.
+Recent research has produced more effective alternatives: magnitude-based and gradient-based sensitivity scoring for
+pruning, mixed-precision quantization that assigns different bit-widths per layer based on sensitivity, and joint
+pruning-quantization methods that co-optimise both simultaneously.
+Applying these approaches to YOLOv8n could yield better accuracy--efficiency trade-offs than the methods explored here.
+
+\item \textbf{Broader deployment targets.}
+The hardware comparison was limited to an NVIDIA GPU and an Arm CPU.
+Natural extensions include: inference via the Vulkan compute API on the Raspberry Pi~5 GPU, which exposes the VideoCore
+VII for general-purpose compute; dedicated NPU accelerators such as Hailo-8 and Qualcomm AI Engine, which use
+dataflow-based execution models that differ structurally from CUDA; FPGA-based deployment, where the compute graph can
+be mapped to custom logic with precise control over precision, latency, and power; and mobile SoCs (e.g.\ Qualcomm
+Snapdragon, Apple Neural Engine) that represent the largest class of real-world edge devices.
+
+\item \textbf{Large language model inference at the edge.}
+Edge optimization of convolutional vision models, as studied in this thesis, represents one approach to the broader
+challenge of efficient on-device inference.
+A growing and substantially different research direction is the deployment of large language models (LLMs) on
+resource-constrained hardware.
+LLMs involve fundamentally different bottlenecks - dominated by memory bandwidth for weight loading rather than
+arithmetic throughput - and require different optimization strategies: aggressive weight quantization (4-bit, 2-bit),
+speculative decoding, and KV-cache compression.
+Investigating how compiler-aware techniques such as those evaluated here translate to the LLM inference setting, and
+whether edge-class hardware can support useful LLM deployment with acceptable latency and power, is a high-impact
+direction for future work.
+
+\end{itemize}
 
 
 \chapter{Description of Use of Artificial Intelligence}
 
     In working on this Master's Thesis, I have used
     artificial intelligence (AI) tools in the following limited
-    ways. I used ChatGPT (OpenAI) to assist with idea development,
+    ways. I used ChatGPT (OpenAI) and Claude (Anthropic) to assist with idea development,
     clarifying concepts, and improving the structure and language of the text (for example,
     by suggesting alternative formulations, checking grammar, and helping to simplify explanations).
     AI was also used to get help with technical formatting issues in \LaTeX{} and to debug small
@@ -4874,7 +5533,9 @@ and represents a natural next step for precision-aware optimisation.
 \setlength{\tabcolsep}{4pt}
 
 \begin{longtable}{p{0.34\textwidth} r r r p{0.16\textwidth}}
-\caption{Per-layer performance statistics of YOLOv8n on Jetson Orin Nano (GPU, FP32). Regime is derived from the roofline knee $\mathrm{AI}_{\mathrm{knee}}\approx 14.56$ FLOPs/byte (using measured BW=55.68\,GB/s and peak=810.68\,GFLOP/s): Memory-bound if AI$<13.10$, Knee/transition if $13.10\le$AI$\le 16.02$, Compute-bound if AI$>16.02$.}
+\caption{Per-layer performance statistics of YOLOv8n on Jetson Orin Nano (GPU, FP32). Regime is derived from the
+roofline knee $\mathrm{AI}_{\mathrm{knee}}\approx 14.56$ FLOPs/byte (using measured BW=55.68\,GB/s and peak=810.68\,GFLOP/s):
+Memory-bound if AI$<13.10$, Knee/transition if $13.10\le$AI$\le 16.02$, Compute-bound if AI$>16.02$.}
 \label{tab:roofline_orin_layers_all}\\
 
 \toprule
