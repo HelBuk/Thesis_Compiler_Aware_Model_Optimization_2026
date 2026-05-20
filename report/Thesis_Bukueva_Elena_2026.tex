@@ -231,14 +231,15 @@ Efficient deployment of deep learning models on edge hardware is not solely a qu
 performance is shaped by the joint interaction of model architecture, numerical precision, and the degree to which
 the inference framework can exploit the target hardware. This thesis presents a systematic, measurement-driven study
 of compiler-aware optimization for edge AI, using YOLOv8n object detection on two representative edge platforms - the
-NVIDIA Jetson Orin Nano and the Raspberry Pi 5 - as a concrete case study.
+NVIDIA Jetson Orin Nano and the Raspberry Pi 5 as a concrete case study.
 
-A wide range of optimization strategies is evaluated through five inference frameworks (TensorRT, Apache TVM with
-MetaSchedule autotuning, ONNX Runtime, Google LiteRT (Tensorflow Lite), and torch.compile), two reduced-precision paths
+A wide range of optimization strategies is evaluated through five inference frameworks (TensorRT, Apache TVM,
+ONNX Runtime, Google LiteRT (Tensorflow Lite), and torch.compile), two reduced-precision paths
 (FP16 and INT8),
 structured channel pruning with retraining, and activation function substitution. The experimental design includes
 isolated subprocess-based repetitions, warm-up runs, confidence intervals, and power measurements for each benchmark,
-enabling direct comparison across frameworks and hardware targets. Roofline analysis classifies per-layer execution regimes, and GPU kernel-level profiling with Nsight Systems
+enabling direct comparison across frameworks and hardware targets. Roofline analysis classifies per-layer execution
+regimes, and GPU kernel-level profiling with Nsight Systems
 decomposes the TensorRT FP32 engine into concrete overhead categories.
 Profiling reveals that only 59\,\% of engine time is spent on useful convolution work.
 The remaining 41\,\% has three identifiable sources: unfused SiLU activations (19\,\%), explicit memory copy nodes
@@ -287,7 +288,7 @@ Effektiv utrulling av dyplæringsmodeller på kantmaskinvare er ikke utelukkende
 Inferensytelse bestemmes av samspillet mellom modellarkitektur, numerisk presisjon og i hvilken grad
 inferensrammeverket kan utnytte målmaskinvaren.
 Denne avhandlingen presenterer en systematisk, målebasert studie av kompilatorbevisst optimalisering for kant-AI,
-med YOLOv8n objektdeteksjon på to representative kantplattformer --- NVIDIA Jetson Orin Nano og Raspberry Pi~5 ---
+med YOLOv8n objektdeteksjon på to representative kantplattformer, NVIDIA Jetson Orin Nano og Raspberry Pi~5,
 som konkret kasusstudie.
 
 Et bredt spekter av optimaliseringsstrategier evalueres gjennom fem inferensrammeverk
@@ -327,7 +328,7 @@ Dette bekrefter at kanalreduksjoner ikke gir proporsjonal tidsgevinst når cuDNN
 er grovere enn de anvendte reduksjonene.
 
 Samlet sett viser resultatene at valg av inferensrammeverk, presisjonsstrategi og maskinvaretilpasning
-på lavt nivå --- ikke modellstørrelsen alene --- er de dominerende faktorene for inferenseffektivitet
+på lavt nivå, ikke modellstørrelsen alene, er de dominerende faktorene for inferenseffektivitet
 på kantmaskinvare.
 
 \end{otherlanguage}
@@ -617,9 +618,9 @@ the technical background necessary to understand the methodology and results of 
 After an introduction to object detection and the YOLO family, a dedicated section on the YOLOv8 architecture
 establishes the model used throughout all experiments, followed by a section on the challenges of edge deployment
 that motivates why optimization is necessary in the first place.
-The remaining sections address the specific tools and techniques applied in this work:
-Apache TVM and TensorRT are reviewed in dedicated sections because they represent two fundamentally different
-but complementary approaches to controlling inference behaviour at the compiler level,
+The remaining sections address the specific tools and techniques applied in this work.
+The section on ML compilers and inference runtimes covers Apache TVM and TensorRT as subsections,
+representing two complementary approaches to controlling inference behaviour at the compiler level:
 TVM as an open-source stack that exposes the full compilation pipeline and enables hardware-aware kernel
 scheduling and auto-tuning through MetaSchedule, and TensorRT as the state-of-the-art NVIDIA GPU inference
 framework that, beyond built-in graph optimization, supports writing custom CUDA kernels through its plugin API.
@@ -629,8 +630,7 @@ of the principal axes available for inference acceleration.
 Strategies not pursued here, such as knowledge distillation, neural architecture search, and dynamic sparsity,
 exist and are noted where relevant but fall outside the scope of the present work.
 Finally, a section on performance bottlenecks in ML inference introduces the analytical concepts needed to
-interpret the profiling results, and the chapter closes by relating the reviewed work to the research questions
-of this thesis.
+interpret the profiling results.
 
 
 \section{Introduction to Object Detection with Deep Learning Models}
@@ -881,9 +881,7 @@ transferring relatively large tensors from the device to the host, followed by p
 steps can add non-negligible latency and complicate the analysis of true end-to-end performance.
 
 Overall, YOLOv8 is an interesting subject for deployment-oriented research because it combines architectural
-complexity with competitive accuracy and speed. In particular, YOLOv8n remains highly relevant for edge AI studies:
-it is compact enough to be practical on constrained devices, yet sufficiently complex to reveal the impact of
-compiler transformations, runtime optimizations, operator fusion, and memory bottlenecks on real inference workloads.
+complexity with competitive accuracy and speed.
 
 
 \section{Challenges of edge deployment}
@@ -1232,12 +1230,129 @@ reduced locality, and significant runtime overhead.
 \end{figure}
 
 
+\subsection{Apache TVM}
+
+Apache TVM~\cite{chen2018tvm} is an open-source machine learning compiler stack that treats model deployment as a
+compiler problem.
+Rather than dispatching operators to a fixed set of vendor-provided kernels, TVM imports a model, applies graph-level
+transformations (constant folding, operator fusion, layout rewriting), lowers individual operators into explicit
+loop-based tensor programs, and then searches for hardware-efficient implementations through automated schedule
+tuning.
+This pipeline follows the general compiler flow described in the previous section, but exposes each stage to the
+user, making TVM useful both as a deployment tool and as a research platform for studying how compilation choices
+affect inference performance.
+
+The central design principle is the separation between computation and schedule.
+The computation defines what is computed; the schedule defines how it maps to hardware.
+For the same convolution, the compiler can explore different tile sizes, loop orders, vector widths, memory staging
+strategies, and thread/block mappings for the target.
+In practice, TVM automates this via MetaSchedule: candidate schedules are generated, benchmarked on the device,
+and ranked by measured latency, producing a hardware-specific binary without manual kernel engineering.
+
+TVM's main strength is hardware portability and the ability to unlock optimisation paths not available in
+fixed-kernel runtimes.
+On ARM CPUs, schedule search can target NEON vector intrinsics explicitly; on NVIDIA GPUs, FP16 MetaSchedule tuning
+enables WMMA tensorisation for convolutional operators.
+Its limitations are a complex compilation workflow and performance that depends heavily on the quality and duration
+of the tuning campaign: an untuned TVM build may not outperform generic runtimes.
+In this thesis, TVM is evaluated with MetaSchedule on both the Jetson Orin Nano GPU and the Raspberry Pi~5 CPU,
+serving as a reference for what an open, tunable compiler achieves relative to TensorRT and ONNX Runtime.
+
+\paragraph{Tensor expression and scheduling: a concrete example.}
+The computation--schedule separation is most clearly illustrated with matrix multiplication.
+The mathematical operation is:
+\begin{equation}
+C[i,j] = \sum_k A[i,k] \cdot B[k,j]
+\end{equation}
+In TVM's tensor expression API this is written as a pure computation definition, with no implementation
+detail:
+\begin{minted}[fontsize=\small, breaklines=true]{python}
+from tvm import te
+M, N, K = 1024, 1024, 1024
+A = te.placeholder((M, K), name="A")
+B = te.placeholder((K, N), name="B")
+k = te.reduce_axis((0, K), name="k")
+C = te.compute(
+    (M, N),
+    lambda i, j: te.sum(A[i, k] * B[k, j], axis=k),
+    name="C"
+)
+\end{minted}
+This definition describes the mathematical computation only.
+It does not yet specify loop ordering, blocking, vectorisation, or parallel execution.
+
+\paragraph{Scheduling and kernel mapping.}
+To obtain an efficient implementation, TVM applies scheduling decisions that determine how the tensor
+computation maps to loops, threads, and memory.
+Typical transformations include tiling, loop reordering, vectorisation, unrolling, and thread binding.
+For a CPU target these translate to cache-friendly blocking, parallelisation across cores, and SIMD
+vectorisation of the innermost loop:
+\begin{minted}[fontsize=\small, breaklines=true]{python}
+s = te.create_schedule(C.op)
+i, j = C.op.axis
+k = C.op.reduce_axis[0]
+io, ii = s[C].split(i, factor=32)
+jo, ji = s[C].split(j, factor=32)
+s[C].reorder(io, jo, k, ii, ji)
+s[C].parallel(io)
+s[C].vectorize(ji)
+\end{minted}
+For a GPU target, the same computation is instead mapped to CUDA thread blocks and warps:
+\begin{minted}[fontsize=\small, breaklines=true]{python}
+bx, tx = s[C].split(i, factor=16)
+by, ty = s[C].split(j, factor=16)
+s[C].bind(bx, te.thread_axis("blockIdx.x"))
+s[C].bind(by, te.thread_axis("blockIdx.y"))
+s[C].bind(tx, te.thread_axis("threadIdx.x"))
+s[C].bind(ty, te.thread_axis("threadIdx.y"))
+\end{minted}
+In both cases the computation definition is unchanged; only the schedule differs.
+MetaSchedule automates exactly this search: it generates candidate schedules, measures their latency
+on the target device, and selects the best-performing one, producing a hardware-specific binary without
+manual kernel engineering.
+
+
+\subsection{TensorRT}
+
+TensorRT~\cite{nvidia_tensorrt_docs} is NVIDIA's inference compiler and runtime for NVIDIA GPUs.
+Unlike TVM, it is not hardware-portable: it specializes a model for a concrete target platform, GPU architecture,
+precision regime, and software stack, and produces a serialized engine encoding a fixed execution strategy.
+A model is imported via ONNX; the builder then applies graph-level rewrites (constant folding, layer fusion,
+dead-layer elimination), propagates shape and precision constraints, and empirically benchmarks multiple
+implementation candidates (called tactics) for each layer or fused subgraph.
+The best-performing tactic on the target device is embedded into the final engine.
+This ahead-of-time empirical optimization is the central reason for TensorRT's strong practical
+performance~\cite{nvidia_tensorrt_perf}.
+
+Effective performance depends on Tensor Cores being utilizable.
+For large convolutions and matrix multiplications, TensorRT selects implementations backed by cuDNN or cuBLASLt
+that use Tensor Core instructions when shapes, data layouts, and precision satisfy the hardware constraints.
+Operators not supported by TensorRT must be rewritten, decomposed, or replaced through the plugin interface.
+The \path{IPluginV3} interface allows a hand-written CUDA or CUTLASS kernel to replace a subgraph while keeping
+all surrounding layers in the standard TensorRT pipeline.
+In the typical workflow, the target subgraph is replaced in the ONNX export using ONNX GraphSurgeon, and TensorRT
+embeds the plugin as a first-class component during engine building.
+This mechanism enables targeted replacement of persistent bottlenecks without abandoning TensorRT's graph-level
+optimizations for the rest of the model.
+
+Compared with TVM, TensorRT is narrower but more mature: it prioritises deployment effectiveness on NVIDIA hardware
+over portability or research transparency.
+Compared with ONNX Runtime, it is more aggressive on supported NVIDIA targets, performing deep kernel selection
+and tactic benchmarking, rather than routing execution through interchangeable execution providers.
+Its main limitations are GPU vendor lock-in, limited introspection of tactic selection, and performance degradation
+at boundaries with unsupported operators where reformatting or data-type conversions break the fusion chain.
+In this thesis, TensorRT serves two roles: it is the strongest latency baseline on the Jetson Orin Nano GPU, and
+its plugin interface is used to study the overhead boundary of the standard engine by replacing the C2f subgraph
+with a custom kernel (Section~\ref{sec:plugin}).
+
+
+
 \cleardoublepage
 \section{Quantization and Mixed Precision}
 
 Quantization is one of the main techniques used to reduce the cost of neural-network inference on
 resource-constrained hardware. A trained neural network is usually represented using floating-point
-parameters and activations. Assume that a network has $L$ layers with learnable parameters
+parameters and activations. Let's assume that a network has $L$ layers with learnable parameters
 $\{W_1, W_2, \ldots, W_L\}$, and let $\theta$ denote the collection of all trainable parameters.
 For a supervised learning problem, the model is trained by minimizing the empirical risk
 
@@ -1703,659 +1818,6 @@ backends to accelerate. In the context of this thesis, pruning is therefore most
 leads to structural simplification of the model, such as reducing channels, filters, or blocks in a
 way that improves actual inference latency and energy efficiency on edge hardware.
 
-
-\section{Apache TVM}
-
-Apache TVM is an open-source machine learning compiler stack designed to transform high-level model
-descriptions into efficient executable code for diverse hardware targets, including CPUs, GPUs,
-and specialized accelerators. In contrast to framework-centric execution, where a model is typically
-run as a sequence of library calls inside a general-purpose runtime, TVM adopts a compiler-first
-approach: the model is imported, represented in intermediate forms, transformed through a series
-of optimizations, lowered into tensor programs, and finally compiled into target-specific code and
-runtime artifacts. The central motivation behind TVM is performance portability, that is, the ability
-to obtain efficient inference across heterogeneous hardware without having to manually rewrite kernels
-for each platform ~\cite{chen2018tvm}.
-
-Deep learning frameworks such as PyTorch and TensorFlow make models easy to define, train, and export,
-but they do not necessarily produce binaries that are well optimized for every deployment target.
-Their default execution paths often depend on pre-existing backend libraries and general-purpose
-runtimes, which may leave performance on the table, especially on edge devices or less common
-architectures. TVM aims to close this gap by treating model deployment as a compiler problem.
-Instead of only selecting from a fixed set of vendor-provided kernels, it can transform the graph,
-generate low-level tensor code, and tune the generated implementation for the target hardware.
-
-From a systems perspective, TVM can be understood as a multi-stage compilation pipeline:
-
-\begin{enumerate}
-    \item \textbf{Frontend import.} Models are imported from formats such as ONNX, TensorFlow, or
-    framework-exported graphs and translated into TVM's internal representation.
-    \item \textbf{Graph-level optimization.} High-level transformations are applied, such as constant
-    folding, dead-code elimination, operator fusion, and layout rewriting.
-    \item \textbf{Lowering to tensor programs.} Individual operators are lowered into explicit loop- and
-    tensor-based computations that expose opportunities for schedule optimization.
-    \item \textbf{Schedule optimization and tuning.} The compiler explores implementation choices such as
-    tiling, loop reordering, vectorization, unrolling, parallelization, memory placement, and thread binding.
-    \item \textbf{Code generation.} The optimized tensor programs are translated into target-specific code,
-    for example via LLVM for CPUs or CUDA for NVIDIA GPUs.
-    \item \textbf{Runtime packaging and execution.} The compiled artifact is packaged together with a runtime
-    component, such as a graph executor, virtual machine, or ahead-of-time runtime, depending on the deployment
-    setting.
-\end{enumerate}
-
-The key idea behind TVM is that performance optimization should occur at multiple abstraction levels.
-At the graph level, TVM can simplify and restructure the model to reduce overhead and memory traffic.
-At the operator level, it can search for efficient implementations of the remaining kernels. This is
-especially important because deep learning performance is often determined not only by arithmetic cost,
-but also by memory access patterns, tensor layout, synchronization overhead, and the degree to which
-the generated kernels match the microarchitectural properties of the target hardware. In this sense,
-TVM differs from a pure runtime system: it does not simply execute a graph, but attempts to synthesize
-an efficient implementation of that graph for a specific target.
-
-A major contribution of TVM is the separation between the computation and the schedule.
-The computation describes what is to be computed, while the schedule describes how the
-computation is mapped to hardware. For example, the same convolution can be implemented with different
-tile sizes, loop orders, vector widths, thread mappings, and memory staging strategies. By exposing
-these choices explicitly, TVM enables systematic optimization instead of relying solely on fixed library
-kernels. This design is particularly valuable on hardware where vendor libraries are unavailable,
-suboptimal, or narrowly tuned for a limited set of workloads.
-
-Another important feature of TVM is automated tuning. Rather than requiring all schedules to be written
-manually, TVM can search over a space of candidate implementations and evaluate them on the target device.
-The goal is to discover schedules that best exploit the target architecture's compute resources, cache
-hierarchy, memory bandwidth, and parallel execution model. In practice, this means that TVM can adapt
-the same model to very different platforms, ranging from embedded ARM CPUs to NVIDIA GPUs and more
-specialized accelerators. This tuning-based approach is one of the main reasons TVM is attractive for
-research and deployment on heterogeneous edge hardware.
-
-TVM is particularly appealing in scenarios where model deployment must go beyond standard inference APIs.
-For example, it allows the developer to inspect intermediate representations, influence optimization
-passes, control scheduling decisions, and integrate custom compilation flows. This makes it useful not
-only as a deployment framework, but also as a research platform for studying compiler effects on
-machine learning inference. In the context of edge AI, where latency, memory traffic, and hardware
-utilization are critical, this level of control can be a major advantage.
-
-At the same time, TVM also has several limitations. First, achieving strong performance often depends on
-the quality of the tuning process. An untuned TVM build may perform only modestly better than a generic
-runtime, and in some cases may perform worse. Second, the compilation workflow is more complex than that
-of more deployment-oriented frameworks such as ONNX Runtime or TensorRT. This complexity increases the
-engineering effort required to build a stable pipeline, especially when dealing with dynamic shapes,
-unsupported operators, or custom layers. Third, while TVM offers broad flexibility, this flexibility
-comes with a steeper learning curve: understanding its IR structure, scheduling model, and tuning workflow
-typically requires considerably more compiler knowledge than using a runtime-oriented backend. These
-trade-offs make TVM powerful, but not always the most practical choice for rapid deployment.
-
-Compared with TensorRT, TVM is generally more open and more flexible, but often less turnkey.
-TensorRT is highly optimized for NVIDIA GPUs and provides aggressive graph- and kernel-level
-optimizations with relatively little manual effort, making it very effective for production inference
-on supported NVIDIA platforms. However, TensorRT is tied to the NVIDIA ecosystem and offers less
-control over compiler internals. TVM, by contrast, can target a broader range of devices and allows
-deeper intervention into compilation and scheduling, which is advantageous for research and for
-non-standard hardware targets. Compared with ONNX Runtime, TVM typically provides more opportunities
-for hardware-specific code generation and tuning, whereas ONNX Runtime emphasizes broad operator support,
-ease of use, and stable execution through execution providers. Thus, TVM occupies a distinctive position:
-it is best viewed not merely as an inference runtime, but as a programmable optimization stack for
-machine learning deployment.
-
-Overall, the main strength of TVM lies in its ability to bridge the gap between high-level model
-representation and low-level hardware-aware optimization. Its compiler-driven design makes it particularly
-relevant when standard backends do not fully exploit the target platform, or when the goal is to study
-how graph transformations, scheduling, and code generation influence end-to-end inference performance.
-For this reason, TVM is a compelling framework in research on compiler-aware optimization of deep learning
-models for edge devices.
-
-One of the central graph optimizations performed by TVM is operator fusion. Instead of executing each
-operation independently, multiple adjacent operations can be merged into a single fused region. This
-reduces kernel launch overhead, avoids writing intermediate tensors to memory, and may improve cache
-reuse.
-
-A common example in neural networks is the fusion of convolution, bias addition, and activation:
-
-\begin{equation}
-y = \mathrm{ReLU}(\mathrm{Conv}(x, w) + b)
-\end{equation}
-
-Without fusion, this sequence may be executed as three separate kernels:
-
-\begin{enumerate}
-\item convolution,
-\item elementwise bias addition,
-\item activation.
-\end{enumerate}
-
-With fusion, the same sequence can be lowered into one kernel that computes the final output directly:
-
-\begin{equation}
-y_{n,c,h,w} = \max \left(0,\; \sum_{r,s,k} x_{n,k,h+r,w+s} \cdot w_{c,k,r,s} + b_c \right)
-\end{equation}
-
-This eliminates the need to materialize the intermediate tensor produced by the convolution before
-activation.
-
-A simplified illustration of the transformation is shown below:
-
-\begin{minted}[fontsize=\small, breaklines=true]{text}
-
-Before fusion:
-conv2d -> bias_add -> relu
-
-After fusion:
-
-fused_conv2d_bias_relu
-
-\end{minted}
-
-In practice, TVM identifies fusible patterns during graph transformation passes and groups them into
-larger composite functions that are later lowered as a unit.
-
-
-\paragraph{Tensor expression abstraction.}
-
-
-At the operator level, TVM uses tensor-based abstractions to describe computation. In the original TVM
-design, a tensor expression specifies what should be computed, while a separate schedule specifies
-how it should be executed on hardware. This separation is fundamental because the same mathematical
-operation can be implemented efficiently in many different ways depending on the target architecture.
-
-
-For example, matrix multiplication can be expressed as:
-\begin{equation}
-C[i,j] = \sum_k A[i,k] \cdot B[k,j]
-\end{equation}
-
-A simplified TVM tensor-expression implementation is shown below.
-
-\begin{minted}[fontsize=\small, breaklines=true]{python}
-
-from tvm import te
-# Problem size
-M, N, K = 1024, 1024, 1024
-# Placeholders
-A = te.placeholder((M, K), name="A")
-B = te.placeholder((K, N), name="B")
-# Reduction axis
-k = te.reduce_axis((0, K), name="k")
-# Compute definition
-C = te.compute(
- (M, N),
-lambda i, j: te.sum(A[i, k] * B[k, j], axis=k),
-name="C"
-)
-\end{minted}
-
-
-This definition describes the mathematical computation only. It does not yet specify loop ordering,
-blocking, vectorization, or parallel execution.
-
-
-\paragraph{Scheduling and kernel mapping.}
-To obtain an efficient implementation, TVM applies scheduling decisions that determine how the tensor
-computation maps to loops, threads, and memory. Typical transformations include tiling, loop splitting,
-reordering, vectorization, unrolling, and thread binding.
-A simplified scheduling example for matrix multiplication on CPU is shown below:
-
-\begin{minted}[fontsize=\small, breaklines=true]{python}
-s = te.create_schedule(C.op)
-i, j = C.op.axis
-k = C.op.reduce_axis[0]
-# Tile output axes
-io, ii = s[C].split(i, factor=32)
-jo, ji = s[C].split(j, factor=32)
-# Reorder loops
-s[C].reorder(io, jo, k, ii, ji)
-# Parallelize outer loops
-s[C].parallel(io)
-# Vectorize innermost loop
-s[C].vectorize(ji)
-
-\end{minted}
-
-Here, tiling improves locality, parallelization distributes work across CPU cores, and vectorization
-maps the innermost loop onto SIMD instructions. On GPUs, the same computation would instead be mapped
-to thread blocks and warps.
-
-
-A simplified CUDA-style schedule might look as follows:
-
-\begin{minted}[fontsize=\small, breaklines=true]{python}
-bx, tx = s[C].split(i, factor=16)
-by, ty = s[C].split(j, factor=16)
-s[C].bind(bx, te.thread_axis("blockIdx.x"))
-s[C].bind(by, te.thread_axis("blockIdx.y"))
-s[C].bind(tx, te.thread_axis("threadIdx.x"))
-s[C].bind(ty, te.thread_axis("threadIdx.y"))
-
-\end{minted}
-
-
-Such transformations demonstrate that TVM does not merely call a pre-existing kernel; rather, it can
-generate a hardware-aware implementation by explicitly controlling the execution structure.
-
-\paragraph{Fusion and memory traffic reduction.}
-
-The practical benefit of fusion can be understood through memory traffic. Suppose three operators are
-executed separately:
-
-\begin{equation}
-    z = \mathrm{ReLU}(x + y)
-\end{equation}
-
-If implemented naively as two kernels, the intermediate result \(u = x + y\) must first be written to
-memory and then read again by the activation kernel. With fusion, the output is computed directly:
-
-\begin{equation}
-z_i = \max(0, x_i + y_i)
-\end{equation}
-
-This reduces memory traffic from:
-\begin{equation}
-\text{read}(x) + \text{read}(y) + \text{write}(u) + \text{read}(u) + \text{write}(z)
-\end{equation}
-
-to:
-
-\begin{equation}
-\text{read}(x) + \text{read}(y) + \text{write}(z)
-\end{equation}
-
-For memory-bound workloads, such reductions can improve performance substantially, particularly on
-edge devices with limited memory bandwidth.
-
-
-
-\paragraph{Auto-tuning and search.}
-
-
-A major advantage of TVM is that these scheduling decisions need not be chosen manually. Instead,
-TVM can search over a space of candidate schedules and evaluate them on the target hardware. For
-example, the compiler may explore different tile sizes, vector widths, loop orders, or memory staging
-strategies in order to identify the implementation with the best measured latency.
-
-A simplified view of this process is:
-
-\begin{enumerate}
-\item define the computation,
-\item generate multiple candidate schedules,
-\item benchmark each candidate on the target device,
-\item select the best-performing schedule,
-\item compile the final executable.
-\end{enumerate}
-
-This search-based optimization is one of the reasons TVM is attractive for heterogeneous deployment:
-it can adapt the same model to different hardware backends without requiring a fully manual kernel
-engineering effort.
-
-
-
-
-\paragraph{Relation to this thesis.}
-
-
-In the context of this thesis, TVM is particularly relevant because it exposes the interaction between
-graph-level transformations and kernel-level execution efficiency. Unlike purely runtime-oriented
-frameworks, TVM allows direct control over lowering and scheduling decisions, which makes it suitable
-for studying how memory traffic, layout transformations, operator fusion, and target-specific code
-generation affect inference latency on edge platforms. This is especially valuable when analyzing
-whether bottlenecks arise from the model graph itself, from suboptimal kernel implementations, or from
-a mismatch between the deployed runtime and the target hardware.
-
-
-\section{TensorRT}
-
-As was already mentioned, TensorRT is NVIDIA's inference-oriented deep learning compiler and runtime for NVIDIA GPUs
-and selected NVIDIA
-accelerators. In contrast to portability-oriented compiler stacks such as Apache TVM, TensorRT is a vertically
-integrated deployment system that specializes a trained model for a concrete target platform, including a particular
-GPU architecture, precision regime, and software stack. The result of this specialization is a serialized engine
-(or plan file) that encodes a fixed execution strategy, including chosen kernels, tensor layouts, precision
-assignments, and memory planning decisions for the target
-device~\cite{nvidia_tensorrt_docs}.
-
-From a compiler perspective, TensorRT is best understood as a staged inference
-compilation pipeline. A model is first imported, typically through ONNX, into TensorRT's internal network
-representation. The builder then performs graph simplification and layer fusion, propagates shapes and precision
-constraints, enumerates alternative implementations for each layer or fused region, and benchmarks candidate
-implementations on the target hardware before serializing the final engine~\cite{nvidia_tensorrt_perf}.
-In this sense, TensorRT performs ahead-of-time empirical
-optimization: many decisions are not made analytically, but through target-dependent tactic evaluation.
-This design is one of the central reasons for its strong practical performance on NVIDIA hardware.
-
-A useful systems view is to separate TensorRT into several abstraction levels. At the top level, TensorRT operates
-on the model graph and applies graph-level rewrites such as constant folding, dead-layer elimination, concatenation
-simplification, and vertical or horizontal fusion. At the middle level, the builder maps each surviving operation
-or fused subgraph to a tactic, where a tactic denotes a concrete implementation strategy chosen from vendor libraries
-or internal kernels. At the lowest level, these tactics ultimately resolve to CUDA kernels executing on streaming
-multiprocessors, often using Tensor Core instructions when the operation type, data type, memory layout, and dimension
-alignment are suitable~.
-
-This multi-level structure is important because it explains where performance gains and bottlenecks actually arise.
-A TensorRT engine does not simply ``run convolutions faster.'' Instead, performance emerges from an interaction between
-graph rewrites, kernel selection, tensor layout choices, workspace allocation, and reduced-precision execution.
-For compute-dominated layers such as large convolutions and matrix multiplications, TensorRT attempts to select
-implementations that use Tensor Cores through libraries such as cuDNN and cuBLASLt, or through internally specialized
-kernels. For convolution in particular, many implementations reduce the operation to an implicit General Matrix
-Multiplication (GEMM)-like form, which
-allows the same blocked matrix multiplication machinery to be reused for deep learning
-workloads.
-This is one reason why matrix multiplication is the right mental model for understanding a large fraction of modern
-inference kernels: convolution, attention, and linear layers are often executed through GEMM-style tiled pipelines
-rather than through direct textbook formulations.
-
-Accordingly, the effective kernel stack beneath TensorRT can be summarized as follows. At the graph level, the model
-arrives as ONNX and is parsed into a TensorRT network. At the engine-building level, TensorRT partitions the graph into
-supported regions, fuses eligible operations, and benchmarks tactics. At the implementation level, these tactics are
-commonly backed by cuDNN, cuBLASLt, Tensor Core matrix-multiply pipelines, and, for unsupported or intentionally
-replaced regions, user-defined plugins. At runtime, the execution context launches the selected kernels on CUDA
-streams using the precompiled execution plan, without performing a second round of graph
-optimization. This layered view is especially useful in a compiler-aware thesis because it clarifies
-that TensorRT's optimization problem spans both graph compilation and kernel dispatch, but does not expose the full
-schedule space to the user in the way that TVM does.
-
-TensorRT's performance advantage is closely tied to NVIDIA hardware features, especially Tensor Cores and
-mixed-precision arithmetic. Tensor Cores provide very high throughput for matrix multiply-accumulate operations,
-but only when shapes, data layouts, and operand types satisfy hardware-specific constraints. Independent
-microbenchmarking work has shown that Tensor Core performance depends strongly on operand tiling, instruction form,
-and memory staging, meaning that nominal precision support alone is not sufficient to guarantee high realized
-throughput. For inference, this is highly relevant: the theoretical gain from FP16, BF16, TensorFloat-32 (TF32), or INT8 is achieved
-only when the surrounding kernel implementation can sustain data movement and feed the compute units efficiently.
-TensorRT's tactic-selection mechanism exists precisely to navigate this design space on a concrete target
-device.
-
-An important practical issue is operator support. TensorRT does not execute arbitrary ONNX graphs without restriction.
-Instead, the ONNX parser supports a large but incomplete subset of ONNX, and unsupported operators must either be
-rewritten, decomposed into supported subgraphs, or implemented as plugins
-. This means that deployment success depends not
-only on the neural network architecture, but also on how the model is exported. Two ONNX graphs with equivalent
-mathematical meaning can lead to different TensorRT outcomes if one export pattern matches TensorRT-supported
-operators and fusion rules more closely than the other. This is particularly important in research codebases,
-where novel blocks are often expressed as long sequences of primitive operators that are semantically simple but
-structurally unfriendly to vendor parsers and fusion passes.
-
-For this reason, TensorRT's plugin interface is a central mechanism for controlled intervention. In current TensorRT
-releases, custom layers are implemented through the \path{IPluginV3} interface, while earlier plugin APIs are
-deprecated. A plugin declares its inputs, outputs,
-formats, data types, shape behavior, and runtime implementation, and is then inserted into the network either
-programmatically or through ONNX parser integration. In the common ONNX-based workflow, the user first performs
-subgraph surgery, typically with ONNX GraphSurgeon, replacing a region of the exported graph with a custom node
-whose operator name matches the registered plugin creator. TensorRT then parses that node as a plugin layer and
-includes it as a first-class component during engine building. This is the cleanest route for injecting a hand-written
-CUDA implementation into an otherwise TensorRT-optimized model.
-
-Conceptually, plugin injection can occur in three stages. First, a subgraph is identified whose default lowering is
-unsupported or inefficient. Second, that region is replaced in the ONNX graph by a plugin node carrying the required
-metadata or serialized weights. Third, the plugin shared library is loaded during engine build and runtime so that
-TensorRT can benchmark the plugin against surrounding layers and embed the plugin into the final engine
-plan. This mechanism is narrow
-compared with a general compiler IR transformation framework, but it is highly valuable in practice because it permits
-targeted replacement of persistent bottlenecks without abandoning the rest of TensorRT's optimization pipeline.
-
-The plugin path also makes the kernel stack visible in a way that the standard TensorRT workflow often does not.
-When a model is executed entirely through built-in TensorRT support, the concrete backend kernels are mostly opaque.
-By contrast, a custom plugin forces the developer to specify the exact computational strategy: whether the operation
-is implemented as a direct CUDA kernel, as a CUTLASS-based implicit GEMM pipeline, as a cuBLASLt matrix multiplication
-with fused epilogues, or through another low-level approach. This matters for research because these choices correspond
-to different trade-offs in arithmetic intensity, shared-memory usage, tensor layout, and fusion opportunities. In other
-words, plugins are not only an extensibility mechanism; they are an experimental interface for studying what TensorRT
-leaves on the table.
-
-TensorRT does provide limited introspection tools that are useful for this purpose. The engine inspector and
-\path{trtexec} can expose layer information, per-layer runtimes, and selected engine structure via flags such
-as \texttt{--profilingVerbosity=detailed}, \path{--dumpLayerInfo}, and
-\path{--dumpProfile}. While these tools do not reveal full
-internal scheduling logic, they are sufficient to identify whether overhead is dominated by specific kernels, reformat
-operations, shape handling, or data transfers. Combined with Nsight Systems and Nsight Compute, they allow the
-researcher to bridge the gap between graph-level descriptions and actual kernel execution on the GPU.
-
-Compared with Apache TVM, TensorRT offers a narrower but more mature optimization surface. TVM exposes intermediate
-representations, schedule search, tensorization, and generated code, making it suitable for research on compilation
-and code generation across different hardware targets~\cite{chen2018tvm, zheng2020ansor}. TensorRT instead prioritizes
-deployment effectiveness on one hardware family, relying on proprietary tactic libraries, empirically tuned heuristics,
-and vendor-maintained kernels. Compared with ONNX Runtime, TensorRT is less general but typically more aggressive on
-supported NVIDIA targets: ONNX Runtime organizes acceleration through execution providers, including both CUDA EP and
-TensorRT EP, and therefore emphasizes portability and broad operator coverage over deep specialization to a single
-kernel ecosystem. This distinction is analytically
-important: ONNX Runtime is primarily a runtime abstraction layer over multiple backends, whereas TensorRT is itself
-a backend compiler and engine builder.
-
-TensorRT also has important limitations. First, unsupported operators, dynamic control flow, and export idiosyncrasies
-can prevent full graph lowering or degrade fusion quality. Second, the engine is strongly tied to the target platform
-and should be treated as hardware- and software-specific rather than portable. Third, the user has only partial
-visibility into why a particular tactic was chosen,
-which complicates rigorous compiler analysis. Finally, per-layer or per-region optimization can still leave global
-inefficiencies unresolved, especially when model performance is limited by reformatting, synchronization, or memory
-traffic between otherwise efficient kernels. Recent systems work on GPU inference and tensor-program optimization
-repeatedly shows that kernel-by-kernel execution can remain suboptimal relative to more holistic scheduling and fusion
-approaches. This observation helps explain why even TensorRT-optimized models
-can retain stubborn bottlenecks around custom architectural blocks.
-
-\paragraph{Relation to this thesis.}
-TensorRT is relevant to this thesis in two distinct roles. First, it is the strongest practical baseline for
-low-latency inference on the Jetson Orin Nano GPU and therefore serves as a reference point for evaluating alternative
-deployment paths such as ONNX Runtime and Apache TVM. Second, its plugin interface creates a controlled experimental
-boundary inside an otherwise vendor-optimized stack. By replacing a single YOLOv8n subgraph, such as a C2f block, with
-a custom plugin, it becomes possible to study not only whether a hand-tuned kernel improves latency, but also where the
-remaining time is spent: in arithmetic kernels, tensor reformatting, launch overhead, or memory movement between
-optimized and non-optimized regions. This makes TensorRT especially useful for a compiler-aware investigation of the
-boundary between graph-level optimization and kernel-level specialization.
-
-%\section{Performance Bottlenecks in ML Inference}
-%
-%Deploying neural networks efficiently requires understanding where and why execution time is
-%lost. Bottlenecks in ML inference arise from an interplay of memory architecture, data layout,
-%compiler decisions, and workload scheduling. This section surveys the main categories of
-%performance limitations encountered in practice and explains the mechanisms behind each.
-%
-%A workload is compute-bound when execution time scales with the number of
-%multiply-accumulate (MAC) operations and shrinks proportionally with added arithmetic
-%throughput. It is memory-bound when the processor stalls waiting for data rather than
-%computing. The Roofline model, introduced by Williams et al.~\cite{williams2009roofline},
-%provides a concise way to diagnose which regime applies by relating an operation's
-%arithmetic intensity (FLOPs per byte of memory traffic) to the hardware's peak
-%compute-to-bandwidth ratio.
-%
-%The classical algorithmic response to memory pressure is blocking (also called
-%tiling): partition the matrices $A$, $B$, and accumulator $C$ into sub-tiles that fit
-%in L2 or L1 cache, so each element is reused many times before being evicted.  A
-%multiply-accumulate step then becomes:
-%\[
-%  C[i,j] \mathrel{+}= \sum_{k} A[i,k] \cdot B[k,j],
-%\]
-%where the tile sizes are chosen to maximise reuse for a specific cache capacity. Compute-in-memory
-%(CIM) proposals carry this principle further by performing the multiply-accumulate operations
-%directly inside the memory array, eliminating the data-movement cost
-%entirely~\cite{emer_sze_chen_2019_dnn_accel_tutorial}.
-%
-%\subsection{Memory Layout: NCHW vs.\ NHWC}
-%
-%The physical order in which tensor elements are stored in memory has a significant effect on
-%vectorisation efficiency and cache utilisation. Two conventions dominate deep learning
-%frameworks: NCHW (batch, channels, height, width), where the channel dimension is
-%innermost after the batch axis, and NHWC (batch, height, width, channels), where
-%spatial positions group together.
-%
-%For convolutions on NVIDIA GPUs with Tensor Cores, NHWC is typically preferred because Tensor Core convolution kernels
-%operate most efficiently when the channel dimension is the fastest-varying dimension in memory. NVIDIA documents that
-%Tensor Core convolutions require NHWC layout internally and are fastest when input tensors are already stored as NHWC.
-%NCHW tensors can still use Tensor Cores, but cuDNN/TensorRT may insert NCHW-to-NHWC transformations, whose overhead
-%can be measurable, especially when layout conversion cost is large relative to the convolution itself.
-%
-%On CPUs, oneDNN often prefers blocked memory formats such as nChw8c or nChw16c, where the channel dimension is split
-%into SIMD-sized blocks. This lets convolution kernels operate on vectors efficiently and improves cache locality.
-%If the channel count is not a multiple of the block size, oneDNN may use zero-padding in the blocked dimension so
-%kernels can avoid special tail-handling code~\cite{onednn_memory_formats, onednn_memory_format_tag}.
-%
-%Layout mismatches across framework boundaries are a common source of latency. A model
-%exported from PyTorch in NCHW format and consumed by a TensorRT engine that internally
-%prefers NHWC will incur a transpose operation at each I/O boundary. Compilers such as TVM
-%and TensorRT insert explicit layout-conversion nodes during graph compilation to ensure
-%internal uniformity, but when mixed-precision layers with different layout requirements
-%appear adjacently, the conversion overhead can dominate a short operator's runtime. Profiling
-%for unnecessary transposes is therefore an important step in deployment
-%optimisation~\cite{chen2018tvm}.
-%
-%\subsection{Tensor Transformations for Efficient Convolution}
-%
-%Direct computation of a convolution requires $O(K^{2} \cdot C_{in} \cdot C_{out} \cdot H
-%\cdot W)$ multiplications. Two classical transformations reduce this cost by restructuring
-%the computation.
-%
-%\paragraph{im2col.}
-%The im2col transformation unfolds each receptive field of the input feature map into a
-%column of a matrix, converting the convolution into a single general matrix multiplication
-%(GEMM). This allows highly tuned BLAS libraries to be applied directly. The trade-off is
-%memory: unfolding a $K \times K$ receptive field over $C_{in}$ channels creates a matrix
-%with $K^{2} C_{in}$ rows, increasing the memory footprint by a factor of $K^{2}$ compared
-%to the original activation tensor. For large kernels or high-resolution feature maps, this
-%expansion can stress the cache hierarchy and reduce the arithmetic-intensity gains expected
-%from GEMM.
-%
-%\paragraph{Winograd's algorithm.}
-%The Winograd minimal filtering algorithm reduces the number of multiplications required for
-%small convolutions (typically $3\times3$ with stride 1) from $K^{2}$ to as few as
-%$(K+r-1)^{2}/r^{2}$ multiplications per output tile of size $r$, at the cost of additional
-%additions and a change of basis. For the common $F(2\times2, 3\times3)$ case the number of
-%multiplications drops from 36 to 16 per $2\times2$ output tile, a 2.25$\times$ reduction.
-%Liu et al.~\cite{liu2021optimizing} demonstrate that aligning the Winograd basis transformation
-%with Tensor Core tile sizes can yield further speed-ups on modern GPUs. A combined
-%Im2col-Winograd approach~\cite{zhang2024im2col} decomposes an $N$-dimensional convolution
-%into a sequence of 1-D Winograd transforms applied along each spatial axis, avoiding the
-%memory explosion of standard im2col while retaining compatibility with NHWC layout. Reported
-%speed-ups over cuDNN reach up to $2.05\times$ for certain configurations on contemporary
-%NVIDIA hardware.
-%
-%The Winograd algorithm introduces numerical instability at larger tile sizes, so it is
-%typically restricted to $3\times3$ and $5\times5$ kernels and disabled for depthwise
-%separable convolutions, where its arithmetic savings are smaller.
-%
-%\subsection{Operator Fusion and Its Limitations}
-%
-%Operator fusion merges adjacent computation nodes in the execution graph into a single
-%compiled kernel, eliminating the round-trip to global memory that would otherwise be required
-%between them. The performance benefit is straightforward: if a convolution is followed by
-%batch normalisation and a ReLU activation, executing them as three separate kernels requires
-%writing intermediate feature maps to DRAM and reading them back twice. A fused kernel keeps
-%these intermediate values in registers or shared memory, improving both memory traffic and
-%kernel-launch overhead.
-%
-%Frameworks such as TensorRT, TVM, and XLA apply fusion aggressively during graph
-%compilation~\cite{nvidia_tensorrt_dev_guide, chen2018tvm, frostig2019compiling}. However,
-%fusion is not always possible, and failed fusion silently degrades performance.
-%
-%A representative example is the Swish/SiLU activation, defined as $\sigma(x) = x
-%\cdot \text{sigmoid}(x)$. Because SiLU requires a higher-precision intermediate value for
-%the sigmoid computation to maintain accuracy, TensorRT does not always fuse
-%it with a preceding INT8-quantised convolution: the precision mismatch forced an explicit
-%dequantise-compute-requantise sequence, inserting two memory transactions where a fused
-%kernel would have required none~\cite{nvidia_tensorrt_docs}. A similar issue arises with
-%GELU and its approximations in transformer blocks: the $\tanh$ component is not
-%directly representable in tensor-core arithmetic, so compilers frequently emit it as a
-%separate scalar kernel, breaking the fusion chain from the preceding linear projection.
-%
-%Beyond specific operators, custom or user-defined operations that fall outside a compiler's supported operator set are
-%unconditionally excluded from fusion, creating a guaranteed memory bottleneck wherever such
-%operations appear in a graph. Profiling tools such as Nsight Systems expose these gaps as
-%short, rapidly repeating kernel launches with high idle time between them.
-%
-%\subsection{Ahead-of-Time vs.\ Just-in-Time Compilation}
-%
-%The timing of when a model graph is lowered to machine code fundamentally affects both
-%startup behaviour and peak throughput.
-%
-%\paragraph{Ahead-of-Time (AOT) compilation}
-%translates the model to a static binary during a build phase, before any inference request
-%arrives. Because compilation time is not charged to the end user, the compiler can afford
-%exhaustive search strategies such as evolutionary auto-tuning, polyhedral scheduling, and
-%multi-level tiling optimisation that would take minutes or hours to run. The resulting binary
-%has deterministic latency from the very first inference call, which is critical in real-time
-%systems where a single slow startup frame is unacceptable. TVM's \path{tvm compile} and
-%TensorRT's engine serialisation both follow the AOT model. The downside is rigidity:
-%a serialised engine is tied to a specific batch size, input resolution, and hardware target;
-%any change requires a full recompilation.
-%
-%\paragraph{Just-in-Time (JIT) compilation}
-%defers lowering to the moment a graph is first executed, using live information about actual
-%tensor shapes, data types, and hardware state. PyTorch's \path{torch.compile} backend and
-%TVM's dynamic shape support are JIT frameworks. JIT compilation can adapt to variable-length
-%inputs, dynamically chosen batch sizes, and runtime-detected hardware features that an AOT
-%compiler cannot anticipate at build time. Jia et al.~\cite{jia2024empowering} show that a
-%JIT kernel auto-generation system for in-browser edge inference achieves up to $8.2\times$
-%faster throughput within 30 seconds of first execution compared to pre-compiled baselines
-%on the same device, because it generates kernels precisely matched to the browser's WebGPU
-%backend. The cost is a warm-up latency: the first call to a JIT-compiled model is
-%substantially slower than subsequent calls, and in latency-sensitive pipelines this cold-start
-%penalty may be unacceptable.
-%
-%In practice, edge deployments almost universally prefer AOT: the target hardware is fixed,
-%the input resolution is known at design time, and the absence of a runtime compiler reduces
-%memory footprint. JIT strategies are more common in server-side or research settings where
-%flexibility outweighs determinism.
-%
-%\subsection{Batching: Throughput vs.\ Latency}
-%
-%Neural network inference throughput increases with batch size because larger batches amortise
-%fixed overheads - kernel launch costs, memory-allocation calls, and pipeline-fill latency -
-%across more output samples. On an NVIDIA edge GPU, batched inference can process up to
-%$2.4\times$ more inferences per second compared with single-sample execution when the
-%hardware's compute units would otherwise be underutilised~\cite{hao2023reaching}.
-%
-%However, batching fundamentally conflicts with latency requirements. A system that waits to
-%accumulate a batch of $B$ samples before dispatching inference will add a queuing delay
-%proportional to $B$ times the inter-arrival time of requests. In real-time applications such
-%as object detection in a live video stream, latency measured end-to-end includes this waiting
-%time, so large batches are counter-productive. The Sarathi-Serve
-%scheduler~\cite{agrawal2024taming} addresses this tension in LLM serving by splitting prefill
-%requests into equal-sized chunks that can be interleaved with ongoing decode batches, achieving
-%near-peak throughput without stalling low-latency decode streams. A simpler version of the
-%same principle applies to edge vision pipelines: processing frames one at a time preserves
-%temporal responsiveness, while offline evaluation tasks (e.g., dataset benchmarking) should
-%use the largest batch that fits in device memory.
-%
-%For deeply memory-bound workloads, batching also raises arithmetic intensity and can push
-%the operating point above the Roofline's bandwidth ceiling, transforming a memory-bound
-%regime into a compute-bound one. This transition is itself an argument for profiling at
-%multiple batch sizes when characterising a deployment target.
-%
-%\subsection{Underutilisation of Compute Resources}
-%
-%High peak compute throughput does not imply high utilised throughput. Several mechanisms
-%cause the hardware's arithmetic units to sit idle even when inference is actively running.
-%
-%\paragraph{Low GPU/NPU occupancy.}
-%GPU execution is organised into warps of 32 threads scheduled onto streaming multiprocessors
-%(SMs). A kernel with insufficient parallelism - for example, a $1\times1$ convolution with
-%a very small feature map - may launch fewer warps than the number of SMs, leaving most of
-%the chip idle. This is common in the deeper layers of a network where spatial resolution
-%has been reduced by pooling but the design has not increased channel count enough to
-%compensate.
-%
-%\paragraph{Memory-bandwidth-induced compute stalls.}
-%When operators are strongly memory-bound, arithmetic units stall waiting for cache misses to
-%be resolved. The processor appears busy from a utilisation-monitoring perspective but is
-%not executing useful arithmetic. This is the hardware manifestation of the memory-wall
-%problem described in Section~\ref{sec:mem_bottleneck}, and profiling tools distinguish it
-%by reporting a high ratio of memory-bound stall cycles to total active cycles.
-%
-%\paragraph{Small and fragmented kernel launches.}
-%Compilers that fail to fuse consecutive lightweight operators emit many short kernels in
-%rapid succession. Each kernel launch incurs a fixed overhead on the order of a few
-%microseconds, and for operations whose compute time is shorter than this overhead - such as
-%channel-wise bias additions, scalar multiplications, or simple element-wise activations -
-%the dispatch cost dominates execution time. Nsight Systems traces of unoptimised models
-%frequently reveal hundreds of sub-microsecond kernels occupying only a fraction of the
-%timeline while GPU utilisation reads low~\cite{nvidia_tensorrt_dev_guide}.
-%
-%\paragraph{Data-type and precision mismatches.}
-%Tensor Core hardware requires inputs to be aligned to specific multiples of the tile
-%dimension (typically multiples of 8 or 16 for INT8/FP16). When layer dimensions do not
-%satisfy this constraint - common in custom attention heads with non-power-of-two hidden
-%sizes - the compiler pads the tensors, and the padded elements consume bandwidth and compute
-%cycles without contributing to the result. Selecting model dimensions that are
-%hardware-aligned is therefore a design-time decision with measurable inference-time
-%consequences~\cite{markidis2018tensorcores}.
-
-\section{Relation to this thesis}
-
-\textcolor{red}{TODO}
-
 % ======= Theory =======
 \chapter{Theory}
 \label{chap:literature}
@@ -2428,7 +1890,7 @@ model behavior.
 
 \end{itemize}
 
-\section{Roofline Model}
+\section{Roofline Model Concept}
 
 The Roofline model, introduced by Williams et al.~\cite{williams2009roofline},
 provides an intuitive way to analyze whether a workload is limited by memory bandwidth
@@ -2568,22 +2030,38 @@ computational efficiency and predictive performance.
 
 While smooth activation functions such as SiLU have been shown to improve accuracy, recent work suggests that simpler
 functions like ReLU can offer advantages in terms of computational efficiency and activation
-sparsity \cite{mirzadeh2023relu}.
+sparsity~\cite{mirzadeh2023relu}.
 This sparsity can be exploited by hardware and compilers to reduce the number of
 effective computations, leading to improved inference performance.
 
 \chapter{Methodology}
 \noindent
 
-This chapter describes the methodology used to evaluate and optimize deep learning inference on edge-oriented hardware platforms. The study is centered on the YOLOv8n object detection model and investigates how compiler-based optimization frameworks, numerical precision reduction, structural model simplification, and low-level kernel customization affect inference performance and detection accuracy.
+This chapter describes the methodology used to evaluate and optimize deep learning inference on edge-oriented hardware
+platforms. The study is centered on the YOLOv8n object detection model and investigates how compiler-based optimization
+frameworks, numerical precision reduction, structural model simplification, and low-level kernel customization affect
+inference performance and detection accuracy.
 
-The methodology is organized as a sequence of experimental stages. First, a baseline is established using the original FP32 PyTorch implementation of YOLOv8n. Next, bottlenecks are analyzed using hardware-aware performance models and profiling tools. Based on the observed limitations, several optimization directions are explored, including framework-level compilation, quantization, precision reduction, pruning, and custom TensorRT plugin development. Each optimization is evaluated with respect to latency, throughput, and accuracy in order to characterize the trade-offs between performance and model quality.
+The methodology is organized as a sequence of experimental stages. First, a baseline is established using the original
+FP32 PyTorch implementation of YOLOv8n. Next, bottlenecks are analyzed using hardware-aware performance models and
+profiling tools. Based on the observed limitations, several optimization directions are explored, including
+framework-level compilation, quantization, precision reduction, pruning, and custom TensorRT plugin development.
+Each optimization is evaluated with respect to latency, throughput, and accuracy in order to characterize the
+trade-offs between performance and model quality.
 
 \section{Model Selection}
 
-YOLOv8n is selected as the reference model for this study. The model represents a practical and relevant target for edge deployment because it combines a compact architecture with competitive detection accuracy. It is widely used in real-world object detection tasks, is actively supported by the research and engineering community, and can be exported to multiple deployment backends. These properties make it suitable for comparative analysis across inference frameworks.
+YOLOv8n is selected as the reference model for this study. The model represents a practical and relevant target for
+edge deployment because it combines a compact architecture with competitive detection accuracy. It is widely used in
+real-world object detection tasks, is actively supported by the research and engineering community, and can be
+exported to multiple deployment backends. These properties make it suitable for comparative analysis across inference
+frameworks.
 
-From a methodological perspective, YOLOv8n is large enough to expose non-trivial optimization challenges, including operator fusion, memory movement overhead, kernel launch inefficiencies, and sensitivity to reduced precision. At the same time, it remains sufficiently lightweight to allow repeated experimentation, retraining, export, and validation on commonly available development hardware. This enables a controlled and reproducible study of both high-level and low-level optimization strategies.
+From a methodological perspective, YOLOv8n is large enough to expose non-trivial optimization challenges, including
+operator fusion, memory movement overhead, kernel launch inefficiencies, and sensitivity to reduced precision. At the
+same time, it remains sufficiently lightweight to allow repeated experimentation, retraining, export, and validation
+on commonly available development hardware. This enables a controlled and reproducible study of both high-level and
+low-level optimization strategies.
 
 \section{Overall Experimental Procedure}
 
@@ -2597,26 +2075,40 @@ The experimental workflow follows five main stages:
     \item Compare the resulting variants in terms of latency, throughput, and accuracy.
 \end{enumerate}
 
-This procedure ensures that each optimization step is assessed relative to a common reference and that conclusions are based on measurable changes in both performance and predictive quality.
+This procedure ensures that each optimization step is assessed relative to a common reference and that conclusions are
+based on measurable changes in both performance and predictive quality.
 
 \section{Baseline Establishment}
 
-The starting point of the study is the pretrained FP32 YOLOv8n model provided by Ultralytics and executed in the original PyTorch runtime. This baseline serves two purposes. First, it provides a reference for all later comparisons. Second, it makes it possible to determine whether the observed performance is already close to the limits of the target hardware or whether substantial optimization opportunities remain.
+The starting point of the study is the pretrained FP32 YOLOv8n model provided by Ultralytics and executed in the
+original PyTorch runtime. This baseline serves two purposes. First, it provides a reference for all later comparisons.
+Second, it makes it possible to determine whether the observed performance is already close to the limits of the target
+hardware or whether substantial optimization opportunities remain.
 
-The baseline is evaluated on the selected hardware platforms under controlled conditions. For each platform, inference latency and throughput are measured using repeated runs with warm-up iterations to reduce initialization effects. Accuracy is evaluated on the validation dataset using standard object detection metrics. These baseline results form the reference against which all optimized variants are compared.
+The baseline is evaluated on the selected hardware platforms under controlled conditions. For each platform, inference
+latency and throughput are measured using repeated runs with warm-up iterations to reduce initialization effects.
+Accuracy is evaluated on the validation dataset using standard object detection metrics. These baseline results form
+the reference against which all optimized variants are compared.
 
 \section{Bottleneck Analysis}
 
-After establishing the baseline, the next step is to determine the dominant performance limitations of the model on each platform. Two complementary approaches are used for this purpose: roofline-based reasoning and runtime profiling.
+After establishing the baseline, the next step is to determine the dominant performance limitations of the model on
+each platform. Two complementary approaches are used for this purpose: roofline-based reasoning and runtime profiling.
 
-The roofline model is used as a coarse analytical framework to determine whether performance is likely to be limited by memory bandwidth or by available compute throughput. This provides a hardware-aware interpretation of the measured performance and helps identify whether the main limitation arises from insufficient arithmetic intensity, inefficient memory access, or underutilization of the compute units.
+The roofline model is used as a coarse analytical framework to determine whether performance is likely to be limited
+by memory bandwidth or by available compute throughput. This provides a hardware-aware interpretation of the measured
+performance and helps identify whether the main limitation arises from insufficient arithmetic intensity, inefficient
+memory access, or underutilization of the compute units.
 
-To refine this analysis, profiling tools are used to inspect the execution of individual operators and kernels. This makes it possible to identify layers with high latency, excessive memory movement, frequent kernel launches, or inefficient execution patterns. In particular, the profiling stage is used to answer the following questions:
+To refine this analysis, profiling tools are used to inspect the execution of individual operators and kernels. This
+makes it possible to identify layers with high latency, excessive memory movement, frequent kernel launches, or
+inefficient execution patterns. In particular, the profiling stage is used to answer the following questions:
 
 \begin{itemize}
     \item Which layers dominate end-to-end inference time?
     \item Whether the execution is primarily memory-bound or compute-bound.
-    \item Whether the framework introduces avoidable overhead through layout conversions, intermediate buffers, or host-device synchronization.
+    \item Whether the framework introduces avoidable overhead through layout conversions, intermediate buffers, or
+    host-device synchronization.
     \item Whether operator fusion and backend-specific optimizations are effectively applied.
 \end{itemize}
 
@@ -2628,47 +2120,152 @@ Based on the bottleneck analysis, the study investigates several classes of opti
 
 \subsection{Compiler and Runtime Optimization}
 
-The first optimization direction consists of evaluating how different inference frameworks transform and execute the same model. Starting from the original PyTorch implementation, the model is exported or compiled for alternative backends such as TensorRT and TVM. The purpose of this comparison is to assess how much performance can be gained from compiler-level graph transformations, backend-specific kernel selection, operator fusion, and scheduling optimizations.
+The first optimization direction consists of evaluating how different inference frameworks transform and execute the
+same model. Starting from the original PyTorch implementation, the model is exported or compiled for alternative
+backends such as TensorRT and TVM. The purpose of this comparison is to assess how much performance can be gained
+from compiler-level graph transformations, backend-specific kernel selection, operator fusion, and scheduling
+optimizations.
 
-This stage is not limited to reporting end-to-end latency. It also examines how the internal execution differs between backends, for example in the number of kernels launched, the use of fused operators, the presence of data layout transformations, and the distribution of execution time across layers. In this way, the comparison provides insight not only into which backend is faster, but also into why it is faster.
+This stage is not limited to reporting end-to-end latency. It also examines how the internal execution differs between
+backends, for example in the number of kernels launched, the use of fused operators, the presence of data layout
+transformations, and the distribution of execution time across layers. In this way, the comparison provides insight
+not only into which backend is faster, but also into why it is faster.
 
 \subsection{Numerical Precision Reduction}
 
-The second optimization direction focuses on reducing numerical precision in order to decrease memory traffic and accelerate arithmetic operations. Two forms of precision reduction are considered in this work.
+The second optimization direction focuses on reducing numerical precision in order to decrease memory traffic and
+accelerate arithmetic operations. Two forms of precision reduction are considered in this work.
 
-First, inference in FP16 is evaluated against the FP32 baseline. This comparison isolates the effect of reduced floating-point precision and shows whether the target hardware benefits from half-precision execution.
+First, inference in FP16 is evaluated against the FP32 baseline. This comparison isolates the effect of reduced
+floating-point precision and shows whether the target hardware benefits from half-precision execution. This step is
+performed through ONNX Framework. It provides a dedicated conversion utility, that transforms a floating-point model
+into a half-precision one without retraining. The converter traverses every node and tensor initializer in the graph:
+weight tensors stored as \path{float32} NumPy arrays are recast to \path{float16} in place, and constant nodes are
+rewritten to carry 16-bit values. Where the original graph boundary expects 32-bit input or produces 32-bit output,
+explicit \path{Cast} nodes are inserted to handle the precision transition transparently. Certain operators whose
+numerical stability is sensitive to reduced range, such as \path{LayerNormalization} or some reduction ops, can be
+placed on a blocklist; the converter keeps those nodes in \path{float32} and surrounds them with \path{Cast} nodes
+so the rest of the graph remains in FP16. The result is a structurally identical ONNX graph in which most weights,
+activations, and intermediate tensors occupy half the memory and can be executed with FP16 arithmetic on any backend
+that supports it, including TensorRT and ONNX Runtime with CUDA execution provider.
 
-Second, quantization to INT8 is explored where supported by the backend. Quantization has the potential to reduce model size, memory bandwidth requirements, and arithmetic cost, but it may also introduce accuracy degradation. Therefore, each quantized model is evaluated not only in terms of runtime performance but also in terms of detection quality. The purpose of this stage is to determine whether the performance gains justify the loss, if any, in predictive accuracy.
+Second, quantization to INT8 is explored where supported by the backend. Quantization has the potential to reduce model
+size, memory bandwidth requirements, and arithmetic cost, but it may also introduce accuracy degradation. Therefore,
+each quantized model is evaluated not only in terms of runtime performance but also in terms of detection quality. The
+purpose of this stage is to determine whether the performance gains justify the loss, if any, in predictive accuracy.
+Quantization is explored via framework, which actively support it. Reducing precision from \path{float32} to
+\path{int8} is more involved than the FP16 cast because 8-bit integers cannot represent the same dynamic range as
+floating-point values. The mapping requires a learned scale factor and a zero point per tensor, so that
+a floating-point value is approximated as:
+
+\begin{equation}
+    x \approx s \cdot (x_{\mathrm{int8}} - z), \quad x_{\mathrm{int8}} = \mathrm{clamp}\!\left(\left\lfloor \frac{x}{s}
+    \right\rceil + z,\; -128,\; 127\right)
+\end{equation}
+
+The scale and zero point are not free parameters, and they must be determined from the actual distribution
+of values the tensor takes during inference.
+This calibration step was performed by gathering and running a small representative dataset through the unquantized
+network and collecting per-tensor activation statistics.
+Weights are quantized per-channel (one scale per output channel) to preserve accuracy;
+activations are quantized per-tensor for runtime efficiency, but it can vary by the choice made by framework developers
+and chosen setting. The calibration dataset was drawn from the COCO training split, the same distribution on which
+YOLOv8n was originally trained.
+Three subset sizes were evaluated: 0.1\%, 1\%, and 10\% of the training set, corresponding to approximately 118, 1,180,
+and 11,800 images respectively. The 1\% subset was used as the primary calibration set throughout the report, in line
+with framework documentation recommendations and confirmed by preliminary accuracy tests.
+Subset size mainly affects the accuracy of the post-quantization network: a larger set provides a more faithful estimate
+of the activation distribution, while a smaller set reduces calibration time with diminishing accuracy cost beyond a
+certain threshold.
+The 1\% subset was found to represent the activation distribution sufficiently for the purposes of this evaluation.
 
 \subsection{Model Compression and Structural Simplification}
 
-The third optimization direction targets the structure of the model itself. Rather than relying only on framework-level improvements, this part of the study investigates whether the network can be simplified in ways that improve runtime characteristics.
+The third optimization direction targets the structure of the model itself. Rather than relying only on framework-level
+improvements, this part of the study investigates whether the network can be simplified in ways that improve runtime
+characteristics.
 
-Two approaches are considered. The first is pruning, which reduces model complexity by removing less important parameters or channels. The second is replacement of computationally expensive operations with simpler alternatives. In particular, the effect of replacing SiLU activations with ReLU is evaluated. This substitution is motivated by the fact that simpler activations may improve fusion opportunities and reduce kernel complexity, even if they slightly affect model accuracy.
+Pruning approach used in experiments was implemented in \texttt{manual\_yolov8\_pruner.py}, it performs targeted
+structural pruning directly on the YOLOv8n PyTorch model graph.
+The script accepts an explicit list of layer targets (e.g.\ \texttt{model.2.cv1},
+\texttt{model.4.m.0.cv2}) and applies output-channel pruning to each nominated convolutional block.
+Channel importance is estimated by the L2 norm of each output filter:
+\begin{equation}
+s_k = \left\lVert W_{k,:,:,:} \right\rVert_2, \quad k = 1, \ldots, C_{\mathrm{out}}
+\end{equation}
+where $W_k$ is the k-th output filter of the convolution weight tensor.
+The top- $\lfloor(1-r)\cdot C_{\mathrm{out}}\rceil$ channels ranked by this score are retained, with
+r being the per-block prune ratio and an optional rounding constraint (e.g.\ to a multiple of 8
+for hardware alignment).
+After each selected block is pruned, the script performs a full graph realignment pass: it propagates
+the updated channel indices through all downstream consumers, slicing input weight matrices accordingly
+and handling Concat, Upsample, and Detect nodes transparently.
+Special handlers manage the internal structure of C2f blocks (cv1 hidden dimension, bottleneck cv1 and
+cv2 paths) and the SPPF hidden channels.
+The pruned model is saved as a \texttt{.pt} checkpoint suitable for fine-tuning and subsequent ONNX
+export.
+The other researched optimization is a replacement of computationally expensive operations with simpler alternatives.
+In particular, the effect of replacing SiLU activations with ReLU is evaluated. This substitution is motivated by the
+fact that simpler activations may improve fusion opportunities and reduce kernel complexity, even if they slightly
+affect model accuracy. The SiLU activation substitution is applied directly to the PyTorch module tree before the model is
+exported to ONNX.
+Every \path{Conv} wrapper in the Ultralytics model carries an \path{.act} attribute; by iterating
+over all named modules and replacing each \path{nn.SiLU()} instance with \path{nn.ReLU()}, the
+entire network is converted in-place without altering any weight tensors.
+The modified model is then saved as a \path{.pt} file and passed to the standard Ultralytics
+\path{model.export(format="onnx")} pipeline.
+Because the substitution happens at the PyTorch level, the resulting ONNX graph contains \path{Relu}
+nodes in all positions where \path{Sigmoid}–\path{Mul} pairs (the ONNX decomposition of SiLU) would
+otherwise appear, allowing downstream compilers and runtimes to fuse the activation with the preceding
+convolution more readily.
 
-The purpose of this stage is to understand whether modest architectural simplifications can produce a favorable trade-off between accuracy and efficiency, especially on hardware with limited compute capability or reduced support for complex fused kernels.
+The purpose of this stage is to understand whether modest architectural simplifications can produce a favorable
+trade-off between accuracy and efficiency, especially on hardware with limited compute capability or reduced support
+for complex fused kernels.
 
 \subsection{Low-Level TensorRT Customization}
 
-The final optimization direction extends beyond standard framework usage and examines low-level customization within TensorRT. In this stage, custom plugins are developed to replace selected subgraphs with tailored implementations. The main case considered in this work is a custom plugin for the C2f block.
+The final optimization direction extends beyond standard framework usage and examines low-level customization within
+TensorRT. In this stage, custom plugins are developed to replace selected subgraphs with tailored implementations. The
+main case considered in this work is a custom plugin for the C2f block.
 
-The objective of this step is to investigate whether performance can be improved further by reducing backend overhead, controlling kernel behavior more explicitly, or eliminating inefficient execution patterns that are not resolved by the default TensorRT conversion pipeline. This stage complements the framework-level comparison by showing the extent to which manual low-level intervention can outperform standard automated optimization.
+The objective of this step is to investigate whether performance can be improved further by reducing backend overhead,
+controlling kernel behavior more explicitly, or eliminating inefficient execution patterns that are not resolved by the
+default TensorRT conversion pipeline. This stage complements the framework-level comparison by showing the extent to
+which manual low-level intervention can outperform standard automated optimization.
+
+This optimization is discussed in more details in the corresponding results section.
 
 \section{Evaluation Criteria}
 
 All model variants are evaluated using the same set of criteria in order to ensure consistent comparison.
 
-The primary performance metrics are inference latency and throughput. Latency is used to measure the response time of a single inference pass, while throughput indicates the sustained processing rate under repeated execution. Where relevant, profiling data is also used to analyze kernel-level execution time and the contribution of individual layers to the total runtime.
+The primary performance metrics are inference latency and throughput. Latency is used to measure the response time of
+a single inference pass, while throughput indicates the sustained processing rate under repeated execution. Where
+relevant, profiling data is also used to analyze kernel-level execution time and the contribution of individual
+layers to the total runtime.
 
-The primary quality metric is object detection accuracy on the validation dataset. Standard detection metrics are used to verify whether a given optimization preserves acceptable predictive performance. This is particularly important for quantization, pruning, and activation replacement, where improvements in runtime may come at the cost of degraded detection quality.
+The primary quality metric is object detection accuracy on the validation dataset. Standard detection metrics are
+used to verify whether a given optimization preserves acceptable predictive performance. This is particularly important
+for quantization, pruning, and activation replacement, where improvements in runtime may come at the cost of degraded
+detection quality.
 
-The final analysis therefore considers both efficiency and accuracy, with emphasis on the trade-off between them. An optimization is not treated as beneficial solely because it accelerates execution; it must also maintain sufficient model quality for practical deployment.
+The final analysis therefore considers both efficiency and accuracy, with emphasis on the trade-off between them. An
+optimization is not treated as beneficial solely because it accelerates execution; it must also maintain sufficient
+model quality for practical deployment.
 
 \section{Methodological Summary}
 
-The methodology combines baseline benchmarking, bottleneck analysis, framework comparison, numerical optimization, structural simplification, and low-level backend customization. The goal is not only to identify the fastest deployment configuration for YOLOv8n, but also to understand which classes of optimization are most effective on edge-oriented hardware and under which conditions they provide measurable benefit.
+The methodology combines baseline benchmarking, bottleneck analysis, framework comparison, numerical optimization,
+structural simplification, and low-level backend customization. The goal is not only to identify the fastest deployment
+configuration for YOLOv8n, but also to understand which classes of optimization are most effective on edge-oriented
+hardware and under which conditions they provide measurable benefit.
 
-Figure~\ref{fig:thesis_scope} summarizes the scope of the study and the main experimental directions considered in this thesis.
+The full implementation, including pruning scripts, quantization pipelines, TVM compilation workflows, and the custom
+TensorRT plugin, is available as an open-source repository~\cite{bukueva2026thesis}.
+
+Figure~\ref{fig:thesis_scope} summarizes the scope of the study and the main experimental directions considered in
+this thesis.
 
 \begin{figure}[ht]
 \centering
@@ -3045,7 +2642,7 @@ Detailed per-layer benchmarking results are provided in Appendix~\ref{chap:appen
 %        \label{fig:roofline_mac_mps}
 %    \end{figure}
 
-\section{Performance Comparison}
+\section{Compiler Performance Comparison}
 
 
 We evaluated the performance of YOLOv8n models on two hardware platforms: the NVIDIA Orin Nano and the
@@ -3114,183 +2711,61 @@ although it typically requires more manual tuning and expertise.
 
 \subsection{TVM MetaSchedule Tuning}
 
-Unlike the other evaluated deployment frameworks, TVM does not rely only on a
-fixed set of pre-implemented backend optimisations. Instead, it exposes the
-execution schedule itself as an optimisation problem and searches for
-hardware-specific implementations of individual operators. In practice, this
-means that TVM requires an additional tuning stage before final compilation, in
-which candidate schedules are generated, measured on the target device, and
-ranked according to their runtime performance. This makes TVM fundamentally
-different from frameworks such as ONNX Runtime, LiteRT, or PyTorch eager mode,
-which mainly depend on predefined kernels and runtime-level optimisations.
-
-For this reason, the TVM results are discussed separately from the general
-framework comparison. The purpose of the following subsection is not only to
-report the final benchmark numbers, but also to analyse how MetaSchedule
-improved the execution of YOLOv8n, which operators benefited most from tuning,
-and where the main remaining bottlenecks are. This additional discussion is
-important because, in the case of TVM, the observed inference performance is
-directly shaped by the quality of the schedule search rather than by the
-default behaviour of a fixed runtime backend.
+Unlike other evaluated frameworks, TVM requires an explicit tuning stage before deployment: MetaSchedule generates
+candidate schedules for each extracted operator task, evaluates them on the target device, and compiles the
+best-performing implementations into a final binary.
+The following subsections report the tuning outcome for each platform and precision, covering which operators
+benefited most and where the main performance limits lie.
 
 \subsection{TVM MetaSchedule Tuning Results on Raspberry Pi~5 - FP32}
 
-TVM MetaSchedule was evaluated on the Raspberry Pi~5 (4-core Cortex-A76,
-AArch64, 2.4\,GHz) using the full YOLOv8n inference graph imported through the
-Relax frontend. The tuning run lasted approximately 6 hours and 15 minutes,
-during which TVM explored 7\,221 valid schedules across 65 extracted operator
-tasks. The resulting tuned model achieved a summed task latency of 173.6\,ms,
-while the measured end-to-end inference latency was approximately 185--188\,ms.
-The difference can be attributed to runtime overhead outside the tuned kernels,
-including Python execution, input preparation, and postprocessing in the
-detection head.
+TVM MetaSchedule was run on the Raspberry Pi~5 (4-core Cortex-A76, AArch64, 2.4\,GHz) for approximately
+6 hours and 15 minutes, evaluating 7\,221 valid schedules across 65 operator tasks extracted from the
+YOLOv8n Relax graph.
+The tuned model achieved a summed task latency of 173.6\,ms and an end-to-end latency of approximately
+185--188\,ms, with the small gap attributable to runtime overhead outside the tuned kernels (input
+preparation, NMS postprocessing).
+Against the 290.1\,ms PyTorch eager baseline, the end-to-end result of approximately 192\,ms corresponds
+to a $1.5\times$ improvement.
 
-\paragraph{General Tuning Behaviour.}
-The tuning results show that TVM was able to improve the execution of the
-convolution-heavy parts of the network through schedule search and cache-aware
-tiling. However, no task in this run could be tensorised into a dedicated ARM
-intrinsic pattern. In practice, this means that the observed performance gains
-came mainly from improved loop ordering, tiling, and LLVM-driven vectorisation,
-rather than from explicitly tensorised micro-kernel generation. This is an
-important observation because it highlights both the strength and the
-limitations of the current FP32 compilation path on Raspberry Pi~5: TVM can
-still produce competitive schedules, but it does not yet exploit the hardware
-as fully as a tensorised implementation would.
+FP32 tuning on this platform did not enable tensorisation: no task could be mapped to a dedicated ARM
+intrinsic, so all performance gains came from cache-blocking, loop reordering, and LLVM auto-vectorisation.
+$1{\times}1$ convolutions in the neck and detection head performed best, reaching above 80\,GFLOPS because
+their simpler structure maps naturally to vectorised execution.
+Larger $3{\times}3$ convolutions in the mid-network also improved once channel dimensions were wide enough
+to sustain cache-resident working sets.
 
-\paragraph{Best-Performing Operators.}
-The highest efficiency was achieved by $1{\times}1$ convolutions, particularly
-in the neck and detection head. These layers are structurally simpler than
-$3{\times}3$ convolutions and map more naturally to vectorised execution, which
-allowed them to reach throughput above 80\,GFLOPS in the best cases. Several
-mid-network $3{\times}3$ convolutions also performed well once the channel
-dimensions became sufficiently large. For such layers, the tuned schedules were
-able to keep the working set in cache and reduce memory traffic, which is
-especially important on a bandwidth-constrained CPU platform.
-
-\paragraph{Main Bottlenecks.}
-The weakest-performing operator was the initial stem convolution. Although its
-FLOP count is relatively modest, it operates on a very large spatial input and
-only three input channels, resulting in poor arithmetic intensity and limited
-opportunity for data reuse. Consequently, it consumed a disproportionately
-large share of inference time. Other early-stage $3{\times}3$ convolutions with
-low channel counts and large feature maps showed similar behaviour. In
-addition, the softmax operation in the detection head remained highly
-inefficient, not because of high computational complexity, but because it is
-dominated by repeated memory accesses and reductions rather than dense
-arithmetic.
-
-\paragraph{Weighted Bottleneck Analysis.}
-A per-layer view alone does not fully capture the true runtime bottlenecks of
-YOLOv8n. Some convolution tasks appear multiple times in the graph, especially
-inside repeated C2f blocks, and therefore contribute much more to total
-inference time than their individual latency would suggest. In the tuned model,
-several repeated $3{\times}3$ convolutions in the backbone and neck became the
-dominant contributors to total runtime once their multiplicity was taken into
-account. This confirms that tuning effort should be focused not only on the
-slowest individual operators, but also on operators that are executed many
-times.
-
-\paragraph{Overall Assessment.}
-Overall, the tuned TVM model reached an end-to-end latency of about 192\,ms on
-Raspberry Pi~5, compared with approximately 290.1\,ms for PyTorch eager mode
-under comparable conditions. The improvement appears to come mainly from better
-cache-aware scheduling of convolution layers, particularly the more expensive
-$3{\times}3$ operators in the middle of the network.
-
-At the same time, the results also highlight the limitations of FP32 tuning on
-this platform. While MetaSchedule improved many layers, the absence of
-tensorisation meant that the performance gains remained incremental rather than
-transformative. The most difficult kernels were the early low-channel
-convolutions, where memory access patterns dominate and schedule search alone
-has limited effect. Therefore, the main conclusion is that TVM tuning is
-beneficial on Raspberry Pi~5, but the achievable gains in FP32 remain bounded.
-Larger improvements would likely require either a more targeted tuning budget
-for the most expensive tasks or a reduced-precision compilation path such as
-FP16.
+The main bottleneck was the initial stem convolution, which processes a 640$\times$640 spatial input with
+only three input channels.
+This combination yields very low arithmetic intensity that schedule search cannot fundamentally overcome.
+When operator multiplicity is accounted for, repeated $3{\times}3$ convolutions inside C2f blocks contributed
+more to total runtime than any individually slow operator, confirming that tuning effort is best directed at
+frequently executed kernels rather than the single worst-performing layer.
+The overall conclusion is that FP32 TVM tuning is beneficial on the Raspberry Pi~5, but gains are bounded
+by the absence of tensorisation; a qualitative improvement requires FP16.
 
 \subsection{TVM MetaSchedule Tuning Results on the Jetson Orin Nano GPU - FP32}
 
-TVM MetaSchedule was evaluated on the NVIDIA Jetson Orin Nano GPU using the
-full YOLOv8n inference graph imported through the Relax frontend.
-TVM explored 7\,257 valid
-schedules across the same 65 extracted operator tasks. The resulting tuned model
-achieved a summed task latency of 22\,920\,$\mu$s, while the measured end-to-end
-inference latency was 23.38\,ms. The difference between these values was small,
-indicating that the tuned kernel execution accounted for almost all of the
-observed runtime.
+On the Jetson Orin Nano GPU, MetaSchedule explored 7\,257 valid schedules across the same 65 operator tasks.
+The tuned model achieved a summed task latency of 22\,920\,$\mu$s and an end-to-end latency of 23.38\,ms,
+with tuned kernels accounting for almost all of the observed runtime.
+Compared with the Raspberry Pi~5 CPU result, this corresponds to a \(7.6\times\) kernel-level speedup,
+confirming the expected advantage of GPU execution for convolution-dominated inference.
 
-Compared with the Raspberry Pi~5 CPU result of 173\,591\,$\mu$s summed task
-latency, the GPU tuning result corresponds to a kernel-level speedup of
-approximately \(7.6\times\). This confirms that the transition from CPU to GPU
-substantially accelerated the convolution-dominated parts of the model, even
-though the graph structure and extracted operator tasks remained unchanged.
+As in the FP32 CPU case, no task could be tensorised: the GPU benefited from CUDA-specific schedule
+parameters (thread-block structure, tiling, memory movement patterns) rather than from Tensor Core mapping.
+Unlike the CPU, where $1{\times}1$ convolutions were most efficient, the GPU performed best on large
+mid-network $3{\times}3$ convolutions with high channel counts: the best-performing task reached
+585.6\,GFLOPS, and several others exceeded 500\,GFLOPS, because the larger working sets gave the GPU
+enough parallel work to amortise memory movement.
 
-\paragraph{General Tuning Behaviour.}
-The tuning results show that TVM was able to improve execution on the GPU by
-searching over CUDA-specific schedule parameters such as thread-block structure,
-tiling configuration, and memory movement patterns. However, as in the CPU case,
-no task in this run could be tensorised into a dedicated intrinsic pattern. In
-practice, this means that the observed gains came from improved CUDA scheduling
-rather than from an explicit tensor-core-style mapping. This is an important
-observation, because it highlights both the strength and the limitation of the
-current FP32 GPU compilation path: TVM can still generate competitive CUDA
-schedules, but it does not yet exploit all hardware-specific acceleration paths
-that may be available on the platform.
-
-\paragraph{Best-Performing Operators.}
-The most efficient GPU kernels were large mid-network \(3{\times}3\)
-convolutions, particularly those in repeated C2f blocks and in the neck. Unlike
-the CPU case, where \(1{\times}1\) convolutions achieved the highest
-throughput, the GPU benefited most from larger dense convolutional operators
-with sufficiently high channel counts to expose substantial parallelism. The
-best-performing task reached 585.6\,GFLOPS, while several other large
-\(3{\times}3\) convolutions exceeded 500\,GFLOPS. These results indicate that
-once the working set becomes large enough, the GPU can effectively amortise
-memory movement and keep a large number of execution units occupied.
-
-\paragraph{Main Bottlenecks.}
-The weakest-performing convolution remained the initial stem layer. Although it
-benefited substantially from GPU acceleration compared to the CPU, it still
-achieved much lower efficiency than the large mid-network operators. The reason
-is structural: the layer has only three input channels and a very large spatial
-resolution, which limits arithmetic intensity and reduces the amount of useful
-parallel work available per memory access. Several other early-stage
-\(3{\times}3\) convolutions with low channel counts showed similar behaviour.
-
-The softmax operation in the detection head also remained inefficient. Its
-absolute latency was much lower than on the CPU, but its achieved throughput
-was still very small compared with dense convolutions. This indicates that the
-operation remained dominated by reductions and repeated memory access rather
-than by highly parallel arithmetic.
-
-\paragraph{Weighted Bottleneck Analysis.}
-As in the CPU analysis, a per-layer view alone does not fully capture the true
-runtime bottlenecks of YOLOv8n. Several convolution tasks appear multiple times
-in the graph, especially inside repeated C2f blocks, and therefore contribute
-more to total inference time than their individual latency would suggest. On the
-GPU, the dominant weighted bottlenecks were again repeated \(3{\times}3\)
-convolutions in the backbone and neck. In particular, task~50
-(\path{conv2d24}) contributed the largest weighted latency, followed by
-task~16 (\path{conv2d11}), which appeared seven times in the graph. This is
-qualitatively similar to the CPU case: the most important optimisation targets
-are not necessarily the single slowest kernels, but rather the kernels that are
-executed many times.
-
-\paragraph{Overall Assessment.}
-Overall, the tuned TVM model reached an end-to-end latency of 23.38\,ms on the
-Jetson Orin Nano GPU, compared with approximately 25.12\,ms for PyTorch eager
-mode under comparable conditions. This means that TVM provided a measurable but
-modest improvement over the baseline GPU execution path.
-At the same time, the results also highlight the remaining limitations of the
-current FP32 TVM GPU path. While MetaSchedule reduced the latency of the
-convolution-heavy parts of the model substantially relative to the CPU, the
-absence of tensorisation meant that the gains remained bounded relative to the
-best available inference engine. In this experiment, TensorRT remained
-significantly faster at 11.38\,ms, indicating that additional performance is
-still available beyond the schedules found by MetaSchedule. Therefore, the main
-conclusion is that TVM tuning is effective on the Jetson Orin Nano GPU and
-produces a strong result, but in FP32 it remains a competitive general solution
-rather than the fastest deployment path for this workload.
+The stem layer and early low-channel convolutions remained the weakest operators for the same structural
+reason as on the CPU: three input channels over a large spatial resolution limits arithmetic intensity.
+When multiplicity is taken into account, task~50 (\path{conv2d24}) and task~16 (\path{conv2d11}, appearing
+seven times in the graph) were the dominant weighted bottlenecks.
+The final end-to-end result of 23.38\,ms was only a modest improvement over the PyTorch eager baseline
+(25.12\,ms), and TensorRT remained substantially faster at 11.38\,ms.
+This confirms that FP32 GPU tuning without tensorisation leaves significant performance on the table.
 
 \subsection{Raspberry Pi~5 Benchmark Overview - FP32}
 
@@ -3567,104 +3042,34 @@ its effect on latency, throughput, and overall deployment efficiency.
 
 \subsection{TVM MetaSchedule Tuning Results on the Jetson Orin Nano GPU - FP16}
 
-TVM MetaSchedule was evaluated a second time on the NVIDIA Jetson Orin Nano GPU
-using a float16 version of the YOLOv8n inference graph. The model was converted
-from the FP32 ONNX export using \path{onnxconverter-common} with
-\path{keep\_io\_types=False}, producing a graph in which the input, weights,
-and intermediate activations are represented in FP16. The Relax frontend
-imported this graph without further modification. During the tuning process, TVM
-explored 6\,477 valid schedules across 66 extracted operator tasks over
-approximately 18 hours. The resulting tuned model achieved a summed task latency
-of 9\,872\,$\mu$s, while the measured end-to-end inference latency was
-12.45\,ms. As in the FP32 case, the gap between the summed task latency and the
-measured end-to-end latency remained small, indicating that the tuned kernel
-execution accounted for most of the observed runtime.
+TVM MetaSchedule was re-run on the Jetson Orin Nano GPU using a FP16 version of the YOLOv8n graph,
+converted from the FP32 ONNX export using \path{onnxconverter-common} with \path{keep\_io\_types=False}.
+The tuning campaign ran for approximately 18 hours and explored 6\,477 valid schedules across 66 operator
+tasks.
+The tuned model achieved a summed task latency of 9\,872\,$\mu$s and an end-to-end latency of 12.45\,ms,
+corresponding to a \(2.3\times\) kernel-level improvement and a \(1.88\times\) end-to-end speedup over the
+FP32 result.
 
-Compared with the FP32 GPU tuning result of 22\,920\,$\mu$s summed task
-latency, the FP16 tuned model achieved a kernel-level improvement of
-approximately \(2.3\times\). At the end-to-end level, the improvement was also
-substantial: latency decreased from 23.38\,ms in FP32 to 12.45\,ms in FP16,
-corresponding to an end-to-end speedup of approximately \(1.88\times\). This
-result shows that reduced-precision compilation was not merely a small
-incremental optimisation, but a major change in the execution regime of the
-model on this platform.
+The critical difference from FP32 was that FP16 enabled tensorised execution via Warp Matrix Multiply-Accumulate (WMMA)
+on the Orin Nano GPU.
+In FP32, no task could be mapped to a hardware intrinsic and all schedules used standard CUDA thread-block
+tiling.
+In FP16, a large fraction of convolutional tasks were tensorised, raising peak operator throughput from
+585.6\,GFLOPS to 1\,872.7\,GFLOPS -- a \(3.2\times\) gain in peak kernel efficiency.
+The speedup therefore arose not only from halved data movement but from a qualitatively different
+optimisation path: MetaSchedule could now search over implementations that directly exploit the GPU's
+matrix-multiplication hardware.
 
-\paragraph{Tensorisation as the Main Structural Change.}
-The most important difference between the FP32 and FP16 tuning campaigns was
-that FP16 enabled tensorisation through Warp Matrix Multiply-Accumulate (WMMA)-style
-matrix operations on the Orin Nano GPU. In the FP32 campaign, no task could be mapped
-to a dedicated hardware intrinsic, and all schedules remained conventional CUDA
-thread-block implementations. In the FP16 campaign, by contrast, a large
-fraction of tasks could be mapped to tensorised execution. As a result, the
-optimisation problem changed qualitatively: instead of relying only on
-thread-block tiling and memory scheduling, MetaSchedule was able to search over
-implementations that directly exploited the GPU's matrix-multiplication
-hardware.
-
-This shift is clearly visible in the achieved arithmetic throughput. The peak
-throughput increased from 585.6\,GFLOPS in the FP32 campaign to
-1\,872.7\,GFLOPS in FP16, representing more than a \(3.2\times\) increase in
-peak operator efficiency. This confirms that the performance gain observed in
-FP16 was not only a consequence of reduced data size, but also of a more
-favourable optimisation path enabled by the lower-precision representation.
-
-\paragraph{Best-Performing Operators.}
-The best-performing tasks in the FP16 tuning campaign were large mid-network
-convolutions, especially fused operators in the backbone and neck. These layers
-benefited most from tensorised execution because their channel dimensions and
-spatial sizes were large enough to keep the available execution resources well
-utilised. The most efficient task reached 1\,872.7\,GFLOPS, while several
-others exceeded 1\,200\,GFLOPS. Compared with the FP32 results, this represents
-a substantial improvement in computational efficiency and confirms that the
-largest dense convolutions were the main beneficiaries of the FP16 compilation
-path.
-
-\paragraph{Main Bottlenecks.}
-Despite the overall improvement, the main bottlenecks remained qualitatively
-similar to those observed in FP32. The least efficient convolution was still
-the initial stem layer, whose very low input channel count limited its ability
-to benefit from tensorised execution. Even in FP16, this layer remained
-dominated by poor arithmetic intensity and limited data reuse, and therefore
-showed only modest improvement relative to the rest of the network. Several
-other early-stage convolutions with small channel counts exhibited similar
-behaviour.
-
-Non-convolutional operators in the detection path also remained relatively
-lightweight in absolute latency terms, but their optimisation potential was much
-smaller than that of the large mid-network convolutional kernels. As a result,
-the overall runtime distribution in FP16 became even more strongly concentrated
-in the repeated backbone and neck convolutions.
-
-\paragraph{Weighted Bottleneck Analysis.}
-As in the CPU and FP32 GPU analyses, per-task latency alone does not fully
-describe the runtime profile of YOLOv8n because some operators are executed
-multiple times in a single forward pass. When task multiplicity is taken into
-account, the dominant contributors to total runtime in FP16 remained repeated
-\(3{\times}3\) convolutions in the backbone and neck. In particular,
-task~50 (\path{conv2d24}) and task~16 (\path{conv2d11}) emerged as the most
-important weighted bottlenecks. The stem layer also remained a notable
-contributor because of its disproportionately high latency relative to its
-position in the graph. These results reinforce the conclusion that the most
-important optimisation targets are repeated mid-network convolutions rather than
-simply the single slowest layer.
-
-\paragraph{Overall Assessment.}
-Overall, the FP16 tuning campaign demonstrates that TVM MetaSchedule can exploit
-the Jetson Orin Nano GPU much more effectively in FP16 than in FP32. The
-end-to-end latency of the tuned TVM model decreased from 23.38\,ms in FP32 to
-12.45\,ms in FP16, while tuning time itself was reduced from 39 days to
-approximately 18 hours. The key structural reason for this improvement was that
-FP16 enabled tensorised execution for a large fraction of convolutional tasks,
-whereas FP32 did not. This establishes FP16 as the more appropriate precision
-target for TVM-based deployment of YOLOv8n on Orin-class hardware.
-
-At the same time, the results also show that the current FP16 TVM path still
-does not fully match the fastest available inference engine. Although TVM
-improved substantially and achieved a strong result, TensorRT remained faster in
-the final benchmark comparison. Therefore, the main conclusion is that FP16
-MetaSchedule tuning is highly effective on the Jetson Orin Nano GPU and
-substantially strengthens TVM's competitiveness, but it does not yet eliminate
-the remaining performance gap to the most specialised deployment backend.
+The main bottleneck pattern remained unchanged: the stem layer (3 input channels, 640$\times$640 spatial
+resolution) could not benefit from tensorisation and remained the least efficient individual operator even
+in FP16.
+When multiplicity is included, repeated backbone and neck convolutions -- notably task~50 (\path{conv2d24})
+and task~16 (\path{conv2d11}) -- again dominated total runtime.
+TensorRT remained faster at 6.31\,ms, indicating that vendor-specific optimisations still provide an
+additional margin beyond what MetaSchedule found.
+Nevertheless, FP16 tuning establishes TVM as a genuinely competitive deployment backend: it cut end-to-end
+latency from 23.38\,ms to 12.45\,ms, confirming FP16 as the appropriate precision target for TVM-based deployment
+on Orin-class hardware.
 
 \subsection{Jetson Orin Nano GPU Benchmark Overview - FP16}
 
@@ -3803,28 +3208,17 @@ as 16-bit floats. TVM was re-tuned on this model, yielding a separately compiled
 \path{.so} library. All other backends received the same FP16 ONNX as input.
 
 \paragraph{TVM FP16 Tuning Session.}
-TVM MetaSchedule tuned 65 operator tasks over approximately 4 hours and 6
-minutes - compared with 6 hours and 15 minutes for the FP32 campaign on the
-same graph. The faster convergence reflects the more distinct latency signal
-that FP16 kernels produce: once the vectoriser finds a schedule that fills the
-128-bit NEON (ARM Advanced SIMD extension) register with eight \path{float16} values instead of four
-\path{float32} values, the improvement is immediately visible and the tuner
-concentrates its remaining trials on refinement rather than exploration. A total
-of 6{,}477 valid schedule candidates were evaluated across all tasks.
-
-As in the FP32 CPU campaign, every task encountered the
-\path{workload cannot be tensorized} message from MetaSchedule, for the same
-structural reason: the three-dimensional reduction of a convolution
-(input channels, kernel height, kernel width) cannot be mapped onto the
-one-dimensional dot-product pattern required by the NEON intrinsic interface.
-The tuner therefore fell back to standard cache-blocked tiling with LLVM
-auto-vectorisation in all 65 tasks. At FP16, LLVM targets the
-\path{float16x8} NEON type on cortex-a76, doubling the number of values
-processed per vector instruction compared with the \path{float32x4} path used
-in FP32 tuning. The peak achieved throughput rose from 87.1\,GFLOPS in the
-FP32 session to 169.2\,GFLOPS in the FP16 session - a ratio of $1.94\times$,
-consistent with the theoretical $2\times$ benefit from halving the element
-width within a fixed 128-bit register.
+For TVM, the FP16 tuning campaign covered 65 operator tasks in approximately 4 hours and 6 minutes,
+compared with 6 hours and 15 minutes for FP32.
+The shorter run reflects the stronger latency signal from FP16 kernels: once LLVM finds a schedule that
+packs eight \path{float16} values into a 128-bit NEON (ARM Advanced SIMD extension) register rather than
+four \path{float32} values, the improvement is immediately visible and the tuner shifts to refinement
+instead of exploration.
+As in FP32, no task could be tensorised -- the three-dimensional convolution reduction (input channels,
+kernel height, kernel width) cannot be mapped to NEON's one-dimensional dot-product intrinsic -- so all
+schedules relied on cache-blocked tiling with \path{float16x8} auto-vectorisation.
+Peak operator throughput rose from 87.1\,GFLOPS (FP32) to 169.2\,GFLOPS (FP16), a \(1.94\times\) ratio
+consistent with the theoretical $2\times$ gain from halving element width within a fixed 128-bit register.
 
 \paragraph{End-to-End Benchmark Results.}
 Figure~\ref{fig:pi5_fp32_vs_fp16_results} visualises the successful FP16 runs
@@ -4598,7 +3992,7 @@ Table~\ref{tab:pruning_final_results} presents the three-way comparison.
 Benchmark: 200 timed runs, 30 warm-up iterations. Accuracy: COCO 2017 val.
 \emph{Stock baseline}: official Ultralytics YOLOv8n pretrained weights.
 \emph{Fine-tune base (unpruned)}: full-width YOLOv8n fine-tuned for 50 epochs on 1\,\% of
-COCO --- same training procedure as the pruned model but without channel removal; used as a
+COCO, same training procedure as the pruned model but without channel removal; used as a
 fair paired comparison.
 \emph{Pruned + fine-tuned}: structurally pruned model (selected channels removed) then
 fine-tuned for 50 epochs under the same schedule.}
@@ -4628,7 +4022,7 @@ hardware target and the benchmarking methodology: the RTX~3070 comparison used 2
 runs with 30 warm-up iterations under higher scheduling variance, whereas the Orin sweep
 used 300 runs after 100 warm-up iterations in a more controlled per-layer environment.
 
-\subsection{Discussion}
+\subsection{Summary}
 
 The pruning experiments produced a clear and consistent negative result: structured
 channel pruning of YOLOv8n does not yield meaningful latency reductions, whether measured
@@ -4683,26 +4077,18 @@ speedups observed in PyTorch, a substantial gain from that path is not expected.
 \section{GPU Kernel-Level Performance Analysis}
 \label{sec:gpu_kernel_analysis}
 
-Nsight Systems profiling was performed on the TensorRT FP32 engine for YOLOv8n on the Jetson Orin Nano
-(batch\,=\,1, 640$\times$640 input, raw inference without NMS post-processing).
-Each session used three warm-up passes to allow CUDA JIT compilation to complete before timing,
-followed by five timed runs.
-The kernel execution trace extracted from the profiling session shows that each inference cycle
-comprises 167 TRT inference kernels plus 3 device-to-host copy kernels for the output tensor,
-totalling 170 GPU kernel launches per cycle.
-The first warm-up run completed in 44.4\,ms due to CUDA JIT compilation of all kernel variants on
-first call, an 8.8$\times$ inflation over steady state, illustrating why multiple warm-up passes are
-essential before timing.
-The steady-state GPU execution time, taken as the median NVTX \path{ExecutionContext::enqueue}
-duration across the five timed runs, was 4.84\,ms per inference.
-The Python-level wall-clock median from this session was 17.97\,ms, measured with only 5 timed runs
-and 3 warm-up iterations using \path{tensorrt\_evaluation\_indiv.py}.
-The main benchmark results reported in Table~\ref{tab:orin_backend_benchmark} were produced by
-\path{tensorrt\_evaluation\_dual.py} with 200 timed runs and 30 warm-up iterations per repetition
-across 5 isolated repetitions, which yields a more stable estimate; those figures (11.38\,ms mean)
-should be treated as the authoritative latency reference.
-The nsys session here is used exclusively for kernel-level decomposition, not for
-absolute latency comparison.
+The TensorRT FP32 engine for YOLOv8n was profiled with Nsight Systems on the Jetson Orin Nano
+(batch\,=\,1, 640$\times$640 input, without NMS post-processing).
+The purpose of this session is to decompose GPU execution time by kernel category and identify
+overhead sources, not to measure absolute end-to-end latency.
+The authoritative latency figure (11.38\,ms mean) comes from the main benchmark in
+Table~\ref{tab:orin_backend_benchmark}, which used 200 timed runs across 5 isolated repetitions;
+the profiling session used only 5 timed runs to keep the trace file manageable.
+
+Each inference cycle launches 170 GPU kernels in total: 167 TensorRT inference kernels plus 3
+device-to-host copy kernels that transfer the output tensor back to the CPU.
+Three warm-up passes preceded the timed runs because the very first inference takes 44.4\,ms --
+an 8.8$\times$ overhead caused by CUDA compiling all kernel variants on their first call.
 
 \subsection{Kernel Category Breakdown}
 
