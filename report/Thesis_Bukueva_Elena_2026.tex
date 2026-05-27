@@ -234,8 +234,8 @@ of compiler-aware optimization for edge AI, using YOLOv8n object detection on tw
 NVIDIA Jetson Orin Nano and the Raspberry Pi 5 as a concrete case study.
 
 A wide range of optimization strategies is evaluated through five inference frameworks (TensorRT, Apache TVM,
-ONNX Runtime, Google LiteRT (Tensorflow Lite), and torch.compile), two reduced-precision paths
-(FP16 and INT8),
+ONNX Runtime, Google LiteRT (Tensorflow Lite), and torch.compile) compared to the Pytorch Eager Mode,
+two reduced-precision paths (FP16 and INT8),
 structured channel pruning with retraining, and activation function substitution. The experimental design includes
 isolated subprocess-based repetitions, warm-up runs, confidence intervals, and power measurements for each benchmark,
 enabling direct comparison across frameworks and hardware targets. Roofline analysis classifies per-layer execution
@@ -272,64 +272,62 @@ Taken together, the results demonstrate that deployment framework selection, pre
 hardware alignment, not model size alone, are the dominant factors governing inference efficiency on edge
 hardware.
 
-\textcolor{red}{Disclaimer: This thesis is shared as a draft for review and is still under development. Several
-sections are not yet finalized. In particular, parts of the introduction remain incomplete, including the final
-formulation of the contributions and thesis structure. The literature review chapter is still being revised and
-expanded. The Norwegian summary has not yet been completed. Parts of the results chapter still require restructuring
-and refinement. In addition, some figures, tables, references, appendices, and formatting elements may still
-contain placeholders, inconsistencies, or rendering artifacts. Final revision of the text, structure, and presentation
-will be completed during the concluding phase of the thesis work.}
-
 \begin{otherlanguage}{norwegian}
 \chapter*{Sammendrag}
 \addcontentsline{toc}{chapter}{Sammendrag}
 
-Effektiv utrulling av dyplæringsmodeller på kantmaskinvare er ikke utelukkende et spørsmål om modellstørrelse.
-Inferensytelse bestemmes av samspillet mellom modellarkitektur, numerisk presisjon og i hvilken grad
-inferensrammeverket kan utnytte målmaskinvaren.
-Denne avhandlingen presenterer en systematisk, målebasert studie av kompilatorbevisst optimalisering for kant-AI,
-med YOLOv8n objektdeteksjon på to representative kantplattformer, NVIDIA Jetson Orin Nano og Raspberry Pi~5,
-som konkret kasusstudie.
 
-Et bredt spekter av optimaliseringsstrategier evalueres gjennom fem inferensrammeverk
-(TensorRT, Apache TVM med MetaSchedule-autotuning, ONNX Runtime, Google LiteRT og \texttt{torch.compile}),
-to presisjonsnivåer (FP16 og INT8), strukturell kanalbeskjæring med ettertrening,
-og substitusjon av aktiveringsfunksjon.
-Det eksperimentelle opplegget inkluderer isolerte kjøringer i egne delprosesser, oppvarmingskjøringer,
-konfidensintervaller og strømmålinger for hvert benkemål,
-noe som muliggjør direkte sammenligning på tvers av rammeverk og maskinvareplattformer.
-Roofline-analyse brukes til å klassifisere kjøreregimer per lag, og GPU-kjerneprofil\-ering med Nsight Systems
-brukes til å dekomponere TensorRT FP32-motoren i konkrete overheadkategorier.
-Profileringen viser at kun 59\,\% av motortiden brukes på nyttige konvolusjonsberegninger.
-De resterende 41\,\% fordeler seg på tre identifiserbare kilder: usammenslåtte SiLU-aktiveringer (19\,\%),
-eksplisitte minnekopieringsnoder ved C2f-kanalsplitgrensene (6{,}7\,\%), og interne NCHW$\to$kCHW32-formatkonverteringer
-i C2f-undergrafen (17\,\% av ryggradets konvolusjonstid).
-Disse funnene motiverte utviklingen av en tilpasset TensorRT-plugin som erstatter hele C2f-undergrafen med én enkelt
-ugjennomsiktig node og eliminerer formatgrensen som standard eksport ikke kan løse automatisk.
-Pluginen fjernet den strukturelle overheaden, men gevinsten ble motsvart av tapet av TensorRTs Tensor Core-kjerner,
-slik at den totale inferenstiden ikke ble forbedret sammenlignet med standardmotoren.
+Effektiviteten til deep learning modeller
+implementert på kantmaskinvare er ikke utelukkende et spørsmål om
+modellstørrelse. Inferensytelse bestemmes av samspillet mellom
+modellarkitektur, numerisk presisjon og i hvilken grad inferensrammeverket kan
+utnytte den anvendte maskinvaren. Denne avhandlingen presenterer en
+systematisk, testbasert studie av kompilatorbasert optimalisering for kant-AI,
+med bruk av YOLOv8n objektdeteksjon på to representative kantplatt-former,
+NVIDIA Jetson Orin Nano og Raspberry Pi 5, som konkret kasusstudie.
 
-Resultatene avdekker flere ikke-åpenbare funn.
-På Raspberry Pi~5 oppnår LiteRT INT8 31\,ms inferenstid, en $9{,}4\times$ reduksjon sammenlignet med
-290\,ms for PyTorch eager-basislinjen, noe som viser at riktige utrullingsvalg betyr langt mer enn
-arkitektoniske endringer for denne klassen maskinvare.
-TVM MetaSchedule var det eneste rammeverket som oppnådde ekte FP16-akselerasjon på ARM-CPU og
-reduserte ventetiden til 122\,ms, mens alle andre rammeverk enten ble tregere eller feilet
-på grunn av manglende halvpresisjonskjerner.
-På Orin Nano oppnådde TVM i FP16 12{,}5\,ms gjennom WMMA-tensorisering, noe som er 26\,\% raskere
-enn ONNX Runtime og nærmer seg TensorRT (6{,}3\,ms).
-Profileringen avslørte videre at SiLU-aktiveringer ikke sammenslås med konvolusjoner av TensorRT, i motsetning
-til ReLU, et funn med direkte implikasjoner for arkitekturvalg på ressursbegrensede plattformer.
-Strukturell kanalbeskjæring viste seg å være ineffektivt som frittstående strategi: et systematisk søk
-gjennom 298 lagkonfigurasjoner fant ingen enkeltbeskåret modell med mer enn $1{,}04\times$ hastighetsøkning,
-og det beste flerl\-ags\-resultatet med ettertrening ga kun 2{,}3\,\% redusert ventetid til en kostnad
-av 4{,}0\,\% lavere mAP50-95.
-Dette bekrefter at kanalreduksjoner ikke gir proporsjonal tidsgevinst når cuDNNs kjernekornstørrelse
-er grovere enn de anvendte reduksjonene.
+Et bredt spekter av optimaliseringsstrategier evalueres gjennom fem inferensrammeverk (TensorRT,
+Apache TVM med MetaSchedule-autotuning, ONNX Runtime, Google LiteRT og
+torch.compile) sammenlignet med PyTorch Eager Mode, to presisjonsnivåer (FP16 og INT8), strukturell
+kanalbeskjæring (pruning) med etterfølgende trening, og substitusjon av
+aktiveringsfunksjon. Det eksperimentelle opplegget inkluderer isolerte
+kjøringer i egne delprosesser, oppstartkjøringer, konfidensintervaller og måling
+av forbrukt energi for hvert referansemåling, noe som muliggjør direkte sammenligning
+på tvers av rammeverk og maskinvareplattformer. Roofline-analyse brukes til å
+klassifisere kjøreregimer per lag, og GPU-kjerneprofilering med Nsight Systems
+brukes til å bryte ned TensorRT FP32-brukes på nyttige konvolusjonsberegninger.
+De resterende 41\% fordeler seg på tre identifiserbare kilder: usammenslåtte
+SiLU-aktiveringer (19\%), eksplisitte minnekopieringsnoder ved
+C2f-kanalsplitgrensene (6,7\%), og interne NCHW→kCHW32-formatkonverteringer i
+C2f-undergrafen (17\% av backbone konvolusjonstid). Disse funnene motiverte
+utviklingen av en tilpasset TensorRT-plugin som erstatter hele C2f-undergrafen
+med en enkelt ``svart'' node og eliminerer format-grensen som standard eksport
+ikke kan løse automatisk. Pluginen fjernet den strukturelle overheaden, men
+gevinsten ble oppveid av tapet av TensorRTs Tensor Core-kjerner, slik at den
+totale inferenstiden ikke ble forbedret sammenlignet med standardmotoren.
 
-Samlet sett viser resultatene at valg av inferensrammeverk, presisjonsstrategi og maskinvaretilpasning
-på lavt nivå, ikke modellstørrelsen alene, er de dominerende faktorene for inferenseffektivitet
-på kantmaskinvare.
+Resultatene avdekker flere overraskende
+funn. På Raspberry Pi 5 oppnår LiteRT INT8 31 ms inferenstid, en 9,4× reduksjon
+sammenlignet med 290 ms for PyTorch eager-basislinjen, noe som viser at riktige
+utrullingsvalg betyr langt mer enn arkitektoniske endringer for denne klassen
+maskinvare. TVM MetaSchedule var det eneste rammeverket som oppnådde ekte
+FP16-akselerasjon på ARM-CPU og reduserte ventetiden til 122 ms, mens alle
+andre rammeverk enten ble tregere eller feilet på grunn av manglende
+halvpresisjons konvulsjons-kjerner. På Orin Nano oppnådde TVM i FP16 12,5 ms
+gjennom WMMA-tensorisering, noe som er 26\% raskere enn ONNX Runtime og nærmer
+seg TensorRT (6,3 ms). Undersøkelsen avslørte videre at SiLU-aktiveringer ikke
+sammenslås med konvolusjoner av TensorRT, i motsetning til ReLU, et funn med
+direkte implikasjoner for arkitekturvalg på ressursbegrensede plattformer.
+Strukturell kanalbeskjæring viste seg å være ineffektivt som frittstående
+strategi: et systematisk søk gjennom 298 lagkonfigurasjoner fant ingen
+enkeltbeskåret modell med mer enn 1,04× hastighetsøkning, og det beste
+flerlagsresultatet med ny trening ga kun 2,3\% redusert ventetid til en kostnad
+av 4,0\% lavere mAP50-95. Dette bekrefter at kanalreduksjoner ikke gir proporsjonal tidsgevinst når cuDNNs
+kjernegranularitet er grovere enn de
+anvendte reduksjonene, og mere inngående arkitektonisk endring er nødvendig foren bedre komprimering.
+
+Samlet sett viser resultatene at valg av inferensrammeverk, presisjonsstrategi og maskinvaretilpasning på lavt nivå,
+ikke modellstørrelsen alene, er de dominerende faktorene for inferenseffektivitet på kantmaskinvare.
 
 \end{otherlanguage}
 
@@ -518,7 +516,7 @@ All latency and throughput experiments use batch size~1, reflecting a real-time,
 Throughput-optimised configurations with larger batch sizes are not evaluated.
 
 \item \textbf{Custom plugin scope.}
-The custom TensorRT plugin is developed and evaluated for the C2f block at model.2 (32-channel, 160$\times$160 spatial
+The custom TensorRT plugin is developed and evaluated for the C2f block at ``model.2" layer (32-channel, 160$\times$160 spatial
 resolution).
 The plugin is not generalised across all C2f instances in the network, and the implementation is fixed to FP32.
 
@@ -582,7 +580,7 @@ functions ReLU and SiLU.
 \item \textbf{Chapter~4 - Methodology} defines the experimental workflow, model selection rationale, baseline
 establishment procedure, and the evaluation criteria applied consistently across all experiments.
 
-\item \textbf{Chapter~5 - Testing and Results} presents the experimental results across all optimization strategies:
+\item \textbf{Chapter~5 - Experimental Evaluation} presents the experimental results across all optimization strategies:
 framework and precision benchmarks on both platforms, FP16 and INT8 inference results, accuracy comparison, structured
 pruning evaluation, GPU kernel-level profiling, the C2f TensorRT plugin, and the SiLU-to-ReLU activation substitution.
 
@@ -1931,7 +1929,7 @@ of reading/writing to/from memory or the computational speed overall.
         \includegraphics[width=0.8\linewidth]{pics/roofline_model_custom.pdf}
         \caption{A Roofline model illustrating performance limits based on compute capability
             (horizontal line) and memory bandwidth (sloped line) versus the arithmetic intensity
-            of operations (dots). Operations below the "roof" are limited by either memory
+            of operations (dots). Operations below the ``roof" are limited by either memory
             bandwidth or compute peak.}
         \label{fig:roofline}
     \end{figure}
@@ -2037,17 +2035,60 @@ effective computations, leading to improved inference performance.
 \chapter{Methodology}
 \noindent
 
-This chapter describes the methodology used to evaluate and optimize deep learning inference on edge-oriented hardware
-platforms. The study is centered on the YOLOv8n object detection model and investigates how compiler-based optimization
-frameworks, numerical precision reduction, structural model simplification, and low-level kernel customization affect
-inference performance and detection accuracy.
+This chapter describes the experimental design and procedures used to evaluate inference optimization
+of the YOLOv8n object detection model on two edge hardware platforms: the NVIDIA Jetson Orin Nano
+(GPU-class edge accelerator) and the Raspberry Pi~5 (ARM CPU-class single-board computer).
+The central research question is how different compiler-aware optimization strategies, spanning
+framework selection, numerical precision, structural model simplification, and low-level kernel
+customization, affect inference latency, energy consumption, and detection accuracy on
+resource-constrained hardware.
 
-The methodology is organized as a sequence of experimental stages. First, a baseline is established using the original
-FP32 PyTorch implementation of YOLOv8n. Next, bottlenecks are analyzed using hardware-aware performance models and
-profiling tools. Based on the observed limitations, several optimization directions are explored, including
-framework-level compilation, quantization, precision reduction, pruning, and custom TensorRT plugin development.
-Each optimization is evaluated with respect to latency, throughput, and accuracy in order to characterize the
-trade-offs between performance and model quality.
+The chapter covers model selection and justification, hardware and software platform configuration,
+baseline establishment, bottleneck characterization via Roofline analysis and profiling, and the
+design of each optimization experiment.
+The evaluated backends include TensorRT, Apache TVM with MetaSchedule auto-tuning, ONNX Runtime,
+and LiteRT (formerly TensorFlow Lite), applied at FP32, FP16, and INT8 precision where supported
+by the target platform.
+
+\section{Specification of the Scientific Work}
+
+The Experimental Evaluation chapter is organized as a progressive sequence of optimization steps applied
+to the YOLOv8n model across two target platforms: the Jetson Orin Nano GPU and the Raspberry Pi~5 CPU.
+
+The experiments begin with a Roofline analysis, which characterizes the computational and memory
+bandwidth limits of each platform and determines whether the unoptimized model is bottlenecked by
+arithmetic throughput or memory access.
+This establishes a theoretical bound on achievable inference performance and motivates the subsequent
+optimization directions.
+
+The second stage compares inference compiler performance in FP32 precision.
+TensorRT, ONNX Runtime, and Apache TVM are evaluated on both platforms.
+For TVM, this includes a full MetaSchedule auto-tuning campaign to ensure that measured latency
+reflects hardware-optimized kernel implementations rather than generic fallback schedules.
+Nsight Systems profiling is used to decompose GPU execution time by kernel category, revealing which
+compilation and scheduling strategies account for performance differences between frameworks.
+
+Precision reduction is then evaluated as a standalone optimization axis.
+FP16 and INT8 inference are measured for all applicable backends, with INT8 quantization performed
+using post-training calibration on a representative subset of the COCO training data.
+Results are reported not only in terms of latency but also in terms of detection accuracy (mAP) and
+power consumption, capturing the full accuracy--efficiency--energy trade-off.
+
+The fourth stage evaluates structural pruning of the model.
+A channel-level sensitivity analysis is performed to determine which layers tolerate channel reduction
+without disproportionate accuracy loss, followed by a full-model pruning experiment to quantify the
+achievable speedup from structural simplification.
+
+The fifth stage investigates whether manually replacing a bottleneck subgraph with a custom TensorRT
+plugin can reduce the overhead identified during profiling.
+The C2f block at model layer~2 is reimplemented as a hand-written cuDNN-based plugin, and the
+resulting latency and kernel execution profile are compared against the standard TensorRT engine.
+
+Finally, the effect of activation function choice is examined.
+SiLU activations are replaced with ReLU across the full model, and the impact on fusion quality,
+latency, and detection accuracy is evaluated across all backends and both platforms.
+
+
 
 \section{Model Selection}
 
@@ -2334,7 +2375,7 @@ this thesis.
 \end{figure}
 
 % ======= 6 Testing / Results (Vår uttesting / Resultater) =======
-\chapter{Testing and Results}
+\chapter{Experimental Evaluation}
 \noindent
 
 %\textcolor{red}{This chapter is currently in draft form and requires further structuring,
@@ -2920,10 +2961,10 @@ throughput per watt across the evaluated GPU backends.
     \centering
     \includegraphics[width=\textwidth]{pics/benchmarks/orin_fp32/orin_gpu_fp32_yolov8n_results_dark_sunset.pdf}
     \caption{YOLOv8n FP32 inference performance and power consumption on the NVIDIA Jetson Orin Nano GPU.
-    Subfigure\~(a) shows mean end-to-end inference latency with 95\% confidence interval error bars.
-    Subfigure\~(b) reports mean board power consumption, with error bars indicating standard deviation.
-    Subfigure\~(c) summarizes the latency--power trade-off, where lower latency and lower power are preferable.
-    Subfigure\~(d) shows energy efficiency in terms of throughput per watt.
+    Subfigure~(a) shows mean end-to-end inference latency with 95\% confidence interval error bars.
+    Subfigure~(b) reports mean board power consumption, with error bars indicating standard deviation.
+    Subfigure~(c) summarizes the latency--power trade-off, where lower latency and lower power are preferable.
+    Subfigure~(d) shows energy efficiency in terms of throughput per watt.
     TensorRT achieves the lowest latency and the highest energy efficiency among the evaluated FP32 GPU backends,
         while torch.compile is substantially slower despite lower power draw.}
     \label{fig:orin_yolov8n_fp32_results}
